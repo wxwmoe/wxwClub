@@ -51,7 +51,6 @@ function controller() {
                                         $pdo = $db->prepare('insert into `activitys`(`cid`,`uid`,`type`,`activity_id`,`object`)'.
                                             ' select `cid`, :uid as `uid`, :type as `type`, :activity_id as `activity_id`, :object as `object` from `clubs` where `name` = :club');
                                         $pdo->execute(['club' => $club, 'uid' => $actor['uid'], 'type' => 'Announce', 'activity_id' => $activity_id, 'object' => $jsonld['object']['id']]);
-                                        if ($config['nodeOutboxLogs']) file_put_contents('outbox_logs/'.$club.'_'.date("Y-m-d_H:i:s").'_Announce.json', $outbox);
                                     }
                                 } break;
                             
@@ -112,7 +111,6 @@ function controller() {
                                             foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $inbox) ActivityPub_POST($inbox, $club, $outbox);
                                             $pdo = $db->prepare('delete from `activitys` where `id` = :activity');
                                             $pdo->execute([':activity' => $activity['id']]);
-                                            if ($config['nodeOutboxLogs']) file_put_contents('outbox_logs/'.$club.'_'.date("Y-m-d_H:i:s").'_Undo.json', $outbox);
                                         } break;
                                     
                                     case null:
@@ -126,7 +124,6 @@ function controller() {
                             
                             default: break;
                         }} else json_output(['message' => 'Request is invalid'], 0, 400);
-                        if ($config['nodeInboxLogs']) file_put_contents('inbox_logs/'.$club.'_'.date("Y-m-d_H:i:s").'_'.$jsonld['type'].'.json', $input);
                     } else header('Location: '.$club_url); break;
                 
                 case null:

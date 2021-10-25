@@ -14,8 +14,6 @@
     'nodeName' => 'example.com',
     'maintainer' => ['name' => '@admin', 'email' => 'support@example.com'],
     'nodeDescription' => 'A simple groups instance compatible with ActivityPub.',
-    'nodeInboxLogs' => false,
-    'nodeOutboxLogs' => false,
     'openRegistrations' => true,
     'nodeSuspendedName' => ['yourgroupname']
 ];
