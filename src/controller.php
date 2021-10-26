@@ -27,7 +27,7 @@ function controller() {
                     if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_SERVER['HTTP_CONTENT_TYPE'] == 'application/activity+json') {
                         $jsonld = json_decode(($input = file_get_contents('php://input')), 1);
                         if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base'] &&
-                        ($jsonld['type'] == 'Delete' || $actor = Club_Get_Actor($jsonld['actor']))) { switch ($jsonld['type']) {
+                        ($jsonld['type'] == 'Delete' || $actor = Club_Get_Actor($jsonld['actor'], $club))) { switch ($jsonld['type']) {
                             case 'Create':
                                 $pdo = $db->prepare('select `id` from `activitys` where `object` = :object');
                                 $pdo->execute([':object' => $jsonld['object']['id']]);

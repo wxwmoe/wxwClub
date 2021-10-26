@@ -72,7 +72,7 @@ function Club_Create($club) {
     } return false;
 }
 
-function Club_Get_Actor($actor) {
+function Club_Get_Actor($actor, $club) {
     global $db; $pdo = $db->prepare('select `uid`,`name`,`inbox` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     if ($pdo = $pdo->fetch(PDO::FETCH_ASSOC)) {
