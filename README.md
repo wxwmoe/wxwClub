@@ -14,9 +14,9 @@ A simple groups instance compatible with ActivityPub.
   - 响应 关注 / 取消关注 请求
   - 转发收到的 公开 / 不公开 消息
   - 收到之前消息的删除通知时撤销转发
-- 单独的群组 Actor 支持修改
+- 单个群组 Actor 支持自定义修改
   - 个人资料页　头像、横幅、昵称
-  - 中文简介、英文简介、自定义简介
+  - 中文简介、英文简介、简介模板
 
 ### 待实现
 - Outbox 任务队列
