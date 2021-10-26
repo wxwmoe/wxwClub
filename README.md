@@ -1,6 +1,6 @@
 # wxwClub
 
-A simple groups instance compatible with ActivityPub.
+A simple social groups compatible with ActivityPub.
 
 > 项目仍在开发阶段，不建议用在生产环境 ...
 
@@ -21,6 +21,7 @@ A simple groups instance compatible with ActivityPub.
 
 ### 待实现
 - Outbox 任务队列
+- 完整 JSON-LD 实现
 - 私信修改 Actor 信息
 - RsaSignature2017 生成
 - 跨站消息 HTTP Signature 校验
