@@ -35,6 +35,9 @@ function controller() {
                                     if (in_array($club_url, $jsonld['cc']) && (in_array($public_streams, $jsonld['to']) || in_array($public_streams, $jsonld['cc']))) {
                                         list($msec, $time) = explode(' ', microtime());
                                         $activity_id = (string)sprintf('%.0f', (floatval($msec) + floatval($time)) * 1000);
+                                        $pdo = $db->prepare('insert into `activitys`(`cid`,`uid`,`type`,`activity_id`,`object`)'.
+                                            ' select `cid`, :uid as `uid`, :type as `type`, :activity_id as `activity_id`, :object as `object` from `clubs` where `name` = :club');
+                                        $pdo->execute(['club' => $club, 'uid' => $actor['uid'], 'type' => 'Announce', 'activity_id' => $activity_id, 'object' => $jsonld['object']['id']]);
                                         $outbox = json_encode([
                                             '@context' => 'https://www.w3.org/ns/activitystreams',
                                             'id' => $club_url.'/announce/'.$activity_id.'/activity',
@@ -48,9 +51,6 @@ function controller() {
                                         $pdo = $db->prepare('select distinct u.shared_inbox from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid where c.name = :club');
                                         $pdo->execute([':club' => $club]);
                                         foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $inbox) ActivityPub_POST($inbox, $club, $outbox);
-                                        $pdo = $db->prepare('insert into `activitys`(`cid`,`uid`,`type`,`activity_id`,`object`)'.
-                                            ' select `cid`, :uid as `uid`, :type as `type`, :activity_id as `activity_id`, :object as `object` from `clubs` where `name` = :club');
-                                        $pdo->execute(['club' => $club, 'uid' => $actor['uid'], 'type' => 'Announce', 'activity_id' => $activity_id, 'object' => $jsonld['object']['id']]);
                                     }
                                 } break;
                             
