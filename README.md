@@ -13,7 +13,8 @@ A simple groups instance compatible with ActivityPub.
 - 简单兼容 ActivityPub 协议
   - 响应 关注 / 取消关注 请求
   - 转发收到的 公开 / 不公开 消息
-  - 收到之前消息的删除通知时撤销转发
+  - 收到旧消息 Tombstone 时撤销转发
+  - 收到跨站用户 Delete 时清理关注关系
 - 单个群组 Actor 支持自定义修改
   - 个人资料页　头像、横幅、昵称
   - 中文简介、英文简介、简介模板
