@@ -144,6 +144,7 @@ function controller() {
                                 [':infoname_cn:', ':infoname_en:', ':local_domain:'],
                                 [$pdo['infoname_cn']?:$club, $pdo['infoname_en']?:$club, $config['base']],
                                 $config['default']['summary']),
+                            'url' => $club_url,
                             'icon' => [
                                 'type' => 'Image',
                                 'url' => $pdo['avatar'] ?: $config['default']['avatar'],
