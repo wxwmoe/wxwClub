@@ -9,6 +9,7 @@ A simple groups instance compatible with ActivityPub.
 ### 已实现
 
 - 兼容 WebFinger 查找
+- 兼容 Mastodon 安全模式
 - 简单兼容 ActivityPub 协议
   - 响应 关注 / 取消关注 请求
   - 转发收到的 公开 / 不公开 消息
