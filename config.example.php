@@ -1,19 +1,34 @@
 <?php $config = [
+    // 实例主域名
     'base' => 'example.com',
+    // 数据库信息
     'mysql' => [
+        // 数据库地址
         'host' => 'mysql',
+        // 数据库名称
         'database' => 'localhost',
+        // 数据库用户
         'username' => 'root',
+        // 数据库密码
         'password' => ''
     ],
+    // 默认模板
     'default' => [
+        // 头像外链
         'avatar' => 'https://fp1.fghrsh.net/2021/10/25/d4be74ddb653ac6cc0ade052c3541e05.png',
+        // 横幅外链
         'banner' => 'https://fp1.fghrsh.net/2021/10/25/86dbef8672928e061a5ce1e5722e8056.png',
+        // 简介模板
         'summary' => '<p>这是一个关于 :infoname_cn: 的群组，关注以获取群组推送，引用可以分享到群组。</p><p>I\'m a group about :infoname_en:. Follow me to get all the group posts. Tag me to share with the group.</p><p>创建新群组可以 搜索 或 引用 @新群组名@:local_domain:。</p><p>Create other groups by searching for or tagging @yourGroupName@:local_domain:</p>'
     ],
+    // 实例名称
     'nodeName' => 'example.com',
+    // 管理信息
     'maintainer' => ['name' => '@admin', 'email' => 'support@example.com'],
+    // 实例描述
     'nodeDescription' => 'A simple groups instance compatible with ActivityPub.',
+    // 开放新群组注册
     'openRegistrations' => true,
+    // 禁用的群组名称
     'nodeSuspendedName' => ['yourgroupname']
 ];
