@@ -32,7 +32,7 @@ function controller() {
                                 $pdo = $db->prepare('select `id` from `activitys` where `object` = :object');
                                 $pdo->execute([':object' => $jsonld['object']['id']]);
                                 if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
-                                    if (in_array($public_streams, $jsonld['to']) || in_array($public_streams, $jsonld['cc'])) {
+                                    if (in_array($club_url, $jsonld['cc']) && (in_array($public_streams, $jsonld['to']) || in_array($public_streams, $jsonld['cc']))) {
                                         list($msec, $time) = explode(' ', microtime());
                                         $activity_id = (string)sprintf('%.0f', (floatval($msec) + floatval($time)) * 1000);
                                         $outbox = json_encode([
