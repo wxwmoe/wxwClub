@@ -163,7 +163,8 @@ function controller() {
                                 'id' => $club_url.'#main-key',
                                 'owner' => $club_url,
                                 'publicKeyPem' => $pdo['public_key']
-                            ]
+                            ],
+                            'endpoints' => ['sharedInbox' => $base.'/inbox']
                         ], 2);
                     } else {
                         $pdo = $db->prepare('select `cid`,`nickname`,`summary`,`infoname_cn`,`infoname_en`,`avatar`,`banner`,`create_time` from `clubs` where `name` = :club');
@@ -189,6 +190,9 @@ function controller() {
                 default: json_output(['message' => 'Error: Route Not Found!'], 0, 404); break;
                 
             }} else json_output(['message' => 'User not found'], 0, 404); break;
+        
+        case 'inbox':
+            break;
         
         case 'nodeinfo':
             json_output(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;
