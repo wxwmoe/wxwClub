@@ -93,7 +93,7 @@ function Club_Get_Actor($actor) {
             $pdo = $db->prepare('select `uid` from `users` where `name` = :name');
             $pdo->execute([':name' => $name]);
             $uid = $pdo->fetch(PDO::FETCH_ASSOC)['uid'];
-        } return false;
+        } else return false;
     } return ['uid' => $uid, 'name' => $name, 'inbox' => $inbox];
 }
 
