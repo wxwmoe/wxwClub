@@ -35,16 +35,16 @@
     ],
     // 实例名称
     'nodeName' => 'example.com',
-    // 管理信息
-    'nodeMaintainer' => ['name' => '@admin', 'email' => 'support@example.com'],
-    // 实例描述
-    'nodeDescription' => 'A simple social groups compatible with ActivityPub.',
     // 实例时区
     'nodeTimezone' => 'Asia/Shanghai',
     // 调试模式
     'nodeDebugging' => false,
-    // 开放新群组注册
-    'openRegistrations' => true,
+    // 管理信息
+    'nodeMaintainer' => ['name' => '@admin', 'email' => 'support@example.com'],
+    // 实例描述
+    'nodeDescription' => 'A simple social groups compatible with ActivityPub.',
     // 禁用的群组名称
-    'nodeSuspendedName' => ['yourgroupname']
+    'nodeSuspendedName' => ['yourgroupname'],
+    // 开放新群组注册
+    'openRegistrations' => true
 ];

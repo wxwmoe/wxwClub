@@ -130,7 +130,7 @@ function controller() {
                     $pdo = $db->prepare('select `nickname`,`infoname`,`summary`,`avatar`,`banner`,`public_key`,`create_time` from `clubs` where `name` = :club');
                     $pdo->execute([':club' => $club]);
                     $pdo = $pdo->fetch(PDO::FETCH_ASSOC);
-                    $nametag = array_merge(json_decode($pdo['infoname'], 1) ?: [], $config['default']['infoname']);
+                    $nametag = array_merge($config['default']['infoname'], json_decode($pdo['infoname'], 1) ?: []);
                     $summary = $pdo['summary'] ?: Club_NameTag_Render($club, $config['default']['summary'], $nametag);
                     $nickname = $pdo['nickname'] ?: Club_NameTag_Render($club, $config['default']['nickname'], $nametag);
                     if (strpos($_SERVER['HTTP_ACCEPT'], 'json')) {
