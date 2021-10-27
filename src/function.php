@@ -28,7 +28,7 @@ function ActivityPub_CURL($date) {
     $curl = new Curl();
 	$curl->setTimeout(100);
 	$curl->setMaximumRedirects(3);
-    $curl->setUserAgent('wxwClub/'.$ver.'; +'.$base.'/; ActivityPub');
+    $curl->setUserAgent('wxwClub '.$ver.'; '.$base);
     $curl->setHeader('Accept', 'application/activity+json');
     $curl->setHeader('Content-Type', 'application/activity+json');
     $curl->setHeader('Date', $date);
@@ -72,7 +72,7 @@ function Club_Create($club) {
     } return false;
 }
 
-function Club_Get_Actor($actor, $club) {
+function Club_Get_Actor($club, $actor) {
     global $db; $pdo = $db->prepare('select `uid`,`name`,`inbox` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     if ($pdo = $pdo->fetch(PDO::FETCH_ASSOC)) {
@@ -97,7 +97,32 @@ function Club_Get_Actor($actor, $club) {
     } return ['uid' => $uid, 'name' => $name, 'inbox' => $inbox];
 }
 
-function json_output($data, $format = 0, $status = 200) {
+function Club_Push_Activity($club, $activity, $inbox = false) {
+    global $db, $config;
+    $type = $activity['type'];
+    $activity = Club_Json_Encode($activity);
+    if ($config['nodeDebugging']) {
+        $file_name = date('Y-m-d_H:i:s_').$club.'_'.$type;
+        file_put_contents('outbox_logs/'.$file_name.'_output.json', $activity);
+        file_put_contents('outbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+    }
+    $pdo = $db->prepare('select distinct u.shared_inbox from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid where c.name = :club');
+    $pdo->execute([':club' => $club]);
+    if ($inbox) ActivityPub_POST($inbox, $club, $activity);
+    else foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $inbox) ActivityPub_POST($inbox, $club, $activity);
+}
+
+function Club_NameTag_Render($club, $str, $tag) {
+    global $config;
+    $str = str_replace(array_keys($tag), array_values($tag), $str);
+    return str_replace([':club_name:', ':local_domain:'], [$club, $config['base']], $str);
+}
+
+function Club_Json_Encode($data) {
+    return json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+function Club_Json_Output($data, $format = 0, $status = 200) {
     switch ($format) {
         case 1: $format = 'jrd+json'; break;
         case 2: $format = 'activity+json'; break;
@@ -107,5 +132,5 @@ function json_output($data, $format = 0, $status = 200) {
     if ($status != 200) {
         http_response_code($status);
         $data = array_merge(['code' => $status], $data);
-    } echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    } echo Club_Json_Encode($data);
 }
