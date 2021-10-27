@@ -36,13 +36,13 @@ function controller() {
                             ($jsonld['type'] == 'Delete' || $actor = Club_Get_Actor($club, $jsonld['actor']))) { switch ($jsonld['type']) {
                                 
                                 case 'Create':
-                                    $pdo = $db->prepare('select `id` from `activitys` where `object` = :object');
+                                    $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
                                     $pdo->execute([':object' => $jsonld['object']['id']]);
                                     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
                                         if (in_array($club_url, $jsonld['cc']) && (in_array($public_streams, $jsonld['to']) || in_array($public_streams, $jsonld['cc']))) {
                                             list($msec, $time) = explode(' ', microtime());
                                             $activity_id = (string)sprintf('%.0f', (floatval($msec) + floatval($time)) * 1000);
-                                            $pdo = $db->prepare('insert into `activitys`(`cid`,`uid`,`type`,`activity_id`,`object`)'.
+                                            $pdo = $db->prepare('insert into `activities`(`cid`,`uid`,`type`,`activity_id`,`object`)'.
                                                 ' select `cid`, :uid as `uid`, :type as `type`, :activity_id as `activity_id`, :object as `object` from `clubs` where `name` = :club');
                                             $pdo->execute(['club' => $club, 'uid' => $actor['uid'], 'type' => 'Announce', 'activity_id' => $activity_id, 'object' => $jsonld['object']['id']]);
                                             Club_Push_Activity($club, [
@@ -87,7 +87,7 @@ function controller() {
                                 case 'Delete':
                                     if (isset($jsonld['object']['type'])) switch ($jsonld['object']['type']) {
                                         case 'Tombstone':
-                                            $pdo = $db->prepare('select `id`,`activity_id`,`object`,`create_time` from `activitys` where `object` = :object');
+                                            $pdo = $db->prepare('select `id`,`activity_id`,`object`,`create_time` from `activities` where `object` = :object');
                                             $pdo->execute([':object' => $jsonld['object']['id']]);
                                             if ($activity = $pdo->fetch(PDO::FETCH_ASSOC)) {
                                                 Club_Push_Activity($club, [
@@ -109,7 +109,7 @@ function controller() {
                                                         'object' => $activity['object']
                                                     ]
                                                 ]);
-                                                $pdo = $db->prepare('delete from `activitys` where `id` = :activity');
+                                                $pdo = $db->prepare('delete from `activities` where `id` = :activity');
                                                 $pdo->execute([':activity' => $activity['id']]);
                                             } break;
                                         
@@ -164,7 +164,7 @@ function controller() {
                                 'owner' => $club_url,
                                 'publicKeyPem' => $pdo['public_key']
                             ],
-                            //'endpoints' => ['sharedInbox' => $base.'/inbox']
+                            'endpoints' => ['sharedInbox' => $base.'/inbox']
                         ], 2);
                     } else {
                         echo '<title>',$nickname,' (@',$club,'@',$config['base'],')</title>',
@@ -174,9 +174,9 @@ function controller() {
                             '<h3 style="position:absolute;top:10px;left:68px">',$nickname,' (@',$club,'@',$config['base'],')</h3>',
                             '<div style="font-size:14px;line-height:10px">',$summary,'</div><p style="line-height:1px"><br></p></div>',
                             '<div style="font-size:14px;line-height:10px"><p>近 10 次活动：</p>';
-                        $activitys = $db->prepare('select `type`, `object`, `create_time` from `activitys` where `cid` = :cid order by `create_time` desc');
-                        $activitys->execute([':cid' => $pdo['cid']]);
-                        foreach ($activitys->fetchAll(PDO::FETCH_ASSOC) as $activity)
+                        $activities = $db->prepare('select `type`, `object`, `create_time` from `activities` where `cid` = :cid order by `create_time` desc');
+                        $activities->execute([':cid' => $pdo['cid']]);
+                        foreach ($activities->fetchAll(PDO::FETCH_ASSOC) as $activity)
                             echo '<p>',$activity['create_time'],': ',$activity['type'],' <a target="_blank" href="',$activity['object'],'">',$activity['object'],'</a></p>';
                         echo '</div>';
                     }

@@ -26,7 +26,7 @@ CREATE TABLE `users` (
   KEY `actor` (`actor`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE `activitys` (
+CREATE TABLE `activities` (
   `id` int NOT NULL AUTO_INCREMENT,
   `cid` int NOT NULL,
   `uid` int NOT NULL,
