@@ -34,6 +34,7 @@ class Curl {
 
     public $attempts = 0;
     public $retries = 0;
+    public $retryDecider = null;
     public $remainingRetries = 0;
 
     private $cookies = [];
@@ -202,6 +203,7 @@ class Curl {
     }
     
     private function parseHeaders($raw_headers) {
+        $http_headers = [];
         $raw_headers = preg_split('/\r\n/', (string)$raw_headers, -1, PREG_SPLIT_NO_EMPTY);
         $raw_headers_count = count($raw_headers);
         for ($i = 1; $i < $raw_headers_count; $i++) {
@@ -217,6 +219,7 @@ class Curl {
     }
     
     private function parseRequestHeaders($raw_headers) {
+        $first_line = $headers = $request_headers = [];
         list($first_line, $headers) = $this->parseHeaders($raw_headers);
         $request_headers['Request-Line'] = $first_line;
         foreach ($headers as $key => $value)
@@ -225,6 +228,8 @@ class Curl {
     }
     
     private function parseResponseHeaders($raw_response_headers) {
+        $response_header = '';
+        $first_line = $headers = $response_headers = [];
         $response_header_array = explode("\r\n\r\n", $raw_response_headers);
         for ($i = count($response_header_array) - 1; $i >= 0; $i--) {
             if (stripos($response_header_array[$i], 'HTTP/') === 0) {

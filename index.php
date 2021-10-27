@@ -1,8 +1,9 @@
 <?php
 require('config.php');
 require('src/controller.php');
-$ver = '0.0.2'; $base = 'https://'.$config['base'];
 date_default_timezone_set($config['nodeTimezone']);
+$ver = '0.0.2'; $base = 'https://'.$config['base'];
+$public_streams = 'https://www.w3.org/ns/activitystreams#Public';
 
 if ($config['nodeDebugging']) {
     if (!is_dir('error_logs')) mkdir('error_logs');

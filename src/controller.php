@@ -1,8 +1,7 @@
 <?php require('function.php');
 
 function controller() {
-    global $db, $ver, $base, $config;
-    $public_streams = 'https://www.w3.org/ns/activitystreams#Public';
+    global $db, $ver, $base, $config, $public_streams;
     
     $router = [
         '/' => ['to' => 'index', 'strict' => 1],
@@ -35,32 +34,11 @@ function controller() {
                             if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base'] &&
                             ($jsonld['type'] == 'Delete' || $actor = Club_Get_Actor($club, $jsonld['actor']))) { switch ($jsonld['type']) {
                                 
-                                case 'Create':
-                                    $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
-                                    $pdo->execute([':object' => $jsonld['object']['id']]);
-                                    if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
-                                        if (in_array($club_url, $jsonld['cc']) && (in_array($public_streams, $jsonld['to']) || in_array($public_streams, $jsonld['cc']))) {
-                                            list($msec, $time) = explode(' ', microtime());
-                                            $activity_id = (string)sprintf('%.0f', (floatval($msec) + floatval($time)) * 1000);
-                                            $pdo = $db->prepare('insert into `activities`(`cid`,`uid`,`type`,`activity_id`,`object`)'.
-                                                ' select `cid`, :uid as `uid`, :type as `type`, :activity_id as `activity_id`, :object as `object` from `clubs` where `name` = :club');
-                                            $pdo->execute(['club' => $club, 'uid' => $actor['uid'], 'type' => 'Announce', 'activity_id' => $activity_id, 'object' => $jsonld['object']['id']]);
-                                            Club_Push_Activity($club, [
-                                                '@context' => 'https://www.w3.org/ns/activitystreams',
-                                                'id' => $club_url.'/announce/'.$activity_id.'/activity',
-                                                'type' => 'Announce',
-                                                'actor' => $club_url,
-                                                'published' => date('Y-m-d\TH:i:s\Z', $time),
-                                                'to' => [$club_url.'/followers'],
-                                                'cc' => [$jsonld['actor'], $public_streams],
-                                                'object' => $jsonld['object']['id']
-                                            ]);
-                                        }
-                                    } break;
+                                case 'Create': Club_Announce_Process($jsonld); break;
                                 
                                 case 'Follow':
-                                    $pdo = $db->prepare('insert into `followers`(`cid`,`uid`) select `cid`, :uid as `uid` from `clubs` where `name` = :club');
-                                    $pdo->execute([':club' => $club, ':uid' => $actor['uid']]);
+                                    $pdo = $db->prepare('insert into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
+                                    $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':timestamp' => time()]);
                                     Club_Push_Activity($club, [
                                         '@context' => 'https://www.w3.org/ns/activitystreams',
                                         'id' => $club_url.'#accepts/follows/'.$actor['uid'],
@@ -78,7 +56,9 @@ function controller() {
                                     switch ($jsonld['object']['type']) {
                                         case 'Follow':
                                             $club = explode('/', $jsonld['object']['object'])[4];
-                                            $pdo = $db->prepare('delete from `followers` where `cid` in (select cid from `clubs` where `name` = :club) and `uid` in (select uid from `users` where `actor` = :actor)');
+                                            $pdo = $db->prepare('delete from `followers` where `cid` in'.
+                                                ' (select cid from `clubs` where `name` = :club)'.
+                                                ' and `uid` in (select uid from `users` where `actor` = :actor)');
                                             $pdo->execute([':club' => $club, ':actor' => $jsonld['actor']]); break;
                                             
                                         default: break;
@@ -86,33 +66,7 @@ function controller() {
                                 
                                 case 'Delete':
                                     if (isset($jsonld['object']['type'])) switch ($jsonld['object']['type']) {
-                                        case 'Tombstone':
-                                            $pdo = $db->prepare('select `id`,`activity_id`,`object`,`create_time` from `activities` where `object` = :object');
-                                            $pdo->execute([':object' => $jsonld['object']['id']]);
-                                            if ($activity = $pdo->fetch(PDO::FETCH_ASSOC)) {
-                                                Club_Push_Activity($club, [
-                                                    '@context' => 'https://www.w3.org/ns/activitystreams',
-                                                    'id' => $club_url.'/announce/'.$activity['activity_id'].'/undo',
-                                                    'type' => 'Undo',
-                                                    'actor' => $club_url,
-                                                    'to' => $public_streams,
-                                                    'object' => [
-                                                        'id' => $club_url.'/announce/'.$activity['activity_id'].'/activity',
-                                                        'type' => 'Announce',
-                                                        'actor' => $club_url,
-                                                        'published' => date('Y-m-d\TH:i:s\Z', strtotime($activity['create_time'])),
-                                                        'to' => [$club_url.'/followers'],
-                                                        'cc' => [
-                                                            $jsonld['actor'],
-                                                            $public_streams
-                                                        ],
-                                                        'object' => $activity['object']
-                                                    ]
-                                                ]);
-                                                $pdo = $db->prepare('delete from `activities` where `id` = :activity');
-                                                $pdo->execute([':activity' => $activity['id']]);
-                                            } break;
-                                        
+                                        case 'Tombstone': Club_Tombstone_Process($jsonld); break;
                                         default: break;
                                     } else {
                                         if ($jsonld['actor'] == $jsonld['object']) {
@@ -127,7 +81,7 @@ function controller() {
                     
                     default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
                 } else {
-                    $pdo = $db->prepare('select `cid`,`nickname`,`infoname`,`summary`,`avatar`,`banner`,`public_key`,`create_time` from `clubs` where `name` = :club');
+                    $pdo = $db->prepare('select `cid`,`nickname`,`infoname`,`summary`,`avatar`,`banner`,`public_key`,`timestamp` from `clubs` where `name` = :club');
                     $pdo->execute([':club' => $club]);
                     $pdo = $pdo->fetch(PDO::FETCH_ASSOC);
                     $nametag = array_merge($config['default']['infoname'], json_decode($pdo['infoname'], 1) ?: []);
@@ -158,7 +112,7 @@ function controller() {
                                 'name' => null
                             ],
                             'inbox' => $club_url.'/inbox',
-                            'published' => date('Y-m-d\TH:i:s\Z', strtotime($pdo['create_time'])),
+                            'published' => date('Y-m-d\TH:i:s\Z', $pdo['timestamp']),
                             'publicKey' => [
                                 'id' => $club_url.'#main-key',
                                 'owner' => $club_url,
@@ -174,10 +128,10 @@ function controller() {
                             '<h3 style="position:absolute;top:10px;left:68px">',$nickname,' (@',$club,'@',$config['base'],')</h3>',
                             '<div style="font-size:14px;line-height:10px">',$summary,'</div><p style="line-height:1px"><br></p></div>',
                             '<div style="font-size:14px;line-height:10px"><p>近 10 次活动：</p>';
-                        $activities = $db->prepare('select `type`, `object`, `create_time` from `activities` where `cid` = :cid order by `create_time` desc');
+                        $activities = $db->prepare('select u.name, a.content, a.timestamp from `announces` as `a` left join `users` as `u` on a.uid = u.uid where `cid` = :cid order by `timestamp` desc');
                         $activities->execute([':cid' => $pdo['cid']]);
                         foreach ($activities->fetchAll(PDO::FETCH_ASSOC) as $activity)
-                            echo '<p>',$activity['create_time'],': ',$activity['type'],' <a target="_blank" href="',$activity['object'],'">',$activity['object'],'</a></p>';
+                            echo '<p>[',date('Y-m-d H:i:s', $activity['timestamp']),'] ',$activity['name'],': ',$activity['content'],'</p>';
                         echo '</div>';
                     }
                 }
@@ -191,6 +145,20 @@ function controller() {
                     file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
                     file_put_contents('inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
                 }
+                if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base']) { switch ($jsonld['type']) {
+                    case 'Create': Club_Announce_Process($jsonld); break;
+                    case 'Delete':
+                        if (isset($jsonld['object']['type'])) switch ($jsonld['object']['type']) {
+                            case 'Tombstone': Club_Tombstone_Process($jsonld); break;
+                            default: break;
+                        } else {
+                            if ($jsonld['actor'] == $jsonld['object']) {
+                                $pdo = $db->prepare('delete from `users` where `actor` = :actor');
+                                $pdo->execute([':actor' => $jsonld['actor']]);
+                            }
+                        } break;
+                    default: break;
+                }}
             } else header('Location: '.$base); break;
         
         case 'nodeinfo':

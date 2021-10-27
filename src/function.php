@@ -67,8 +67,8 @@ function Club_Create($club) {
     		'private_key_type' => OPENSSL_KEYTYPE_RSA
     	]); openssl_pkey_export($key, $priv_key);
         $detail = openssl_pkey_get_details($key);
-        $pdo = $db->prepare('insert into `clubs`(`name`,`public_key`,`private_key`) values(:name, :public, :private)');
-        return (bool)$pdo->execute([':name' => $club, ':public' => substr($detail['key'], 0, -1), ':private' => substr($priv_key, 0, -1)]);
+        $pdo = $db->prepare('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values(:name, :public, :private, :timestamp)');
+        return (bool)$pdo->execute([':name' => $club, ':public' => substr($detail['key'], 0, -1), ':private' => substr($priv_key, 0, -1), ':timestamp' => time()]);
     } return false;
 }
 
@@ -85,9 +85,9 @@ function Club_Get_Actor($club, $actor) {
             $inbox = $jsonld['inbox'];
             $shared_inbox = $jsonld['endpoints']['sharedInbox'] ?: $jsonld['inbox'];
             $name = $jsonld['preferredUsername'].'@'.parse_url($jsonld['id'], PHP_URL_HOST);
-            $pdo = $db->prepare('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`) values (:name, :actor, :inbox, :public_key, :shared_inbox)');
+            $pdo = $db->prepare('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`) values (:name, :actor, :inbox, :public_key, :shared_inbox, :timestamp)');
             $pdo->execute([
-                ':name' => $name, ':actor' => $jsonld['id'], ':inbox' => $jsonld['inbox'],
+                ':name' => $name, ':actor' => $jsonld['id'], ':inbox' => $jsonld['inbox'], ':timestamp' => time(),
                 ':public_key' => $jsonld['publicKey']['publicKeyPem'], ':shared_inbox' => $shared_inbox
             ]);
             $pdo = $db->prepare('select `uid` from `users` where `name` = :name');
@@ -110,6 +110,80 @@ function Club_Push_Activity($club, $activity, $inbox = false) {
     $pdo->execute([':club' => $club]);
     if ($inbox) ActivityPub_POST($inbox, $club, $activity);
     else foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $inbox) ActivityPub_POST($inbox, $club, $activity);
+}
+
+function Club_Announce_Process($jsonld) {
+    global $db, $base, $public_streams;
+    $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
+    $pdo->execute([':object' => $jsonld['object']['id']]);
+    if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
+        foreach ($jsonld['cc'] as $cc) if (($club_url = $base.'/club/') == substr($cc, 0, strlen($club_url))) $clubs[] = substr($cc, strlen($club_url));
+        if (!empty($clubs) && (in_array($public_streams, $jsonld['to']) || in_array($public_streams, $jsonld['cc']))) {
+            $actor = Club_Get_Actor($clubs[0], $jsonld['actor']);
+            $pdo = $db->prepare('insert into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`)'.
+                ' values(:uid, :type, :clubs, :object, :timestamp)');
+            $pdo->execute([':uid' => $actor['uid'], ':type' => 'Create', ':clubs' => Club_Json_Encode($clubs), 'object' => $jsonld['object']['id'], 'timestamp' => time()]);
+            $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
+            $pdo->execute([':object' => $jsonld['object']['id']]);
+            if ($activity_id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
+                foreach ($clubs as $club) {
+                    $club_url = $base.'/club/'.$club;
+                    Club_Push_Activity($club, [
+                        '@context' => 'https://www.w3.org/ns/activitystreams',
+                        'id' => $club_url.'/activity#'.$activity_id.'/announce',
+                        'type' => 'Announce',
+                        'actor' => $club_url,
+                        'published' => date('Y-m-d\TH:i:s\Z', time()),
+                        'to' => [$club_url.'/followers'],
+                        'cc' => [$jsonld['actor'], $public_streams],
+                        'object' => $jsonld['object']['id']
+                    ]);
+                    $pdo = $db->prepare('insert into `announces`(`cid`,`uid`,`activity`,`content`,`timestamp`)'.
+                    ' select `cid`, :uid as `uid`, :activity as `activity`, :content as `content`, :timestamp as `timestamp` from `clubs` where `name` = :club');
+                    $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':activity' => $activity_id,
+                        ':content' => strip_tags($jsonld['object']['content']), ':timestamp' => strtotime($jsonld['published'])]);
+                }
+            }
+        }
+    }
+}
+
+function Club_Tombstone_Process($jsonld) {
+    global $db, $base, $public_streams;
+    $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
+    $pdo->execute([':object' => $jsonld['id']]);
+    if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
+        $pdo = $db->prepare('select `id`,`uid`,`clubs`,`object`,`timestamp` from `activities` where `object` = :object');
+        $pdo->execute([':object' => $jsonld['object']['id']]);
+        if ($activity = $pdo->fetch(PDO::FETCH_ASSOC)) {
+            $pdo = $db->prepare('insert into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`) values(:uid, :type, :clubs, :object, :timestamp)');
+            $pdo->execute([':uid' => $activity['uid'], ':type' => 'Delete', ':clubs' => $activity['clubs'], 'object' => $jsonld['id'], 'timestamp' => time()]);
+            foreach (json_decode($activity['clubs'], 1) as $club) {
+                $club_url = $base.'/club/'.$club;
+                Club_Push_Activity($club, [
+                    '@context' => 'https://www.w3.org/ns/activitystreams',
+                    'id' => $club_url.'/activity#'.$activity['id'].'/undo',
+                    'type' => 'Undo',
+                    'actor' => $club_url,
+                    'to' => $public_streams,
+                        'object' => [
+                        'id' => $club_url.'/activity#'.$activity['id'].'/announce',
+                        'type' => 'Announce',
+                        'actor' => $club_url,
+                        'published' => date('Y-m-d\TH:i:s\Z', $activity['timestamp']),
+                        'to' => [$club_url.'/followers'],
+                        'cc' => [
+                            $jsonld['actor'],
+                            $public_streams
+                        ],
+                        'object' => $activity['object']
+                    ]
+                ]);
+            }
+            $pdo = $db->prepare('delete from `announces` where `activity` = :activity');
+            $pdo->execute([':activity' => $activity['id']]);
+        }
+    }
 }
 
 function Club_NameTag_Render($club, $str, $tag) {
