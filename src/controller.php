@@ -164,7 +164,7 @@ function controller() {
                                 'owner' => $club_url,
                                 'publicKeyPem' => $pdo['public_key']
                             ],
-                            'endpoints' => ['sharedInbox' => $base.'/inbox']
+                            //'endpoints' => ['sharedInbox' => $base.'/inbox']
                         ], 2);
                     } else {
                         echo '<title>',$nickname,' (@',$club,'@',$config['base'],')</title>',
