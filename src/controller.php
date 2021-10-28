@@ -22,9 +22,8 @@ function controller() {
             $club_url = $base . '/club/' . ($club = ($uri = explode('/', $uri))[2]);
             if (Club_Exist($club)) {
                 if (isset($uri[3])) switch ($uri[3]) {
-                    
                     case 'inbox':
-                        if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_SERVER['HTTP_CONTENT_TYPE'] == 'application/activity+json') {
+                        if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                             $jsonld = json_decode($input = file_get_contents('php://input'), 1);
                             if ($config['nodeDebugging']) {
                                 $file_name = date('Y-m-d_H:i:s_').$club.'_'.$jsonld['type'];
@@ -81,8 +80,67 @@ function controller() {
                                 
                                 default: break;
                             }} else Club_Json_Output(['message' => 'Request is invalid'], 0, 400);
-                        } else header('Location: '.$club_url); break;
+                        } else header('Content-type: application/activity+json; charset=utf-8'); break;
                     
+                    case 'outbox':
+                        if (isset($_GET['page'])) {
+                            $arr = [
+                                '@context' => 'https://www.w3.org/ns/activitystreams',
+                                'id' => $club_url.'/outbox?page='.($page = (int)$_GET['page']),
+                                'type' => 'OrderedCollectionPage',
+                                'next' => $club_url.'/outbox?page=',
+                                'prev' => $club_url.'/outbox?page=',
+                                'partOf' => $club_url.'/outbox',
+                                'orderedItems' => []
+                            ];
+                            if ($page < 0) {
+                                $arr['next'] .= $page - 1;
+                                $arr['prev'] .= ($page == -1 ? $page - 1 : $page)  + 1;
+                                $page = abs($page);
+                            } else {
+                                $order = ' desc';
+                                if ($page == 0) $page = 1;
+                                $arr['next'] .= $page + 1;
+                                $arr['prev'] .= $page - 1;
+                            }
+                            $pdo = $db->prepare('select u.actor, a.activity, b.object, b.timestamp from `announces` `a`'.
+                            ' left join `clubs` `c` on a.cid = c.cid'.
+                            ' left join `users` `u` on a.uid = u.uid'.
+                            ' left join `activities` `b` on a.activity = b.id'.
+                            ' where c.name = :club order by b.timestamp'.$order.' limit 20');
+                            $pdo->execute([':club' => $club]);
+                            foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $announce) {
+                                $arr['orderedItems'][] = [
+                                    '@context' => 'https://www.w3.org/ns/activitystreams',
+                                    'id' => $club_url.'/activity#'.$announce['activity'].'/announce',
+                                    'type' => 'Announce',
+                                    'actor' => $club_url,
+                                    'published' => date('Y-m-d\TH:i:s\Z', $announce['timestamp']),
+                                    'to' => [$club_url.'/followers'],
+                                    'cc' => [$announce['actor'], $public_streams],
+                                    'object' => $announce['object']
+                                ];
+                            } Club_Json_Output($arr, 2);
+                        } else {
+                            $pdo = $db->prepare('select count(a.id) from `announces` `a` left join `clubs` `c` on a.cid = c.cid where c.name = :club');
+                            $pdo->execute([':club' => $club]);
+                            $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
+                            Club_Get_OrderedCollection($club_url.'/outbox', [
+                                'totalItems' => $count,
+                                'first' => $club_url.'/outbox?page=1',
+                                'last' => $club_url.'/outbox?page=-1',
+                            ]);
+                        } break;
+                    
+                    case 'following': Club_Get_OrderedCollection($club_url.'/following'); break;
+                    case 'followers': Club_Get_OrderedCollection($club_url.'/followers'); break;
+                    case 'collections':
+                        if (isset($uri[4])) switch ($uri[4]) {
+                            case 'featured': Club_Get_OrderedCollection($club_url.'/collections/featured'); break;
+                            case 'tags': Club_Get_OrderedCollection($club_url.'/collections/tags', ['type' => 'Collection']); break;
+                            case 'devices': Club_Get_OrderedCollection($club_url.'/collections/devices', ['type' => 'Collection']); break;
+                            default: break;
+                        } break;
                     default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
                 } else {
                     $pdo = $db->prepare('select `cid`,`nickname`,`infoname`,`summary`,`avatar`,`banner`,`public_key`,`timestamp` from `clubs` where `name` = :club');
@@ -95,34 +153,70 @@ function controller() {
                         Club_Json_Output([
                             '@context' => [
                                 'https://www.w3.org/ns/activitystreams',
-                                'https://w3id.org/security/v1'
+                                'https://w3id.org/security/v1',
+                                [
+                                    'manuallyApprovesFollowers' => 'as:manuallyApprovesFollowers',
+                                    'toot' => 'http://joinmastodon.org/ns#',
+                                    'featured' => ['@id' => 'toot:featured', '@type' => '@id'],
+                                    'featuredTags' => ['@id' => 'toot:featuredTags', '@type' => '@id'],
+                                    'alsoKnownAs' => ['@id' => 'as:alsoKnownAs', '@type' => '@id'],
+                                    'movedTo' => ['@id' => 'as:movedTo', '@type' => '@id'],
+                                    'schema' => 'http://schema.org#',
+                                    'PropertyValue' => 'schema:PropertyValue',
+                                    'value' => 'schema:value',
+                                    'IdentityProof' => 'toot:IdentityProof',
+                                    'discoverable' => 'toot:discoverable',
+                                    'Device' => 'toot:Device',
+                                    'Ed25519Signature' => 'toot:Ed25519Signature',
+                                    'Ed25519Key' => 'toot:Ed25519Key',
+                                    'Curve25519Key' => 'toot:Curve25519Key',
+                                    'EncryptedMessage' => 'toot:EncryptedMessage',
+                                    'publicKeyBase64' => 'toot:publicKeyBase64',
+                                    'deviceId' => 'toot:deviceId',
+                                    'claim' => ['@type' => '@id', '@id' => 'toot:claim'],
+                                    'fingerprintKey' => ['@type' => '@id', '@id' => 'toot:fingerprintKey'],
+                                    'identityKey' => ['@type' => '@id', '@id' => 'toot:identityKey'],
+                                    'devices' => ['@type' => '@id', '@id' => 'toot:devices'],
+                                    'messageFranking' => 'toot:messageFranking',
+                                    'messageType' => 'toot:messageType',
+                                    'cipherText' => 'toot:cipherText',
+                                    'suspended' => 'toot:suspended',
+                                    'Emoji' => 'toot:Emoji',
+                                    'focalPoint' => ['@container' => '@list', '@id' => 'toot:focalPoint']
+                                ]
                             ],
                             'id' => $club_url,
                             'type' => 'Group',
+                            'following' => $club_url.'/following',
+                            'followers' => $club_url.'/followers',
+                            'inbox' => $club_url.'/inbox',
+                            'outbox' => $club_url.'/outbox',
+                            'featured' => $club_url.'/collections/featured',
+                            'featuredTags' => $club_url.'/collections/tags',
                             'preferredUsername' => $club,
                             'name' => $nickname,
                             'summary' => $summary,
                             'url' => $club_url,
-                            'icon' => [
-                                'type' => 'Image',
-                                'url' => $pdo['avatar'] ?: $config['default']['avatar'],
-                                'sensitive' => false,
-                                'name' => null
-                            ],
-                            'image' => [
-                                'type' => 'Image',
-                                'url' => $pdo['banner'] ?: $config['default']['banner'],
-                                'sensitive' => false,
-                                'name' => null
-                            ],
-                            'inbox' => $club_url.'/inbox',
+                            'manuallyApprovesFollowers' => false,
+                            'discoverable' => false,
                             'published' => date('Y-m-d\TH:i:s\Z', $pdo['timestamp']),
+                            'devices' => $club_url.'/collections/devices',
                             'publicKey' => [
                                 'id' => $club_url.'#main-key',
                                 'owner' => $club_url,
                                 'publicKeyPem' => $pdo['public_key']
                             ],
-                            'endpoints' => ['sharedInbox' => $base.'/inbox']
+                            'tag' => [],
+                            'attachment' => [],
+                            'endpoints' => ['sharedInbox' => $base.'/inbox'],
+                            'icon' => [
+                                'type' => 'Image',
+                                'url' => $pdo['avatar'] ?: $config['default']['avatar']
+                            ],
+                            'image' => [
+                                'type' => 'Image',
+                                'url' => $pdo['banner'] ?: $config['default']['banner']
+                            ]
                         ], 2);
                     } else {
                         echo '<title>',$nickname,' (@',$club,'@',$config['base'],')</title>',

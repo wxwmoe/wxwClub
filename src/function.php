@@ -68,7 +68,7 @@ function Club_Create($club) {
     	]); openssl_pkey_export($key, $priv_key);
         $detail = openssl_pkey_get_details($key);
         $pdo = $db->prepare('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values(:name, :public, :private, :timestamp)');
-        return (bool)$pdo->execute([':name' => $club, ':public' => substr($detail['key'], 0, -1), ':private' => substr($priv_key, 0, -1), ':timestamp' => time()]);
+        return (bool)$pdo->execute([':name' => $club, ':public' => $detail['key'], ':private' => $priv_key, ':timestamp' => time()]);
     } return false;
 }
 
@@ -184,6 +184,18 @@ function Club_Tombstone_Process($jsonld) {
             $pdo->execute([':activity' => $activity['id']]);
         }
     }
+}
+
+function Club_Get_OrderedCollection($id, $arr = []) {
+    $arr = array_merge([
+        '@context' => 'https://www.w3.org/ns/activitystreams',
+        'id' => $id,
+        'type' => 'OrderedCollection',
+        'totalItems' => 0,
+        'orderedItems' => []
+    ], $arr);
+    if (isset($arr['last'])) unset($arr['orderedItems']);
+    Club_Json_Output($arr, 2);
 }
 
 function Club_NameTag_Render($club, $str, $tag) {
