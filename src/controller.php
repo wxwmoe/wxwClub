@@ -39,18 +39,22 @@ function controller() {
                                 case 'Follow':
                                     $pdo = $db->prepare('insert into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
                                     $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':timestamp' => time()]);
-                                    Club_Push_Activity($club, [
-                                        '@context' => 'https://www.w3.org/ns/activitystreams',
-                                        'id' => $club_url.'#accepts/follows/'.$actor['uid'],
-                                        'type' => 'Accept',
-                                        'actor' => $club_url,
-                                        'object' => [
-                                            'id' => $jsonld['id'],
-                                            'type' => 'Follow',
-                                            'actor' => $jsonld['actor'],
-                                            'object' => $club_url
-                                        ]
-                                    ], $actor['inbox']); break;
+                                    $pdo = $db->prepare('select f.id from `followers` as f left join `clubs` as `c` on f.cid = c.cid where f.uid = :uid and c.name = :club');
+                                    $pdo->execute([':club' => $club, ':uid' => $actor['uid']]);
+                                    if ($follow_id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
+                                        Club_Push_Activity($club, [
+                                            '@context' => 'https://www.w3.org/ns/activitystreams',
+                                            'id' => $club_url.'#accepts/follows/'.$follow_id,
+                                            'type' => 'Accept',
+                                            'actor' => $club_url,
+                                            'object' => [
+                                                'id' => $jsonld['id'],
+                                                'type' => 'Follow',
+                                                'actor' => $jsonld['actor'],
+                                                'object' => $club_url
+                                            ]
+                                        ], $actor['inbox']);
+                                    } break;
                                 
                                 case 'Undo':
                                     switch ($jsonld['object']['type']) {

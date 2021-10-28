@@ -122,7 +122,7 @@ function Club_Announce_Process($jsonld) {
             $actor = Club_Get_Actor($clubs[0], $jsonld['actor']);
             $pdo = $db->prepare('insert into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`)'.
                 ' values(:uid, :type, :clubs, :object, :timestamp)');
-            $pdo->execute([':uid' => $actor['uid'], ':type' => 'Create', ':clubs' => Club_Json_Encode($clubs), 'object' => $jsonld['object']['id'], 'timestamp' => time()]);
+            $pdo->execute([':uid' => $actor['uid'], ':type' => 'Create', ':clubs' => Club_Json_Encode($clubs), 'object' => $jsonld['object']['id'], 'timestamp' => ($time = time())]);
             $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
             $pdo->execute([':object' => $jsonld['object']['id']]);
             if ($activity_id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
@@ -133,7 +133,7 @@ function Club_Announce_Process($jsonld) {
                         'id' => $club_url.'/activity#'.$activity_id.'/announce',
                         'type' => 'Announce',
                         'actor' => $club_url,
-                        'published' => date('Y-m-d\TH:i:s\Z', time()),
+                        'published' => date('Y-m-d\TH:i:s\Z', $time),
                         'to' => [$club_url.'/followers'],
                         'cc' => [$jsonld['actor'], $public_streams],
                         'object' => $jsonld['object']['id']
