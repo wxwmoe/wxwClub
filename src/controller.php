@@ -107,7 +107,7 @@ function controller() {
                             ' left join `clubs` `c` on a.cid = c.cid'.
                             ' left join `users` `u` on a.uid = u.uid'.
                             ' left join `activities` `b` on a.activity = b.id'.
-                            ' where c.name = :club order by b.timestamp'.$order.' limit 20');
+                            ' where c.name = :club order by b.timestamp'.$order.' limit '.(($page-1)*20).', 20');
                             $pdo->execute([':club' => $club]);
                             foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $announce) {
                                 $arr['orderedItems'][] = [
