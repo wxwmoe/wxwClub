@@ -18,13 +18,14 @@ A simple social groups compatible with ActivityPub.
 - 单个群组 Actor 支持自定义修改
   - 个人资料页　头像、横幅、昵称
   - 中文简介、英文简介、简介模板
+- Shared Inbox、Outbox 实现
+- 跨站消息 HTTP Signature 校验
+- 兼容 Mastodon、Misskey、Pleroma
 
 ### 待实现
 - Outbox 任务队列
-- 完整 JSON-LD 实现
 - 私信修改 Actor 信息
 - RsaSignature2017 生成
-- 跨站消息 HTTP Signature 校验
 
 ## 使用
 
