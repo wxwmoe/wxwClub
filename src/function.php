@@ -117,8 +117,9 @@ function Club_Announce_Process($jsonld) {
     $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
     $pdo->execute([':object' => $jsonld['object']['id']]);
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
-        foreach ($jsonld['cc'] as $cc) if (($club_url = $base.'/club/') == substr($cc, 0, strlen($club_url))) $clubs[] = substr($cc, strlen($club_url));
-        if (!empty($clubs) && (in_array($public_streams, $jsonld['to']) || in_array($public_streams, $jsonld['cc']))) {
+        $to = array_merge($jsonld['to'], $jsonld['cc']);
+        foreach ($to as $cc) if (($club_url = $base.'/club/') == substr($cc, 0, strlen($club_url))) $clubs[] = substr($cc, strlen($club_url));
+        if (!empty($clubs) && in_array($public_streams, $to)) {
             $actor = Club_Get_Actor($clubs[0], $jsonld['actor']);
             $pdo = $db->prepare('insert into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`)'.
                 ' values(:uid, :type, :clubs, :object, :timestamp)');
