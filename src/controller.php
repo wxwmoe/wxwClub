@@ -32,6 +32,10 @@ function controller() {
                                     file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
                                     file_put_contents('inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
                                 }
+                                if (!ActivityPub_Verification($input)) {
+                                    if ($config['nodeDebugging']) file_put_contents('inbox_logs/'.$file_name.'_verify_failed');
+                                    break;
+                                }
                                 switch ($jsonld['type']) {
                                     case 'Create': Club_Announce_Process($jsonld); break;
                                     case 'Follow':
@@ -242,6 +246,10 @@ function controller() {
                         $file_name = date('Y-m-d_H:i:s').'_shared_inbox_'.$jsonld['type'];
                         file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
                         file_put_contents('inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+                    }
+                    if (!ActivityPub_Verification($input)) {
+                        if ($config['nodeDebugging']) file_put_contents('inbox_logs/'.$file_name.'_verify_failed');
+                        break;
                     }
                     switch ($jsonld['type']) {
                         case 'Create': Club_Announce_Process($jsonld); break;

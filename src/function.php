@@ -50,6 +50,27 @@ function ActivityPub_Signature($url, $club, $date, $digest = null) {
     } return false;
 }
 
+function ActivityPub_Verification($input = null) {
+    global $db; if (isset($_SERVER['HTTP_SIGNATURE'])) {
+        preg_match_all('/[,\s]*(.*?)="(.*?)"/', $_SERVER['HTTP_SIGNATURE'], $matches);
+        foreach ($matches[1] as $k => $v) $signature[$v] = $matches[2][$k];
+        if (($headers = explode(' ', $signature['headers']))[0] == '(request-target)') {
+            $pdo = $db->prepare('select `public_key` from `users` where `actor` = :actor');
+            $pdo->execute([':actor' => explode('#', $signature['keyId'])[0]]);
+            if ($public_key = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
+                $signed_string = '(request-target): '.strtolower($_SERVER['REQUEST_METHOD']).' '.$_SERVER['REQUEST_URI'];
+                foreach (array_slice($headers, 1) as $header) $signed_string .= "\n".$header.': '.$_SERVER['HTTP_'.strtoupper(str_replace('-','_',$header))];
+                if (openssl_verify($signed_string, base64_decode($signature['signature']), $public_key, $signature['algorithm'])) {
+                    if (isset($_SERVER['HTTP_DIGEST'])) {
+                        preg_match('/^(.*?)=(.*?)$/', $_SERVER['HTTP_DIGEST'], $matches);
+                        return (hash(str_replace('-','',$matches[1]), $input, 1) == base64_decode($matches[2]));
+                    } return true;
+                }
+            }
+        }
+    } return false;
+}
+
 function Club_Exist($club) {
     global $db, $config;
     if (strlen($club) <= 30 && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]+$/u', $club)) {
