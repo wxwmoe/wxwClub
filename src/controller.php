@@ -25,7 +25,6 @@ function controller() {
                     case 'inbox':
                         if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                             $jsonld = json_decode($input = file_get_contents('php://input'), 1);
-                            
                             if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base'] &&
                             ($jsonld['type'] == 'Delete' || $actor = Club_Get_Actor($club, $jsonld['actor']))) {
                                 if ($config['nodeDebugging'] && !($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object'])) {
@@ -69,11 +68,12 @@ function controller() {
                                         if (isset($jsonld['object']['type'])) switch ($jsonld['object']['type']) {
                                             case 'Tombstone': Club_Tombstone_Process($jsonld); break;
                                             default: break;
+                                        } elseif ($jsonld['actor'] == $jsonld['object']) {
+                                            $pdo = $db->prepare('delete from `users` where `actor` = :actor');
+                                            $pdo->execute([':actor' => $jsonld['actor']]);
                                         } else {
-                                            if ($jsonld['actor'] == $jsonld['object']) {
-                                                $pdo = $db->prepare('delete from `users` where `actor` = :actor');
-                                                $pdo->execute([':actor' => $jsonld['actor']]);
-                                            }
+                                            $jsonld['object'] = ['id' => $jsonld['object']];
+                                            Club_Tombstone_Process($jsonld);
                                         } break;
                                     default: break;
                                 }
@@ -220,11 +220,11 @@ function controller() {
                     } else {
                         echo '<title>',$nickname,' (@',$club,'@',$config['base'],')</title>',
                             '<style>.info::before{content:"";background:url(',($pdo['banner'] ?: $config['default']['banner']),') no-repeat center;',
-                            'background-size:cover;opacity:0.35;z-index:-1;position:absolute;width:680px;height:188px;top:0px;left:0px;border-radius:8px;}</style>',
+                            'background-size:cover;opacity:0.35;z-index:-1;position:absolute;width:720px;height:220px;top:0px;left:0px;border-radius:8px;}</style>',
                             '<div class="info"><img src="',($pdo['avatar'] ?: $config['default']['avatar']),'" width="50" /><p style="line-height:1px"><br></p>',
                             '<h3 style="position:absolute;top:10px;left:68px">',$nickname,' (@',$club,'@',$config['base'],')</h3>',
-                            '<div style="font-size:14px;line-height:10px">',$summary,'</div><p style="line-height:1px"><br></p></div>',
-                            '<div style="font-size:14px;line-height:10px"><p>近 10 次活动：</p>';
+                            '<div style="font-size:14px">',$summary,'</div><p style="line-height:1px"><br></p></div>',
+                            '<div style="font-size:14px"><p>近 10 次活动：</p>';
                         $activities = $db->prepare('select u.name, a.content, a.timestamp from `announces` as `a` left join `users` as `u` on a.uid = u.uid where `cid` = :cid order by `timestamp` desc');
                         $activities->execute([':cid' => $pdo['cid']]);
                         foreach ($activities->fetchAll(PDO::FETCH_ASSOC) as $activity)
@@ -249,14 +249,12 @@ function controller() {
                             if (isset($jsonld['object']['type'])) switch ($jsonld['object']['type']) {
                                 case 'Tombstone': Club_Tombstone_Process($jsonld); break;
                                 default: break;
+                            } elseif ($jsonld['actor'] == $jsonld['object']) {
+                                $pdo = $db->prepare('delete from `users` where `actor` = :actor');
+                                $pdo->execute([':actor' => $jsonld['actor']]);
                             } else {
-                                if ($jsonld['actor'] == $jsonld['object']) {
-                                    $pdo = $db->prepare('delete from `users` where `actor` = :actor');
-                                    $pdo->execute([':actor' => $jsonld['actor']]);
-                                } else {
-                                    $jsonld['object'] = ['id' => $jsonld['object']];
-                                    Club_Tombstone_Process($jsonld);
-                                }
+                                $jsonld['object'] = ['id' => $jsonld['object']];
+                                Club_Tombstone_Process($jsonld);
                             } break;
                         default: break;
                     }
