@@ -253,6 +253,9 @@ function controller() {
                                 if ($jsonld['actor'] == $jsonld['object']) {
                                     $pdo = $db->prepare('delete from `users` where `actor` = :actor');
                                     $pdo->execute([':actor' => $jsonld['actor']]);
+                                } else {
+                                    $jsonld['object'] = ['id' => $jsonld['object']];
+                                    Club_Tombstone_Process($jsonld);
                                 }
                             } break;
                         default: break;
