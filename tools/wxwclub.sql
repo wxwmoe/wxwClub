@@ -68,3 +68,29 @@ CREATE TABLE `announces` (
   CONSTRAINT `announces_ibfk_5` FOREIGN KEY (`uid`) REFERENCES `users` (`uid`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `announces_ibfk_7` FOREIGN KEY (`activity`) REFERENCES `activities` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `tasks` (
+  `tid` int NOT NULL AUTO_INCREMENT,
+  `cid` int NOT NULL,
+  `type` varchar(10) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `jsonld` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
+  `timestamp` int NOT NULL,
+  PRIMARY KEY (`tid`),
+  KEY `type` (`type`),
+  KEY `time` (`timestamp`),
+  KEY `cid` (`cid`),
+  CONSTRAINT `tasks_ibfk_2` FOREIGN KEY (`cid`) REFERENCES `clubs` (`cid`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `queues` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `tid` int NOT NULL,
+  `target` varchar(100) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `timestamp` int NOT NULL,
+  `inuse` tinyint NOT NULL DEFAULT '0',
+  `retry` tinyint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  KEY `timestamp` (`timestamp`),
+  KEY `tid` (`tid`),
+  CONSTRAINT `queues_ibfk_2` FOREIGN KEY (`tid`) REFERENCES `tasks` (`tid`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
