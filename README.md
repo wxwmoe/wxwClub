@@ -50,6 +50,7 @@ A simple social groups compatible with ActivityPub.
     3. docker run -d --restart always -v $(pwd):/wxwClub \
     --name wxwclub_worker wxwclub:worker php /wxwClub/cli.php worker
 ```
+5. （可选）运行多个 `wxwClub worker` 执行队列
 
 ## 版权声明
 
