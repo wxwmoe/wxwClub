@@ -15,7 +15,7 @@
     // 默认模板
     'default' => [
         // 头像外链
-        'avatar' => 'https://fp1.fghrsh.net/2021/10/25/d4be74ddb653ac6cc0ade052c3541e05.png',
+        'avatar' => 'https://fp1.fghrsh.net/2021/11/03/1568571d1ed0bfaef26acdf6d5664826.png',
         // 横幅外链
         'banner' => 'https://fp1.fghrsh.net/2021/10/25/86dbef8672928e061a5ce1e5722e8056.png',
         
