@@ -8,7 +8,7 @@ function ActivityPub_GET($url, $club) {
     $curl->get($url);
     
     //print_r($curl->responseHeaders);
-    return $curl->error ? false : $curl->response;
+    return $curl->error ? false : ($curl->response ?: true);
 }
 
 function ActivityPub_POST($url, $club, $jsonld) {
@@ -20,7 +20,7 @@ function ActivityPub_POST($url, $club, $jsonld) {
     $curl->setHeader('Digest', 'SHA-256='.$digest);
     $curl->post($url, $jsonld);
     
-    return $curl->error ? false : $curl->response;
+    return $curl->error ? false : ($curl->response ?: true);
 }
 
 function ActivityPub_CURL($date) {
@@ -111,11 +111,24 @@ function Club_Get_Actor($club, $actor) {
                 ':name' => $name, ':actor' => $jsonld['id'], ':inbox' => $jsonld['inbox'], ':timestamp' => time(),
                 ':public_key' => $jsonld['publicKey']['publicKeyPem'], ':shared_inbox' => $shared_inbox
             ]);
-            $pdo = $db->prepare('select `uid` from `users` where `name` = :name');
-            $pdo->execute([':name' => $name]);
-            $uid = $pdo->fetch(PDO::FETCH_ASSOC)['uid'];
+            $pdo = $db->query('select last_insert_id()');
+            $uid = $pdo->fetch(PDO::FETCH_COLUMN, 0);
         } else return false;
     } return ['uid' => $uid, 'name' => $name, 'inbox' => $inbox];
+}
+
+function Club_Task_Create($type, $club, $jsonld) {
+    global $db;
+    $pdo = $db->prepare('insert into `tasks`(`cid`,`type`,`jsonld`,`timestamp`) select `cid`, :type as `type`, :jsonld as `jsonld`, :timestamp as `timestamp` from `clubs` where `name` = :club');
+    $pdo->execute([':type' => $type, ':club' => $club, ':jsonld' => $jsonld, ':timestamp' => time()]);
+    $pdo = $db->query('select last_insert_id()');
+    return $pdo->fetch(PDO::FETCH_COLUMN, 0);
+}
+
+function Club_Queue_Insert($task, $target) {
+    global $db;
+    $pdo = $db->prepare('insert into `queues`(`tid`,`target`,`timestamp`) values (:tid, :target, :timestamp)');
+    return $pdo->execute([':tid' => $task, ':target' => $target, ':timestamp' => time()]);
 }
 
 function Club_Push_Activity($club, $activity, $inbox = false) {
@@ -127,10 +140,14 @@ function Club_Push_Activity($club, $activity, $inbox = false) {
         file_put_contents('outbox_logs/'.$file_name.'_output.json', $activity);
         file_put_contents('outbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
     }
-    $pdo = $db->prepare('select distinct u.shared_inbox from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid where c.name = :club');
-    $pdo->execute([':club' => $club]);
-    if ($inbox) ActivityPub_POST($inbox, $club, $activity);
-    else foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $inbox) ActivityPub_POST($inbox, $club, $activity);
+    if ($task = Club_Task_Create('push', $club, $activity)) {
+        if ($inbox) Club_Queue_Insert($task, $inbox);
+        else {
+            $pdo = $db->prepare('select distinct u.shared_inbox from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid where c.name = :club');
+            $pdo->execute([':club' => $club]);
+            foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $inbox) Club_Queue_Insert($task, $inbox);
+        }
+    }
 }
 
 function Club_Announce_Process($jsonld) {
@@ -144,8 +161,7 @@ function Club_Announce_Process($jsonld) {
             $pdo = $db->prepare('insert into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`)'.
                 ' values(:uid, :type, :clubs, :object, :timestamp)');
             $pdo->execute([':uid' => $actor['uid'], ':type' => 'Create', ':clubs' => Club_Json_Encode($clubs), 'object' => $jsonld['object']['id'], 'timestamp' => ($time = time())]);
-            $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
-            $pdo->execute([':object' => $jsonld['object']['id']]);
+            $pdo = $db->query('select last_insert_id()');
             if ($activity_id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                 foreach ($clubs as $club) {
                     $club_url = $base.'/club/'.$club;

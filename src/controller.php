@@ -27,10 +27,12 @@ function controller() {
                             $jsonld = json_decode($input = file_get_contents('php://input'), 1);
                             if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base'] &&
                             ($jsonld['type'] == 'Delete' || $actor = Club_Get_Actor($club, $jsonld['actor']))) {
-                                if ($config['nodeDebugging'] && !($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object'])) {
+                                if ($config['nodeDebugging']) {
                                     $file_name = date('Y-m-d_H:i:s_').$club.'_'.$jsonld['type'];
-                                    file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
-                                    file_put_contents('inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+                                    if (!($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object'])) {
+                                        file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
+                                        file_put_contents('inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+                                    }
                                 }
                                 if (!ActivityPub_Verification($input)) {
                                     if ($config['nodeDebugging']) file_put_contents('inbox_logs/'.$file_name.'_verify_failed');
@@ -242,10 +244,12 @@ function controller() {
             if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 $jsonld = json_decode($input = file_get_contents('php://input'), 1);
                 if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base']) {
-                    if ($config['nodeDebugging'] && !($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object'])) {
+                    if ($config['nodeDebugging']) {
                         $file_name = date('Y-m-d_H:i:s').'_shared_inbox_'.$jsonld['type'];
-                        file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
-                        file_put_contents('inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+                        if (!($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object'])) {
+                            file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
+                            file_put_contents('inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+                        }
                     }
                     if (!ActivityPub_Verification($input)) {
                         if ($config['nodeDebugging']) file_put_contents('inbox_logs/'.$file_name.'_verify_failed');
