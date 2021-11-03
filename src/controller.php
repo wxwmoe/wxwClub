@@ -35,7 +35,7 @@ function controller() {
                                     }
                                 }
                                 if (!ActivityPub_Verification($input)) {
-                                    if ($config['nodeDebugging']) file_put_contents('inbox_logs/'.$file_name.'_verify_failed');
+                                    if ($config['nodeDebugging']) file_put_contents('inbox_logs/'.$file_name.'_verify_failed', '');
                                     break;
                                 }
                                 switch ($jsonld['type']) {
@@ -252,7 +252,7 @@ function controller() {
                         }
                     }
                     if (!ActivityPub_Verification($input)) {
-                        if ($config['nodeDebugging']) file_put_contents('inbox_logs/'.$file_name.'_verify_failed');
+                        if ($config['nodeDebugging']) file_put_contents('inbox_logs/'.$file_name.'_verify_failed', '');
                         break;
                     }
                     switch ($jsonld['type']) {
