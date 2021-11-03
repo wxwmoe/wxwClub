@@ -225,6 +225,18 @@ function controller() {
                         ], 2);
                     } else {
                         echo '<title>',$nickname,' (@',$club,'@',$config['base'],')</title>',
+                            '<link href="'.$base.'/club/'.$club.'" rel="alternate" type="application/activity+json">',
+                            '<meta content="profile" property="og:type" />',
+                            '<meta content="',$summary,'" name="description">',
+                            '<meta content="'.$base.'/club/'.$club.'" property="og:url" />',
+                            '<meta content="',$config['nodeName'],'" property="og:site_name" />',
+                            '<meta content="',$nickname,' (@',$club,'@',$config['base'],')" property="og:title" />',
+                            '<meta content="',$summary,'" property="og:description" />',
+                            '<meta content="',($pdo['avatar'] ?: $config['default']['avatar']),'" property="og:image" />',
+                            '<meta content="400" property="og:image:width" />',
+                            '<meta content="400" property="og:image:height" />',
+                            '<meta content="summary" property="twitter:card" />',
+                            '<meta content="',$club,'@',$config['base'],'" property="profile:username" />',
                             '<style>.info::before{content:"";background:url(',($pdo['banner'] ?: $config['default']['banner']),') no-repeat center;',
                             'background-size:cover;opacity:0.35;z-index:-1;position:absolute;width:720px;height:220px;top:0px;left:0px;border-radius:8px;}</style>',
                             '<div class="info"><img src="',($pdo['avatar'] ?: $config['default']['avatar']),'" width="50" /><p style="line-height:1px"><br></p>',
