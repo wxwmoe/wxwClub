@@ -309,14 +309,18 @@ function controller() {
         
         case 'webfinger':
             $resource = $_GET['resource'];
-            if (!preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches))
+            if (!preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches)) {
                 Club_Json_Output(['message' => 'Resource is invalid'], 0, 400);
+                break;
+            }
             
             $resource_host = $matches[2];
             $resource_identifier = $matches[1];
     		
-    		if ($resource_host != $config['base'])
+    		if ($resource_host != $config['base']) {
     		    Club_Json_Output(['message' => 'Resource host does not match'], 0, 404);
+    		    break;
+    		}
     		
     		$club_url = $base.'/club/'.$resource_identifier;
     		if (Club_Exist($resource_identifier)) {
