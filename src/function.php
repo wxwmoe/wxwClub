@@ -156,8 +156,10 @@ function Club_Announce_Process($jsonld) {
     $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
     $pdo->execute([':object' => $jsonld['object']['id']]);
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
-        foreach ($to = array_merge($jsonld['to'], $jsonld['cc']) as $cc) if (($club_url = $base.'/club/') == substr($cc, 0, strlen($club_url))) $clubs[] = explode('/', substr($cc, strlen($club_url)))[0];
-        if (!empty($clubs) && ($clubs = array_unique($clubs)) && in_array($public_streams, $to)) {
+        foreach ($to = array_merge($jsonld['to'], $jsonld['cc']) as $cc)
+            if (($club_url = $base.'/club/') == substr($cc, 0, strlen($club_url)))
+                if ($club = Club_Exist(explode('/', substr($cc, strlen($club_url)))[0])) $clubs[$club] = 1;
+        if (!empty($clubs) && ($clubs = array_keys($clubs)) && in_array($public_streams, $to)) {
             if ($actor = Club_Get_Actor($clubs[0], $jsonld['actor'])) {
                 $pdo = $db->prepare('insert into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`) values(:uid, :type, :clubs, :object, :timestamp)');
                 $pdo->execute([':uid' => $actor['uid'], ':type' => 'Create', ':clubs' => Club_Json_Encode($clubs), 'object' => $jsonld['object']['id'], 'timestamp' => ($time = time())]);
