@@ -27,7 +27,7 @@ function controller() {
                             $jsonld = json_decode($input = file_get_contents('php://input'), 1);
                             if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base']) {
                                 
-                                $verify = ActivityPub_Verification($input);
+                                $verify = ActivityPub_Verification($input, $club);
                                 if ($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object']) {
                                     if ($verify) {
                                         $pdo = $db->prepare('delete from `users` where `actor` = :actor');
@@ -45,7 +45,7 @@ function controller() {
                                 switch ($jsonld['type']) {
                                     case 'Create': Club_Announce_Process($jsonld); break;
                                     case 'Follow':
-                                        if ($actor = Club_Get_Actor($club, $jsonld['actor'])) {
+                                        if ($actor = Club_Get_Actor($jsonld['actor'], $club)) {
                                             $pdo = $db->prepare('insert into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
                                             $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':timestamp' => time()]);
                                             $pdo = $db->prepare('select f.id from `followers` as f left join `clubs` as `c` on f.cid = c.cid where f.uid = :uid and c.name = :club');
