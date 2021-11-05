@@ -19,8 +19,8 @@ function controller() {
     switch ($to) {
         
         case 'club':
-            $club_url = $base . '/club/' . ($club = ($uri = explode('/', $uri))[2]);
-            if (Club_Exist($club)) {
+            if ($club = Club_Exist(($uri = explode('/', $uri))[2])) {
+                $club_url = $base.'/club/'.$club;
                 if (isset($uri[3])) switch ($uri[3]) {
                     case 'inbox':
                         if ($_SERVER['REQUEST_METHOD'] == 'POST') {

@@ -75,8 +75,8 @@ function ActivityPub_Verification($input = null, $pull = true) {
 function Club_Exist($club) {
     global $db, $config;
     if (strlen($club) <= 30 && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]+$/u', $club)) {
-        $pdo = $db->prepare('select `cid` from `clubs` where `name` = :name'); $pdo->execute([':name' => $club]);
-        return $pdo->fetch(PDO::FETCH_ASSOC) ? true : ($config['openRegistrations'] ? Club_Create($club) : false);
+        $pdo = $db->prepare('select `name` from `clubs` where `name` = :name'); $pdo->execute([':name' => $club]);
+        return ($pdo = $pdo->fetch(PDO::FETCH_COLUMN, 0)) ? $pdo : ($config['openRegistrations'] ? Club_Create($club) : false);
     } return false;
 }
 
@@ -90,7 +90,7 @@ function Club_Create($club) {
     	]); openssl_pkey_export($key, $priv_key);
         $detail = openssl_pkey_get_details($key);
         $pdo = $db->prepare('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values(:name, :public, :private, :timestamp)');
-        return (bool)$pdo->execute([':name' => $club, ':public' => $detail['key'], ':private' => $priv_key, ':timestamp' => time()]);
+        return $pdo->execute([':name' => $club, ':public' => $detail['key'], ':private' => $priv_key, ':timestamp' => time()]) ? $club : false;
     } return false;
 }
 
