@@ -45,22 +45,28 @@ function ActivityPub_Signature($url, $club, $date, $digest = null) {
     } return false;
 }
 
-function ActivityPub_Verification($input = null, $club = null) {
+function ActivityPub_Verification($input = null, $pull = true) {
     global $db; if (isset($_SERVER['HTTP_SIGNATURE'])) {
         preg_match_all('/[,\s]*(.*?)="(.*?)"/', $_SERVER['HTTP_SIGNATURE'], $matches);
         foreach ($matches[1] as $k => $v) $signature[$v] = $matches[2][$k];
         if (($headers = explode(' ', $signature['headers']))[0] == '(request-target)') {
-            if ($actor = Club_Get_Actor(explode('#', $signature['keyId'])[0], $club, false)) {
-                if ($public_key = $actor['public_key']) {
-                    $signed_string = '(request-target): '.strtolower($_SERVER['REQUEST_METHOD']).' '.$_SERVER['REQUEST_URI'];
-                    foreach (array_slice($headers, 1) as $header) $signed_string .= "\n".$header.': '.$_SERVER['HTTP_'.strtoupper(str_replace('-','_',$header))];
-                    if (openssl_verify($signed_string, base64_decode($signature['signature']), $public_key, $signature['algorithm'])) {
-                        if (isset($_SERVER['HTTP_DIGEST'])) {
-                            preg_match('/^(.*?)=(.*?)$/', $_SERVER['HTTP_DIGEST'], $matches);
-                            return (hash(str_replace('-','',$matches[1]), $input, 1) == base64_decode($matches[2]));
-                        } return true;
-                    }
+            $actor = explode('#', $signature['keyId'])[0];
+            $pdo = $db->prepare('select `public_key` from `users` where `actor` = :actor');
+            $pdo->execute([':actor' => $actor]);
+            if ($public_key = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
+                $signed_string = '(request-target): '.strtolower($_SERVER['REQUEST_METHOD']).' '.$_SERVER['REQUEST_URI'];
+                foreach (array_slice($headers, 1) as $header) $signed_string .= "\n".$header.': '.$_SERVER['HTTP_'.strtoupper(str_replace('-','_',$header))];
+                if (openssl_verify($signed_string, base64_decode($signature['signature']), $public_key, $signature['algorithm'])) {
+                    if (isset($_SERVER['HTTP_DIGEST'])) {
+                        preg_match('/^(.*?)=(.*?)$/', $_SERVER['HTTP_DIGEST'], $matches);
+                        return (hash(str_replace('-','',$matches[1]), $input, 1) == base64_decode($matches[2]));
+                    } return true;
                 }
+            } elseif ($pull) {
+                $pdo = $db->query('select `name` from `clubs` limit 1');
+                $club = $pdo->fetch(PDO::FETCH_COLUMN, 0);
+                if (Club_Get_Actor($club, $actor))
+                    return ActivityPub_Verification($input, false);
             }
         }
     } return false;
@@ -88,33 +94,28 @@ function Club_Create($club) {
     } return false;
 }
 
-function Club_Get_Actor($actor, $club = null, $pull = true) {
-    global $db; $pdo = $db->prepare('select `uid`,`name`,`inbox`,`public_key` from `users` where `actor` = :actor');
+function Club_Get_Actor($club, $actor) {
+    global $db; $pdo = $db->prepare('select `uid`,`name`,`inbox` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     if ($pdo = $pdo->fetch(PDO::FETCH_ASSOC)) {
         $uid = $pdo['uid'];
         $name = $pdo['name'];
         $inbox = $pdo['inbox'];
-        $public_key = $pdo['public_key'];
-    } elseif ($pull) {
-        if (!isset($club)) {
-            $pdo = $db->query('select `name` from `clubs` limit 1');
-            $club = $pdo->fetch(PDO::FETCH_COLUMN, 0);
-        } $jsonld = json_decode(ActivityPub_GET($actor, $club), 1);
+    } else {
+        $jsonld = json_decode(ActivityPub_GET($actor, $club), 1);
         if ($jsonld['id'] == $actor) {
             $inbox = $jsonld['inbox'];
-            $public_key = $jsonld['publicKey']['publicKeyPem'];
             $shared_inbox = $jsonld['endpoints']['sharedInbox'] ?: $jsonld['inbox'];
             $name = $jsonld['preferredUsername'].'@'.parse_url($jsonld['id'], PHP_URL_HOST);
             $pdo = $db->prepare('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`) values (:name, :actor, :inbox, :public_key, :shared_inbox, :timestamp)');
             $pdo->execute([
-                ':name' => $name, ':actor' => $jsonld['id'], ':inbox' => $jsonld['inbox'], ':timestamp' => time(), ':public_key' => $public_key, ':shared_inbox' => $shared_inbox
+                ':name' => $name, ':actor' => $jsonld['id'], ':inbox' => $jsonld['inbox'], ':timestamp' => time(),
+                ':public_key' => $jsonld['publicKey']['publicKeyPem'], ':shared_inbox' => $shared_inbox
             ]);
             $pdo = $db->query('select last_insert_id()');
             $uid = $pdo->fetch(PDO::FETCH_COLUMN, 0);
         } else return false;
-    } else return false;
-    return ['uid' => $uid, 'name' => $name, 'inbox' => $inbox, 'public_key' => $public_key];
+    } return ['uid' => $uid, 'name' => $name, 'inbox' => $inbox];
 }
 
 function Club_Task_Create($type, $club, $jsonld) {
@@ -157,7 +158,7 @@ function Club_Announce_Process($jsonld) {
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
         foreach ($to = array_merge($jsonld['to'], $jsonld['cc']) as $cc) if (($club_url = $base.'/club/') == substr($cc, 0, strlen($club_url))) $clubs[] = explode('/', substr($cc, strlen($club_url)))[0];
         if (!empty($clubs) && ($clubs = array_unique($clubs)) && in_array($public_streams, $to)) {
-            if ($actor = Club_Get_Actor($jsonld['actor'], $clubs[0])) {
+            if ($actor = Club_Get_Actor($clubs[0], $jsonld['actor'])) {
                 $pdo = $db->prepare('insert into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`) values(:uid, :type, :clubs, :object, :timestamp)');
                 $pdo->execute([':uid' => $actor['uid'], ':type' => 'Create', ':clubs' => Club_Json_Encode($clubs), 'object' => $jsonld['object']['id'], 'timestamp' => ($time = time())]);
                 $pdo = $db->query('select last_insert_id()');

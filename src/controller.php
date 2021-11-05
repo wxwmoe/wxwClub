@@ -27,13 +27,12 @@ function controller() {
                             $jsonld = json_decode($input = file_get_contents('php://input'), 1);
                             if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base']) {
                                 
-                                $verify = ActivityPub_Verification($input, $club);
                                 if ($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object']) {
-                                    if ($verify) {
+                                    if (ActivityPub_Verification($input, false)) {
                                         $pdo = $db->prepare('delete from `users` where `actor` = :actor');
                                         $pdo->execute([':actor' => $jsonld['actor']]);
                                     } break;
-                                }
+                                } else $verify = ActivityPub_Verification($input);
                                 if ($config['nodeDebugging']) {
                                     $file_name = date('Y-m-d_H:i:s_').$club.'_'.$jsonld['type'];
                                     file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
@@ -45,7 +44,7 @@ function controller() {
                                 switch ($jsonld['type']) {
                                     case 'Create': Club_Announce_Process($jsonld); break;
                                     case 'Follow':
-                                        if ($actor = Club_Get_Actor($jsonld['actor'], $club)) {
+                                        if ($actor = Club_Get_Actor($club, $jsonld['actor'])) {
                                             $pdo = $db->prepare('insert into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
                                             $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':timestamp' => time()]);
                                             $pdo = $db->prepare('select f.id from `followers` as f left join `clubs` as `c` on f.cid = c.cid where f.uid = :uid and c.name = :club');
@@ -261,13 +260,12 @@ function controller() {
                 $jsonld = json_decode($input = file_get_contents('php://input'), 1);
                 if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base']) {
                     
-                    $verify = ActivityPub_Verification($input);
                     if ($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object']) {
-                        if ($verify) {
+                        if (ActivityPub_Verification($input, false)) {
                             $pdo = $db->prepare('delete from `users` where `actor` = :actor');
                             $pdo->execute([':actor' => $jsonld['actor']]);
                         } break;
-                    }
+                    } else $verify = ActivityPub_Verification($input);
                     if ($config['nodeDebugging']) {
                         $file_name = date('Y-m-d_H:i:s').'_shared_inbox_'.$jsonld['type'];
                         file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
