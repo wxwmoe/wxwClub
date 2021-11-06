@@ -28,8 +28,8 @@ function ActivityPub_CURL($url, $date, $head, $data = null) {
     foreach ($head as $k => $v) $curl->setHeader($k, $v);
     if (isset($data)) $curl->post($url, $data); else $curl->get($url);
     if ($config['nodeDebugging']) {
-        $url = str_replace(['https://', '/'], ['', '^'], $url);
-        $file_name = date('Y-m-d_H:i:s_').(isset($data)?'post':'get').'_'.$url;
+        $url = str_replace(['https://', '/'], ['', 'Ⳇ'], $curl->responseHeaders['Status-Line'].$url);
+        $file_name = date('Y-m-d_H:i:s_').(isset($data)?'POST':'GET').' '.$url;
         file_put_contents(APP_ROOT.'/curl_logs/'.$file_name.'.json', Club_Json_Encode([
             'header' => $curl->responseHeaders, 'result' => $curl->response, 'error' => $curl->error
         ]));
