@@ -7,11 +7,13 @@ $ver = '0.0.3'; $base = 'https://'.$config['base'];
 $public_streams = 'https://www.w3.org/ns/activitystreams#Public';
 
 if ($config['nodeDebugging']) {
-    if (!is_dir('curl_logs')) mkdir('curl_logs');
-    if (!is_dir('error_logs')) mkdir('error_logs');
-    if (!is_dir('inbox_logs')) mkdir('inbox_logs');
-    if (!is_dir('outbox_logs')) mkdir('outbox_logs');
-    ini_set('error_log', 'error_logs/'.date('Y-m-d_H:i:s').'_error.log');
+    if (!is_dir('logs')) mkdir('logs');
+    if (!is_dir('logs/curl')) mkdir('logs/curl');
+    if (!is_dir('logs/error')) mkdir('logs/error');
+    if (!is_dir('logs/inbox')) mkdir('logs/inbox');
+    if (!is_dir('logs/outbox')) mkdir('logs/outbox');
+    if (!is_dir('logs/webfinger')) mkdir('logs/webfinger');
+    ini_set('error_log', 'logs/error/'.date('Y-m-d_H:i:s').'_error.log');
 }
 
 try {

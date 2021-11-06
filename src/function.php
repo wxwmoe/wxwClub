@@ -29,9 +29,9 @@ function ActivityPub_CURL($url, $date, $head, $data = null) {
     if (isset($data)) $curl->post($url, $data); else $curl->get($url);
     if ($config['nodeDebugging']) {
         $info = substr($curl->responseHeaders['Status-Line'], -1) == ' ' ? '' : ' ';
-        $info = str_replace(['https://', '/', ' '], ['', 'Ⳇ', '_'], strtolower($curl->responseHeaders['Status-Line']).$info.$url);
+        $info = str_replace(['https://', '/', ' ', '\\'], ['', 'Ⳇ', '_', 'Ⳇ'], strtolower($curl->responseHeaders['Status-Line']).$info.$url);
         $file_name = date('Y-m-d_H:i:s_').(isset($data)?'post':'get').'_'.$info;
-        file_put_contents(APP_ROOT.'/curl_logs/'.$file_name.'.json', Club_Json_Encode([
+        file_put_contents(APP_ROOT.'/logs/curl/'.$file_name.'.json', Club_Json_Encode([
             'header' => $curl->responseHeaders, 'result' => $curl->response, 'error' => $curl->error
         ]));
     } return $curl->error ? false : ($curl->response ?: true);
@@ -145,8 +145,8 @@ function Club_Push_Activity($club, $activity, $inbox = false) {
     $activity = Club_Json_Encode($activity);
     if ($config['nodeDebugging']) {
         $file_name = date('Y-m-d_H:i:s_').$club.'_'.$type;
-        file_put_contents(APP_ROOT.'/outbox_logs/'.$file_name.'_output.json', $activity);
-        file_put_contents(APP_ROOT.'/outbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+        file_put_contents(APP_ROOT.'/logs/outbox/'.$file_name.'_output.json', $activity);
+        file_put_contents(APP_ROOT.'/logs/outbox/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
     }
     if ($task = Club_Task_Create('push', $club, $activity)) {
         if ($inbox) Club_Queue_Insert($task, $inbox);

@@ -35,9 +35,9 @@ function controller() {
                                 } else $verify = ActivityPub_Verification($input);
                                 if ($config['nodeDebugging']) {
                                     $file_name = date('Y-m-d_H:i:s_').$club.'_'.$jsonld['type'];
-                                    file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_input.json', $input);
-                                    file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
-                                    if (!$verify) file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_verify_failed', '');
+                                    file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_input.json', $input);
+                                    file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+                                    if (!$verify) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_verify_failed', '');
                                 }
                                 if ($config['nodeInboxVerify'] && !$verify) break;
                                 
@@ -264,9 +264,9 @@ function controller() {
                     } else $verify = ActivityPub_Verification($input);
                     if ($config['nodeDebugging']) {
                         $file_name = date('Y-m-d_H:i:s').'_shared_inbox_'.$jsonld['type'];
-                        file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_input.json', $input);
-                        file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
-                        if (!$verify) file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_verify_failed', '');
+                        file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_input.json', $input);
+                        file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+                        if (!$verify) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_verify_failed', '');
                     }
                     if ($config['nodeInboxVerify'] && !$verify) break;
                     
@@ -307,6 +307,10 @@ function controller() {
         
         case 'webfinger':
             $resource = $_GET['resource'];
+            if ($config['nodeDebugging']) {
+                $file_name = date('Y-m-d_H:i:s').'_'.str_replace(['/', ' ', '\\'], ['Ⳇ', '_', 'Ⳇ'], $resource);
+                file_put_contents(APP_ROOT.'/logs/webfinger/'.$file_name.'.json', Club_Json_Encode($_SERVER));
+            }
             if (preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches)) {
                 $resource_identifier = $matches[1];
                 if (($resource_host = $matches[2]) != $config['base']) {

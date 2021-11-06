@@ -17,9 +17,10 @@ function shutdown() {
 };
 
 if ($config['nodeDebugging']) {
-    if (!is_dir('curl_logs')) mkdir('curl_logs');
-    if (!is_dir('error_logs')) mkdir('error_logs');
-    ini_set('error_log', 'error_logs/'.date('Y-m-d_H:i:s').'_error.log');
+    if (!is_dir('logs')) mkdir('logs');
+    if (!is_dir('logs/curl')) mkdir('logs/curl');
+    if (!is_dir('logs/error')) mkdir('logs/error');
+    ini_set('error_log', 'logs/error/'.date('Y-m-d_H:i:s').'_error.log');
 }
 
 try {
