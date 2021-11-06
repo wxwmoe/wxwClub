@@ -39,6 +39,8 @@
     'nodeTimezone' => 'Asia/Shanghai',
     // 调试模式
     'nodeDebugging' => false,
+    // 安全模式
+    'nodeInboxVerify' => false,
     // 管理信息
     'nodeMaintainer' => ['name' => '@admin', 'email' => 'support@example.com'],
     // 实例描述

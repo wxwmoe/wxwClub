@@ -39,7 +39,7 @@ function controller() {
                                     file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
                                     if (!$verify) file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_verify_failed', '');
                                 }
-                                if (!$verify) break;
+                                if ($config['nodeInboxVerify'] && !$verify) break;
                                 
                                 switch ($jsonld['type']) {
                                     case 'Create': Club_Announce_Process($jsonld); break;
@@ -268,7 +268,7 @@ function controller() {
                         file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
                         if (!$verify) file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_verify_failed', '');
                     }
-                    if (!$verify) break;
+                    if ($config['nodeInboxVerify'] && !$verify) break;
                     
                     switch ($jsonld['type']) {
                         case 'Create': Club_Announce_Process($jsonld); break;
