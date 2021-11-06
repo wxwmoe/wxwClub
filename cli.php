@@ -3,6 +3,7 @@
 
 require('config.php');
 require('src/worker.php');
+define('APP_ROOT', dirname(__FILE__));
 date_default_timezone_set($config['nodeTimezone']);
 $ver = '0.0.3'; $base = 'https://'.$config['base']; $stop = false;
 
@@ -16,6 +17,7 @@ function shutdown() {
 };
 
 if ($config['nodeDebugging']) {
+    if (!is_dir('curl_logs')) mkdir('curl_logs');
     if (!is_dir('error_logs')) mkdir('error_logs');
     ini_set('error_log', 'error_logs/'.date('Y-m-d_H:i:s').'_error.log');
 }

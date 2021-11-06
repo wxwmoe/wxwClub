@@ -35,9 +35,9 @@ function controller() {
                                 } else $verify = ActivityPub_Verification($input);
                                 if ($config['nodeDebugging']) {
                                     $file_name = date('Y-m-d_H:i:s_').$club.'_'.$jsonld['type'];
-                                    file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
-                                    file_put_contents('inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
-                                    if (!$verify) file_put_contents('inbox_logs/'.$file_name.'_verify_failed', '');
+                                    file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_input.json', $input);
+                                    file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+                                    if (!$verify) file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_verify_failed', '');
                                 }
                                 if (!$verify) break;
                                 
@@ -68,9 +68,7 @@ function controller() {
                                         switch ($jsonld['object']['type']) {
                                             case 'Follow':
                                                 $club = explode('/', $jsonld['object']['object'])[4];
-                                                $pdo = $db->prepare('delete from `followers` where `cid` in'.
-                                                    ' (select cid from `clubs` where `name` = :club)'.
-                                                    ' and `uid` in (select uid from `users` where `actor` = :actor)');
+                                                $pdo = $db->prepare('delete from `followers` where `cid` in (select cid from `clubs` where `name` = :club) and `uid` in (select uid from `users` where `actor` = :actor)');
                                                 $pdo->execute([':club' => $club, ':actor' => $jsonld['actor']]); break;
                                             default: break;
                                         } break;
@@ -110,9 +108,7 @@ function controller() {
                                 $arr['prev'] .= $page - 1;
                             }
                             $pdo = $db->prepare('select u.actor, a.activity, b.object, b.timestamp from `announces` `a`'.
-                            ' left join `clubs` `c` on a.cid = c.cid'.
-                            ' left join `users` `u` on a.uid = u.uid'.
-                            ' left join `activities` `b` on a.activity = b.id'.
+                            ' left join `clubs` `c` on a.cid = c.cid left join `users` `u` on a.uid = u.uid left join `activities` `b` on a.activity = b.id'.
                             ' where c.name = :club order by b.timestamp'.$order.' limit '.(($page-1)*20).', 20');
                             $pdo->execute([':club' => $club]);
                             foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $announce) {
@@ -268,9 +264,9 @@ function controller() {
                     } else $verify = ActivityPub_Verification($input);
                     if ($config['nodeDebugging']) {
                         $file_name = date('Y-m-d_H:i:s').'_shared_inbox_'.$jsonld['type'];
-                        file_put_contents('inbox_logs/'.$file_name.'_input.json', $input);
-                        file_put_contents('inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
-                        if (!$verify) file_put_contents('inbox_logs/'.$file_name.'_verify_failed', '');
+                        file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_input.json', $input);
+                        file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+                        if (!$verify) file_put_contents(APP_ROOT.'/inbox_logs/'.$file_name.'_verify_failed', '');
                     }
                     if (!$verify) break;
                     

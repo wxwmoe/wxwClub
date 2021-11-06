@@ -1,11 +1,13 @@
 <?php
 require('config.php');
 require('src/controller.php');
+define('APP_ROOT', dirname(__FILE__));
 date_default_timezone_set($config['nodeTimezone']);
 $ver = '0.0.3'; $base = 'https://'.$config['base'];
 $public_streams = 'https://www.w3.org/ns/activitystreams#Public';
 
 if ($config['nodeDebugging']) {
+    if (!is_dir('curl_logs')) mkdir('curl_logs');
     if (!is_dir('error_logs')) mkdir('error_logs');
     if (!is_dir('inbox_logs')) mkdir('inbox_logs');
     if (!is_dir('outbox_logs')) mkdir('outbox_logs');

@@ -17,7 +17,7 @@ function ActivityPub_POST($url, $club, $jsonld) {
 }
 
 function ActivityPub_CURL($url, $date, $head, $data = null) {
-    global $ver, $base;
+    global $ver, $base, $config;
     $curl = new Curl();
 	$curl->setTimeout(100);
 	$curl->setMaximumRedirects(3);
@@ -27,7 +27,13 @@ function ActivityPub_CURL($url, $date, $head, $data = null) {
     $curl->setHeader('Date', $date);
     foreach ($head as $k => $v) $curl->setHeader($k, $v);
     if (isset($data)) $curl->post($url, $data); else $curl->get($url);
-    return $curl->error ? false : ($curl->response ?: true);
+    if ($config['nodeDebugging']) {
+        $url = str_replace(['https://', '/'], ['', '^'], $url);
+        $file_name = date('Y-m-d_H:i:s_').(isset($data)?'post':'get').'_'.$url;
+        file_put_contents(APP_ROOT.'/curl_logs/'.$file_name.'.json', Club_Json_Encode([
+            'header' => $curl->responseHeaders, 'result' => $curl->response, 'error' => $curl->error
+        ]));
+    } return $curl->error ? false : ($curl->response ?: true);
 }
 
 function ActivityPub_Signature($url, $club, $date, $digest = null) {
@@ -138,8 +144,8 @@ function Club_Push_Activity($club, $activity, $inbox = false) {
     $activity = Club_Json_Encode($activity);
     if ($config['nodeDebugging']) {
         $file_name = date('Y-m-d_H:i:s_').$club.'_'.$type;
-        file_put_contents('outbox_logs/'.$file_name.'_output.json', $activity);
-        file_put_contents('outbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
+        file_put_contents(APP_ROOT.'/outbox_logs/'.$file_name.'_output.json', $activity);
+        file_put_contents(APP_ROOT.'/outbox_logs/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
     }
     if ($task = Club_Task_Create('push', $club, $activity)) {
         if ($inbox) Club_Queue_Insert($task, $inbox);
@@ -178,7 +184,7 @@ function Club_Announce_Process($jsonld) {
                             'object' => $jsonld['object']['id']
                         ]);
                         $pdo = $db->prepare('insert into `announces`(`cid`,`uid`,`activity`,`content`,`timestamp`)'.
-                        ' select `cid`, :uid as `uid`, :activity as `activity`, :content as `content`, :timestamp as `timestamp` from `clubs` where `name` = :club');
+                            ' select `cid`, :uid as `uid`, :activity as `activity`, :content as `content`, :timestamp as `timestamp` from `clubs` where `name` = :club');
                         $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':activity' => $activity_id,
                             ':content' => strip_tags($jsonld['object']['content']), ':timestamp' => strtotime($jsonld['published'])]);
                     }
