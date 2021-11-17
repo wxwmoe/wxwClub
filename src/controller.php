@@ -223,6 +223,7 @@ function controller() {
                         ], 2);
                     } else {
                         echo '<title>',$nickname,' (@',$club,'@',$config['base'],')</title>',
+                            '<style>a{color:#000;text-decoration:none}</style>',
                             '<link href="'.$base.'/club/'.$club.'" rel="alternate" type="application/activity+json">',
                             '<meta content="profile" property="og:type" />',
                             '<meta content="',$summary,'" name="description">',
