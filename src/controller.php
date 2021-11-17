@@ -241,12 +241,15 @@ function controller() {
                             '<h3 style="position:absolute;top:10px;left:68px">',$nickname,' (@',$club,'@',$config['base'],')</h3>',
                             '<div style="font-size:14px">',$summary,'</div><p style="line-height:1px"><br></p></div>',
                             '<div style="font-size:14px"><p>近期活动：</p>';
-                        $activities = $db->prepare('select u.name, a.content, a.timestamp from `announces` as `a` left join `users` as `u` on a.uid = u.uid where `cid` = :cid order by `timestamp` desc');
-                        $activities->execute([':cid' => $pdo['cid']]);
+                        $page = (int)($_GET['page'] ?? 1);
+                        $activities = $db->prepare('select u.name, a.content, a.timestamp from `announces` as `a` left join `users` as `u` on a.uid = u.uid where `cid` = :cid order by `timestamp` desc limit :page, 20');
+                        $activities->execute([':cid' => $pdo['cid'], ':page' => $page - 1]);
                         if ($activities = $activities->fetchAll(PDO::FETCH_ASSOC))
                             foreach ($activities as $activity)
                                 echo '<p>[',date('Y-m-d H:i:s', $activity['timestamp']),'] ',$activity['name'],': ',$activity['content'],'</p>';
                         else echo '<p>群组还没有活动，快来发送一条吧 ~</p>';
+                        echo '<p>',($page > 1 ? '<a href="'.$base.'/club/'.$club.'?page='. ($page - 1) .'">上一页</a>' : '<span style="color:#aaa">上一页<span>'),' | '
+                            ,(count($activities) == 20 ? '<a href="'.$base.'/club/'.$club.'?page='. ($page + 1) .'">下一页</a>' : '<span style="color:#aaa">下一页</span>'),'</p>';
                         echo '</div>';
                     }
                 }
@@ -350,7 +353,7 @@ function controller() {
             echo '<h3>'.$config['nodeName'].' (<a href="https://github.com/wxwmoe/wxwClub" target="_blank">wxwClub/'.$ver.'</a>)</h3><p>'.$config['nodeDescription'].'</p>';
             echo '<p><b><br>热门群组</b></p>';
             $pdo = $db->prepare('select name, nickname from (select c.name, c.nickname, (@id:=@id+1) as `id` from `announces` as `a` '.
-                'left join `clubs` as `c` on a.cid = c.cid, (select @id:=0) as `i` order by a.timestamp desc) as `h` group by name');
+                'left join `clubs` as `c` on a.cid = c.cid, (select @id:=0) as `i` order by a.timestamp desc) as `h` group by name limit 20');
             $pdo->execute();
             foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $club)
                 echo '<p><a href="'.$base.'/club/'.$club['name'].'" target="_blank">'.($club['nickname'] ?: $club['name']).' (@'.$club['name'].'@'.$config['base'].')</a></p>';
