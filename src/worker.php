@@ -2,7 +2,7 @@
 
 function worker() {
     global $db;
-    $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1 where `inuse` = 0 and `timestamp` <= ? order by `timestamp` asc limit 1;');
+    $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1 where `inuse` = 0 and `timestamp` <= ? order by `timestamp` asc limit 1');
     $pdo->execute([time()]);
     $pdo = $db->query('select q.id, c.name as club, t.type, t.jsonld, q.target, q.retry from `queues` as `q` left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid where `id` = last_insert_id() and row_count() <> 0');
     if ($task = $pdo->fetch(PDO::FETCH_ASSOC)) {
@@ -32,6 +32,13 @@ function worker() {
         if ($task = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
             $pdo = $db->prepare('delete from `tasks` where `tid` = :tid');
             $pdo->execute([':tid' => $task]);
-        } else sleep(1);
+        } else {
+            $pdo = $db->prepare('select `id` from `queues` where `inuse` = 1 and `timestamp` <= :timestamp order by `timestamp` asc limit 1');
+            $pdo->execute([':timestamp' => time() - 600]);
+            if ($id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
+                $pdo = $db->prepare('update `queues` set `inuse` = 0 where `id` = :id');
+                $pdo->execute([':id' => $id]);
+            } else sleep(1);
+        }
     }
 }
