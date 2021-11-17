@@ -243,7 +243,7 @@ function controller() {
                             '<div style="font-size:14px"><p>近期活动：</p>';
                         $page = (int)($_GET['page'] ?? 1);
                         $activities = $db->prepare('select u.name, a.content, a.timestamp from `announces` as `a` left join `users` as `u` on a.uid = u.uid '.
-                            'where `cid` = :cid order by `timestamp` desc limit '.($page - 1).', 20');
+                            'where `cid` = :cid order by `timestamp` desc limit '.(($page - 1) * 20).', 20');
                         $activities->execute([':cid' => $pdo['cid']]);
                         if ($activities = $activities->fetchAll(PDO::FETCH_ASSOC))
                             foreach ($activities as $activity)
