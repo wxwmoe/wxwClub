@@ -38,7 +38,7 @@
     // 实例时区
     'nodeTimezone' => 'Asia/Shanghai',
     // 调试模式
-    'nodeDebugging' => false,
+    'nodeDebugging' => 0, // 0: 禁用日志，1: 记录所有，2: 只记错误
     // 安全模式
     'nodeInboxVerify' => false,
     // 管理信息
