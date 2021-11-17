@@ -20,6 +20,7 @@ function ActivityPub_CURL($url, $date, $head, $data = null) {
     global $ver, $base, $config;
     $curl = new Curl();
 	$curl->setTimeout(100);
+	$curl->setConnectTimeout(10);
 	$curl->setMaximumRedirects(3);
     $curl->setUserAgent('wxwClub '.$ver.'; '.$base);
     $curl->setHeader('Accept', 'application/activity+json');

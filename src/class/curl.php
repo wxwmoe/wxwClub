@@ -168,6 +168,7 @@ class Curl {
     
     public function setTimeout($seconds) { $this->setOpt(CURLOPT_TIMEOUT, $seconds); }
     public function setUserAgent($user_agent) { $this->setOpt(CURLOPT_USERAGENT, $user_agent); }
+    public function setConnectTimeout($seconds) { $this->setOpt(CURLOPT_CONNECTTIMEOUT, $seconds); }
     public function setMaximumRedirects($maximum_redirects) { $this->setOpt(CURLOPT_MAXREDIRS, $maximum_redirects); }
     
     public function attemptRetry() {
