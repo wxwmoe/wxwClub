@@ -243,12 +243,13 @@ function controller() {
                             '<div style="font-size:14px">',$summary,'</div><p style="line-height:1px"><br></p></div>',
                             '<div style="font-size:14px"><p>近期活动：</p>';
                         $page = (int)($_GET['page'] ?? 1);
-                        $activities = $db->prepare('select u.name, a.content, a.timestamp from `announces` as `a` left join `users` as `u` on a.uid = u.uid '.
-                            'where `cid` = :cid order by `timestamp` desc limit '.(($page - 1) * 20).', 20');
+                        $activities = $db->prepare('select u.name, act.object, a.content, a.timestamp from `announces` as `a` left join `users` as `u` on a.uid = u.uid '.
+                            'left join `activities` as `act` on a.activity = act.id where a.cid = :cid order by a.timestamp desc limit '.(($page - 1) * 20).', 20');
                         $activities->execute([':cid' => $pdo['cid']]);
                         if ($activities = $activities->fetchAll(PDO::FETCH_ASSOC))
                             foreach ($activities as $activity)
-                                echo '<p>[',date('Y-m-d H:i:s', $activity['timestamp']),'] ',$activity['name'],': ',$activity['content'],'</p>';
+                                echo '<p>[',date('Y-m-d H:i:s', $activity['timestamp']),'] ',
+                                    '<a href="',$activity['object'],'" target="_blank">',$activity['name'],': ',$activity['content'],'</a></p>';
                         else echo '<p>群组还没有活动，快来发送一条吧 ~</p>';
                         echo '<p>',($page > 1 ? '<a href="'.$base.'/club/'.$club.'?page='. ($page - 1) .'">上一页</a>' : '<span style="color:#aaa">上一页<span>'),' | '
                             ,(count($activities) == 20 ? '<a href="'.$base.'/club/'.$club.'?page='. ($page + 1) .'">下一页</a>' : '<span style="color:#aaa">下一页</span>'),'</p>';
