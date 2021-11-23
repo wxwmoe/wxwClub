@@ -118,7 +118,7 @@ function controller() {
                                     'id' => $club_url.'/activity#'.$announce['activity'].'/announce',
                                     'type' => 'Announce',
                                     'actor' => $club_url,
-                                    'published' => date('Y-m-d\TH:i:s\Z', $announce['timestamp']),
+                                    'published' => gmdate('Y-m-d\TH:i:s\Z', $announce['timestamp']),
                                     'to' => [$club_url.'/followers'],
                                     'cc' => [$announce['actor'], $public_streams],
                                     'object' => $announce['object']
@@ -202,7 +202,7 @@ function controller() {
                             'url' => $club_url,
                             'manuallyApprovesFollowers' => false,
                             'discoverable' => false,
-                            'published' => date('Y-m-d\TH:i:s\Z', $pdo['timestamp']),
+                            'published' => gmdate('Y-m-d\TH:i:s\Z', $pdo['timestamp']),
                             'devices' => $club_url.'/collections/devices',
                             'publicKey' => [
                                 'id' => $club_url.'#main-key',

@@ -180,7 +180,7 @@ function Club_Announce_Process($jsonld) {
                             'id' => $club_url.'/activity#'.$activity_id.'/announce',
                             'type' => 'Announce',
                             'actor' => $club_url,
-                            'published' => date('Y-m-d\TH:i:s\Z', $time),
+                            'published' => gmdate('Y-m-d\TH:i:s\Z', $time),
                             'to' => [$club_url.'/followers'],
                             'cc' => [$jsonld['actor'], $public_streams],
                             'object' => $jsonld['object']['id']
@@ -218,7 +218,7 @@ function Club_Tombstone_Process($jsonld) {
                         'id' => $club_url.'/activity#'.$activity['id'].'/announce',
                         'type' => 'Announce',
                         'actor' => $club_url,
-                        'published' => date('Y-m-d\TH:i:s\Z', $activity['timestamp']),
+                        'published' => gmdate('Y-m-d\TH:i:s\Z', $activity['timestamp']),
                         'to' => [$club_url.'/followers'],
                         'cc' => [
                             $jsonld['actor'],
