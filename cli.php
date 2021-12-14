@@ -32,5 +32,5 @@ try {
         default: echo 'Unknown parameters',"\n"; break;
     }
 } catch (PDOException $e) {
-    exit('Error: ' . $e->getMessage());
+    exit('Error: '.$e->getMessage()."\n");
 }

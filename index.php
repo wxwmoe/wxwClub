@@ -21,5 +21,6 @@ try {
         $config['mysql']['username'], $config['mysql']['password'], [PDO::ATTR_PERSISTENT => true]);
     controller();
 } catch (PDOException $e) {
-    exit('Error: ' . $e->getMessage());
+    http_response_code(500);
+    exit('Error: '.$e->getMessage());
 }
