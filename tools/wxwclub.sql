@@ -92,6 +92,7 @@ CREATE TABLE `queues` (
   `retry` tinyint NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   KEY `tid` (`tid`),
+  KEY `inuse` (`inuse`),
   KEY `timestamp` (`timestamp`),
   CONSTRAINT `queues_ibfk_2` FOREIGN KEY (`tid`) REFERENCES `tasks` (`tid`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

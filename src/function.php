@@ -151,13 +151,18 @@ function Club_Push_Activity($club, $activity, $inbox = false) {
         file_put_contents(APP_ROOT.'/logs/outbox/'.$file_name.'_output.json', $activity);
         if ($config['nodeDebugging'] == 1) file_put_contents(APP_ROOT.'/logs/outbox/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
     }
+    $commit = false;
+    $pdo = $db->beginTransaction();
     if ($task = Club_Task_Create('push', $club, $activity)) {
         if ($inbox) Club_Queue_Insert($task, $inbox);
         else {
             $pdo = $db->prepare('select distinct u.shared_inbox from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid where c.name = :club');
             $pdo->execute([':club' => $club]);
             foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $inbox) Club_Queue_Insert($task, $inbox);
-        }
+        } $commit = $db->commit();
+    } if (!$commit) {
+        if ($config['nodeDebugging']) file_put_contents(APP_ROOT.'/logs/outbox/'.$file_name.'_commit_failed');
+        $pdo = $db->rollback();
     }
 }
 
