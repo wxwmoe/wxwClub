@@ -188,7 +188,7 @@ function Club_Announce_Process($jsonld) {
                         $pdo = $db->prepare('insert into `announces`(`cid`,`uid`,`activity`,`content`,`timestamp`)'.
                             ' select `cid`, :uid as `uid`, :activity as `activity`, :content as `content`, :timestamp as `timestamp` from `clubs` where `name` = :club');
                         $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':activity' => $activity_id,
-                            ':content' => strip_tags($jsonld['object']['content']), ':timestamp' => strtotime($jsonld['published'])]);
+                            ':content' => strip_tags($jsonld['object']['content']), ':timestamp' => strtotime($jsonld['object']['published'])]);
                     }
                 }
             } else Club_Json_Output(['message' => 'Actor not found'], 0, 400);
