@@ -13,7 +13,7 @@ pcntl_signal(SIGTERM, 'shutdown');
 
 function shutdown() {
     global $stop; $stop = true;
-    echo 'Stopping, please wait ...',"\n";
+    echo date('[Y-m-d H:i:s]').' Stopping, please wait ...',"\n";
 };
 
 if ($config['nodeDebugging']) {
@@ -26,8 +26,9 @@ if ($config['nodeDebugging']) {
 try {
     $db = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'],
         $config['mysql']['username'], $config['mysql']['password'], [PDO::ATTR_PERSISTENT => true]);
+    $db->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
     if (isset($argv[1])) switch ($argv[1]) {
-        case 'worker': echo 'Start running worker ...',"\n"; while (!$stop) worker(); echo 'Worker stopped',"\n"; break;
+        case 'worker': echo date('[Y-m-d H:i:s]').' Start running worker ...',"\n"; while (!$stop) worker(); echo date('[Y-m-d H:i:s]').' Worker stopped',"\n"; break;
         default: echo 'Unknown parameters',"\n"; break;
     }
 } catch (PDOException $e) {
