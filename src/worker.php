@@ -46,7 +46,7 @@ function worker() {
             } else sleep(1);
         }
     }
-    if (memory_get_usage() > 128 * 1024 * 1024) {
+    if (memory_get_usage() > 5 * 1024 * 1024) {
         global $stop; $stop = true;
         echo date('[Y-m-d H:i:s]').' Memory limit exceeded, stopping ...',"\n";
     }
