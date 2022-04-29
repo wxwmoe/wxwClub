@@ -5,7 +5,7 @@ require('config.php');
 require('src/worker.php');
 define('APP_ROOT', dirname(__FILE__));
 date_default_timezone_set($config['nodeTimezone']);
-$ver = '0.0.3'; $base = 'https://'.$config['base']; $stop = false;
+$ver = '0.0.5'; $base = 'https://'.$config['base']; $stop = false;
 
 declare(ticks = 1);
 pcntl_signal(SIGINT, 'shutdown');

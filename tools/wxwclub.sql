@@ -57,6 +57,7 @@ CREATE TABLE `announces` (
   `cid` int NOT NULL,
   `uid` int NOT NULL,
   `activity` int NOT NULL,
+  `summary` text COLLATE utf8mb4_general_ci,
   `content` text COLLATE utf8mb4_general_ci NOT NULL,
   `timestamp` int NOT NULL,
   PRIMARY KEY (`id`),

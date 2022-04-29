@@ -192,10 +192,10 @@ function Club_Announce_Process($jsonld) {
                             'cc' => [$jsonld['actor'], $public_streams],
                             'object' => $jsonld['object']['id']
                         ]);
-                        $pdo = $db->prepare('insert into `announces`(`cid`,`uid`,`activity`,`content`,`timestamp`)'.
-                            ' select `cid`, :uid as `uid`, :activity as `activity`, :content as `content`, :timestamp as `timestamp` from `clubs` where `name` = :club');
+                        $pdo = $db->prepare('insert into `announces`(`cid`,`uid`,`activity`,`summary`,`content`,`timestamp`)'.
+                            ' select `cid`, :uid as `uid`, :activity as `activity`, :summary as `summary`, :content as `content`, :timestamp as `timestamp` from `clubs` where `name` = :club');
                         $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':activity' => $activity_id,
-                            ':content' => strip_tags($jsonld['object']['content']), ':timestamp' => strtotime($jsonld['object']['published'])]);
+                            ':summary' => $jsonld['object']['summary'], ':content' => strip_tags($jsonld['object']['content']), ':timestamp' => strtotime($jsonld['object']['published'])]);
                     }
                 }
             } else Club_Json_Output(['message' => 'Actor not found'], 0, 400);

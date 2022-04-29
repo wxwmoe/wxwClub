@@ -3,7 +3,7 @@ require('config.php');
 require('src/controller.php');
 define('APP_ROOT', dirname(__FILE__));
 date_default_timezone_set($config['nodeTimezone']);
-$ver = '0.0.3'; $base = 'https://'.$config['base'];
+$ver = '0.0.5'; $base = 'https://'.$config['base'];
 $public_streams = 'https://www.w3.org/ns/activitystreams#Public';
 
 if ($config['nodeDebugging']) {
