@@ -20,7 +20,7 @@ function worker() {
                     elseif ($retry <= 10) $timestamp = time() + 600;
                     elseif ($retry <= 100) $timestamp = time() + 3600;
                     else $timestamp = time() + 86400;
-                    if ($retry == 128) {
+                    if ($retry == 127) {
                         $pdo = $db->prepare('delete from `queues` where `id` = :id');
                         $pdo->execute([':id' => $task['id']]);
                         $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
