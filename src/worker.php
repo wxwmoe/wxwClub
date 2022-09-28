@@ -2,7 +2,7 @@
 
 function worker() {
     global $db;
-    $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1 where `inuse` = 0 and `timestamp` <= ? order by `timestamp` asc limit 1');
+    $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1 where `inuse` = 0 and `timestamp` <= ? order by `retry`, `timestamp` asc limit 1');
     $pdo->execute([time()]);
     $pdo = $db->query('select q.id, c.name as club, t.tid, t.type, t.jsonld, q.target, q.retry from `queues` as `q` left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid where `id` = last_insert_id() and row_count() <> 0');
     if ($task = $pdo->fetch(PDO::FETCH_ASSOC)) {
