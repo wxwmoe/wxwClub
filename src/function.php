@@ -28,7 +28,7 @@ function ActivityPub_CURL($url, $date, $head, $data = null) {
     $curl->setHeader('Date', $date);
     foreach ($head as $k => $v) $curl->setHeader($k, $v);
     if (isset($data)) $curl->post($url, $data); else $curl->get($url);
-    if ($config['nodeDebugging'] == 1 || ($config['nodeDebugging'] > 1 && !($curl->httpStatusCode == 200 || $curl->httpStatusCode == 202))) {
+    if ($config['nodeDebugging'] == 1) {
         $info = substr($curl->responseHeaders['Status-Line'], -1) == ' ' ? '' : ' ';
         $info = str_replace(['https://', '/', ' ', '\\'], ['', 'Ⳇ', '_', 'Ⳇ'], strtolower($curl->responseHeaders['Status-Line']).$info.$url);
         $file_name = date('Y-m-d_H:i:s_').(isset($data)?'post':'get').'_'.$info;
