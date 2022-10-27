@@ -19,9 +19,9 @@ function ActivityPub_POST($url, $club, $jsonld) {
 function ActivityPub_CURL($url, $date, $head, $data = null) {
     global $ver, $base, $config;
     $curl = new Curl();
-	$curl->setTimeout(10);
-	$curl->setConnectTimeout(3);
-	$curl->setMaximumRedirects(3);
+    $curl->setTimeout(10);
+    $curl->setConnectTimeout(3);
+    $curl->setMaximumRedirects(3);
     $curl->setUserAgent('wxwClub '.$ver.'; '.$base);
     $curl->setHeader('Accept', 'application/activity+json');
     $curl->setHeader('Content-Type', 'application/activity+json');
