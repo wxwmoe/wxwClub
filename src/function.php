@@ -136,10 +136,15 @@ function Club_Task_Create($type, $club, $jsonld) {
 
 function Club_Queue_Insert($task, $target) {
     global $db;
-    $pdo = $db->prepare('insert into `queues`(`tid`,`target`,`timestamp`) values (:tid, :target, :timestamp)');
-    $pdo->execute([':tid' => $task, ':target' => $target, ':timestamp' => time()]);
-    $pdo = $db->prepare('update `tasks` set `queues` = `queues` + 1 where `tid` = :tid');
-    return $pdo->execute([':tid' => $task]);
+    $pdo = $db->prepare('select `target` from `blacklist` where `target` = :target');
+    $pdo->execute([':target' => $target]);
+    if (empty($pdo->fetch(PDO::FETCH_COLUMN, 0))) {
+        $pdo = $db->prepare('insert into `queues`(`tid`,`target`,`timestamp`) values (:tid, :target, :timestamp)');
+        if ($pdo->execute([':tid' => $task, ':target' => $target, ':timestamp' => time()])) {
+            $pdo = $db->prepare('update `tasks` set `queues` = `queues` + 1 where `tid` = :tid');
+            return $pdo->execute([':tid' => $task]);
+        }
+    } return false;
 }
 
 function Club_Push_Activity($club, $activity, $inbox = false) {

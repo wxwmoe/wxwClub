@@ -98,3 +98,9 @@ CREATE TABLE `queues` (
   KEY `retry` (`retry`),
   CONSTRAINT `queues_ibfk_2` FOREIGN KEY (`tid`) REFERENCES `tasks` (`tid`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `blacklist` (
+  `target` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `timestamp` int DEFAULT NULL,
+  PRIMARY KEY (`target`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

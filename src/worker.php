@@ -21,6 +21,8 @@ function worker() {
                     elseif ($retry <= 100) $timestamp = time() + 3600;
                     else $timestamp = time() + 86400;
                     if ($retry == 127) {
+                        $pdo = $db->prepare('insert ignore into `blacklist`(`target`,`timestamp`) values (:target,:timestamp);');
+                        $pdo->execute([':target' => $task['target'], ':timestamp' => time()]);
                         $pdo = $db->prepare('delete from `queues` where `id` = :id');
                         $pdo->execute([':id' => $task['id']]);
                         $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
