@@ -8,7 +8,7 @@ function worker() {
     if ($task = $pdo->fetch(PDO::FETCH_ASSOC)) {
         switch ($task['type']) {
             case 'push':
-                $pdo = $db->prepare('select `target` from `blacklist` where `target` = :target');
+                $pdo = $db->prepare('select count(*) from `blacklist` where `target` = :target');
                 $pdo->execute([':target' => $task['target']]);
                 if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                     $pdo = $db->prepare('delete from `queues` where `id` = :id');

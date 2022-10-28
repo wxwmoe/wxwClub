@@ -136,7 +136,7 @@ function Club_Task_Create($type, $club, $jsonld) {
 
 function Club_Queue_Insert($task, $target) {
     global $db;
-    $pdo = $db->prepare('select `target` from `blacklist` where `target` = :target');
+    $pdo = $db->prepare('select count(*) from `blacklist` where `target` = :target');
     $pdo->execute([':target' => $target]);
     if (empty($pdo->fetch(PDO::FETCH_COLUMN, 0))) {
         $pdo = $db->prepare('insert into `queues`(`tid`,`target`,`timestamp`) values (:tid, :target, :timestamp)');
