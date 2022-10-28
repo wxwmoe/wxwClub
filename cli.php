@@ -5,9 +5,10 @@ require('config.php');
 require('src/worker.php');
 define('APP_ROOT', dirname(__FILE__));
 date_default_timezone_set($config['nodeTimezone']);
-$ver = '0.0.5'; $base = 'https://'.$config['base']; $stop = false;
+$ver = '0.0.5'; $base = 'https://'.$config['base'];
 
 declare(ticks = 1);
+$cycle = 0; $stop = false;
 pcntl_signal(SIGINT, 'shutdown');
 pcntl_signal(SIGTERM, 'shutdown');
 

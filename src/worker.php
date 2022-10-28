@@ -1,7 +1,7 @@
 <?php require('function.php');
 
 function worker() {
-    global $db;
+    global $db, $cycle; $idle = 0;
     $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1 where `inuse` = 0 and `timestamp` <= ? order by `retry`, `timestamp` asc limit 1');
     $pdo->execute([time()]);
     $pdo = $db->query('select q.id, c.name as club, t.tid, t.type, t.jsonld, q.target, q.retry from `queues` as `q` left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid where `id` = last_insert_id() and row_count() <> 0');
@@ -31,9 +31,10 @@ function worker() {
                     }
                 } break;
             default: break;
-        }
-    } else {
-        $pdo = $db->query('select `tid` from `tasks` where `queues` = 0 limit 1');
+        } $cycle++;
+    } else $idle = 1;
+    if ($idle || $cycle > 9) {
+        $pdo = $db->query('select `tid` from `tasks` where `queues` < 1 limit 1');
         if ($task = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
             $pdo = $db->prepare('delete from `tasks` where `tid` = :tid');
             $pdo->execute([':tid' => $task]);
@@ -43,8 +44,8 @@ function worker() {
             if ($id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                 $pdo = $db->prepare('update `queues` set `inuse` = 0 where `id` = :id');
                 $pdo->execute([':id' => $id]);
-            } else sleep(1);
-        }
+            } elseif ($idle) sleep(1);
+        } $cycle = 0;
     }
     if (memory_get_usage() > 5 * 1024 * 1024) {
         global $stop; $stop = true;
