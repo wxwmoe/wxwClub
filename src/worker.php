@@ -8,6 +8,15 @@ function worker() {
     if ($task = $pdo->fetch(PDO::FETCH_ASSOC)) {
         switch ($task['type']) {
             case 'push':
+                $pdo = $db->prepare('select `target` from `blacklist` where `target` = :target');
+                $pdo->execute([':target' => $target]);
+                if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) {
+                    $pdo = $db->prepare('delete from `queues` where `id` = :id');
+                    $pdo->execute([':id' => $task['id']]);
+                    $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
+                    $pdo->execute([':tid' => $task['tid']]);
+                    break;
+                }
                 if (ActivityPub_POST($task['target'], $task['club'], $task['jsonld'])) {
                     $pdo = $db->prepare('delete from `queues` where `id` = :id');
                     $pdo->execute([':id' => $task['id']]);
