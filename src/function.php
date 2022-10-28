@@ -17,8 +17,8 @@ function ActivityPub_POST($url, $club, $jsonld) {
 }
 
 function ActivityPub_CURL($url, $date, $head, $data = null) {
-    global $ver, $base, $config;
-    $curl = new Curl();
+    global $ver, $base, $curl, $config;
+    $curl = $curl ?? new Curl();
     $curl->setTimeout(10);
     $curl->setConnectTimeout(3);
     $curl->setMaximumRedirects(3);
@@ -35,9 +35,7 @@ function ActivityPub_CURL($url, $date, $head, $data = null) {
         file_put_contents(APP_ROOT.'/logs/curl/'.$file_name.'.json', Club_Json_Encode([
             'header' => $curl->responseHeaders, 'result' => $curl->response, 'error' => $curl->error
         ]));
-    } $result = $curl->error ? false : ($curl->response ?: true);
-    $curl->close();
-    return $result;
+    } return $curl->error ? false : ($curl->response ?: true);
 }
 
 function ActivityPub_Signature($url, $club, $date, $digest = null) {
