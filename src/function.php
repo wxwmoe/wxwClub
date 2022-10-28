@@ -35,7 +35,9 @@ function ActivityPub_CURL($url, $date, $head, $data = null) {
         file_put_contents(APP_ROOT.'/logs/curl/'.$file_name.'.json', Club_Json_Encode([
             'header' => $curl->responseHeaders, 'result' => $curl->response, 'error' => $curl->error
         ]));
-    } return $curl->error ? false : ($curl->response ?: true);
+    } $result = $curl->error ? false : ($curl->response ?: true);
+    $curl->close();
+    return $result;
 }
 
 function ActivityPub_Signature($url, $club, $date, $digest = null) {
