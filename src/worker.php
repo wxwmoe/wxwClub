@@ -9,36 +9,36 @@ function worker() {
         switch ($task['type']) {
             case 'push':
                 $pdo = $db->prepare('select `target` from `blacklist` where `target` = :target');
-                $pdo->execute([':target' => $target]);
+                $pdo->execute([':target' => $task['target']]);
                 if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                     $pdo = $db->prepare('delete from `queues` where `id` = :id');
                     $pdo->execute([':id' => $task['id']]);
                     $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
                     $pdo->execute([':tid' => $task['tid']]);
-                    break;
-                }
-                if (ActivityPub_POST($task['target'], $task['club'], $task['jsonld'])) {
-                    $pdo = $db->prepare('delete from `queues` where `id` = :id');
-                    $pdo->execute([':id' => $task['id']]);
-                    $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
-                    $pdo->execute([':tid' => $task['tid']]);
                 } else {
-                    $retry = $task['retry'] + 1;
-                    if ($retry <= 3) $timestamp = time() + 60;
-                    elseif ($retry <= 5) $timestamp = time() + 300;
-                    elseif ($retry <= 10) $timestamp = time() + 600;
-                    elseif ($retry <= 100) $timestamp = time() + 3600;
-                    else $timestamp = time() + 86400;
-                    if ($retry == 127) {
-                        $pdo = $db->prepare('insert ignore into `blacklist`(`target`,`timestamp`) values (:target,:timestamp);');
-                        $pdo->execute([':target' => $task['target'], ':timestamp' => time()]);
+                    if (ActivityPub_POST($task['target'], $task['club'], $task['jsonld'])) {
                         $pdo = $db->prepare('delete from `queues` where `id` = :id');
                         $pdo->execute([':id' => $task['id']]);
                         $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
                         $pdo->execute([':tid' => $task['tid']]);
                     } else {
-                        $pdo = $db->prepare('update `queues` set `inuse` = 0, `retry` = :retry, `timestamp` = :timestamp where `id` = :id');
-                        $pdo->execute([':id' => $task['id'], ':retry' => $retry, ':timestamp' => $timestamp]);
+                        $retry = $task['retry'] + 1;
+                        if ($retry <= 3) $timestamp = time() + 60;
+                        elseif ($retry <= 5) $timestamp = time() + 300;
+                        elseif ($retry <= 10) $timestamp = time() + 600;
+                        elseif ($retry <= 100) $timestamp = time() + 3600;
+                        else $timestamp = time() + 86400;
+                        if ($retry == 127) {
+                            $pdo = $db->prepare('insert ignore into `blacklist`(`target`,`timestamp`) values (:target,:timestamp);');
+                            $pdo->execute([':target' => $task['target'], ':timestamp' => time()]);
+                            $pdo = $db->prepare('delete from `queues` where `id` = :id');
+                            $pdo->execute([':id' => $task['id']]);
+                            $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
+                            $pdo->execute([':tid' => $task['tid']]);
+                        } else {
+                            $pdo = $db->prepare('update `queues` set `inuse` = 0, `retry` = :retry, `timestamp` = :timestamp where `id` = :id');
+                            $pdo->execute([':id' => $task['id'], ':retry' => $retry, ':timestamp' => $timestamp]);
+                        }
                     }
                 } break;
             default: break;
