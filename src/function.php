@@ -18,7 +18,7 @@ function ActivityPub_POST($url, $club, $jsonld) {
 
 function ActivityPub_CURL($url, $date, $head, $data = null) {
     global $ver, $base, $curl, $config;
-    $curl = $curl ?? new Curl();
+    if (!isset($curl)) $curl = new Curl();
     $curl->setTimeout(10);
     $curl->setConnectTimeout(3);
     $curl->setMaximumRedirects(3);
