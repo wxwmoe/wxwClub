@@ -100,7 +100,14 @@ CREATE TABLE `queues` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE `blacklist` (
+  `id` int NOT NULL AUTO_INCREMENT,
   `target` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
-  `timestamp` int DEFAULT NULL,
-  PRIMARY KEY (`target`)
+  `create` int DEFAULT NULL,
+  `timestamp` int NOT NULL DEFAULT '0',
+  `inuse` tinyint NOT NULL DEFAULT '0',
+  `retry` smallint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `target` (`target`),
+  KEY `timestamp` (`timestamp`),
+  KEY `inuse` (`inuse`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
