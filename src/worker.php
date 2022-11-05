@@ -49,6 +49,8 @@ function worker() {
         $pdo->execute([':timestamp' => time() - 600]);
         $pdo = $db->prepare('update `queues` set `inuse` = 0 where `inuse` = 1 and `timestamp` <= :timestamp');
         $pdo->execute([':timestamp' => time() - 600]);
+        $pdo = $db->prepare('update `blacklist` set `inuse` = 0 where `inuse` = 1 and `timestamp` <= :timestamp');
+        $pdo->execute([':timestamp' => time() - 600]);
         $pdo = $db->prepare('update `blacklist` set `id` = last_insert_id(id), `inuse` = 1 where `inuse` = 0 and `timestamp` <= ? order by `timestamp` asc limit 1');
         $pdo->execute([time()]);
         $pdo = $db->query('select `id`, `retry`, `target` from `blacklist` where `id` = last_insert_id() and row_count() <> 0');
