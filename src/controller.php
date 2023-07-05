@@ -136,7 +136,13 @@ function controller() {
                         } break;
                     
                     case 'following': Club_Get_OrderedCollection($club_url.'/following'); break;
-                    case 'followers': Club_Get_OrderedCollection($club_url.'/followers'); break;
+                    case 'followers':
+                        $pdo = $db->prepare('select count(f.id) from `followers` `f` left join `clubs` `c` on f.cid = c.cid where c.name = :club');
+                        $pdo->execute([':club' => $club]);
+                        $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
+                        Club_Get_OrderedCollection($club_url.'/followers', [
+                            'totalItems' => $count,
+                        ]); break;
                     case 'collections':
                         if (isset($uri[4])) switch ($uri[4]) {
                             case 'featured': Club_Get_OrderedCollection($club_url.'/collections/featured'); break;

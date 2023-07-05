@@ -251,10 +251,8 @@ function Club_Get_OrderedCollection($id, $arr = []) {
         '@context' => 'https://www.w3.org/ns/activitystreams',
         'id' => $id,
         'type' => 'OrderedCollection',
-        'totalItems' => 0,
-        'orderedItems' => []
+        'totalItems' => 0
     ], $arr);
-    if (isset($arr['last'])) unset($arr['orderedItems']);
     Club_Json_Output($arr, 2);
 }
 
