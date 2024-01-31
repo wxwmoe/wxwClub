@@ -64,6 +64,9 @@ function ActivityPub_Verification($input = null, $pull = true) {
             $pdo->execute([':actor' => $actor]);
             if ($public_key = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                 $signed_string = '(request-target): '.strtolower($_SERVER['REQUEST_METHOD']).' '.$_SERVER['REQUEST_URI'];
+                if ($signature['algorithm'] == 'hs2019') {
+                    $signature['algorithm'] = 'rsa-sha256';
+                }
                 foreach (array_slice($headers, 1) as $header) $signed_string .= "\n".$header.': '.$_SERVER['HTTP_'.strtoupper(str_replace('-','_',$header))];
                 if (openssl_verify($signed_string, base64_decode($signature['signature']), $public_key, $signature['algorithm'])) {
                     if (isset($_SERVER['HTTP_DIGEST'])) {
