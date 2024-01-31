@@ -58,11 +58,15 @@ function ActivityPub_Verification($input = null, $pull = true) {
         preg_match_all('/[,\s]*(.*?)="(.*?)"/', $_SERVER['HTTP_SIGNATURE'], $matches);
         foreach ($matches[1] as $k => $v) $signature[$v] = $matches[2][$k];
         if (($headers = explode(' ', $signature['headers']))[0] == '(request-target)') {
-            $actor = explode('#', $signature['keyId'])[0];
+            $url_parts = parse_url($signature['keyId']);
+            $actor = $url_parts['scheme'] . '://' . $url_parts['host'] . '/' . explode('/', $url_parts['path'])[1] . '/' . explode('/', $url_parts['path'])[2];
             $pdo = $db->prepare('select `public_key` from `users` where `actor` = :actor');
             $pdo->execute([':actor' => $actor]);
             if ($public_key = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                 $signed_string = '(request-target): '.strtolower($_SERVER['REQUEST_METHOD']).' '.$_SERVER['REQUEST_URI'];
+                if ($signature['algorithm'] == 'hs2019') {
+                    $signature['algorithm'] = 'rsa-sha256';
+                }
                 foreach (array_slice($headers, 1) as $header) $signed_string .= "\n".$header.': '.$_SERVER['HTTP_'.strtoupper(str_replace('-','_',$header))];
                 if (openssl_verify($signed_string, base64_decode($signature['signature']), $public_key, $signature['algorithm'])) {
                     if (isset($_SERVER['HTTP_DIGEST'])) {
@@ -176,6 +180,8 @@ function Club_Announce_Process($jsonld) {
     $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
     $pdo->execute([':object' => $jsonld['object']['id']]);
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
+        $jsonld['to'] = (is_array($jsonld['to']) ? $jsonld['to'] : array($jsonld['to']));
+        $jsonld['cc'] = (is_array($jsonld['cc']) ? $jsonld['cc'] : array($jsonld['cc']));
         foreach ($to = array_merge($jsonld['to'], $jsonld['cc']) as $cc)
             if (($club_url = $base.'/club/') == substr($cc, 0, strlen($club_url)))
                 if ($club = Club_Exist(explode('/', substr($cc, strlen($club_url)))[0])) $clubs[$club] = 1;
