@@ -180,6 +180,8 @@ function Club_Announce_Process($jsonld) {
     $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
     $pdo->execute([':object' => $jsonld['object']['id']]);
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
+        $jsonld['to'] = (is_array($jsonld['to']) ? $jsonld['to'] : array($jsonld['to']));
+        $jsonld['cc'] = (is_array($jsonld['cc']) ? $jsonld['cc'] : array($jsonld['cc']));
         foreach ($to = array_merge($jsonld['to'], $jsonld['cc']) as $cc)
             if (($club_url = $base.'/club/') == substr($cc, 0, strlen($club_url)))
                 if ($club = Club_Exist(explode('/', substr($cc, strlen($club_url)))[0])) $clubs[$club] = 1;
