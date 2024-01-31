@@ -38,41 +38,14 @@ function controller() {
                                     file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_input.json', $input);
                                     if ($config['nodeDebugging'] == 1)
                                         file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
-                                    if (!$verify) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_verify_failed', '');
+                                    if (!$verify) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_verify_failed.txt', $_SERVER['HTTP_SIGNATURE']);
                                 }
                                 if ($config['nodeInboxVerify'] && !$verify) break;
                                 
                                 switch ($jsonld['type']) {
                                     case 'Create': Club_Announce_Process($jsonld); break;
-                                    case 'Follow':
-                                        if ($actor = Club_Get_Actor($club, $jsonld['actor'])) {
-                                            $pdo = $db->prepare('insert into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
-                                            $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':timestamp' => time()]);
-                                            $pdo = $db->prepare('select f.id from `followers` as f left join `clubs` as `c` on f.cid = c.cid where f.uid = :uid and c.name = :club');
-                                            $pdo->execute([':club' => $club, ':uid' => $actor['uid']]);
-                                            if ($follow_id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
-                                                Club_Push_Activity($club, [
-                                                    '@context' => 'https://www.w3.org/ns/activitystreams',
-                                                    'id' => $club_url.'#accepts/follows/'.$follow_id,
-                                                    'type' => 'Accept',
-                                                    'actor' => $club_url,
-                                                    'object' => [
-                                                        'id' => $jsonld['id'],
-                                                        'type' => 'Follow',
-                                                        'actor' => $jsonld['actor'],
-                                                        'object' => $club_url
-                                                    ]
-                                                ], $actor['inbox']);
-                                            }
-                                        } else Club_Json_Output(['message' => 'Actor not found'], 0, 400); break;
-                                    case 'Undo':
-                                        switch ($jsonld['object']['type']) {
-                                            case 'Follow':
-                                                $club = explode('/', $jsonld['object']['object'])[4];
-                                                $pdo = $db->prepare('delete from `followers` where `cid` in (select cid from `clubs` where `name` = :club) and `uid` in (select uid from `users` where `actor` = :actor)');
-                                                $pdo->execute([':club' => $club, ':actor' => $jsonld['actor']]); break;
-                                            default: break;
-                                        } break;
+                                    case 'Follow': Club_Follow_Process($jsonld); break;
+                                    case 'Undo': Club_Undo_Process($jsonld); break;
                                     case 'Delete':
                                         if (isset($jsonld['object']['type'])) switch ($jsonld['object']['type']) {
                                             case 'Tombstone': Club_Tombstone_Process($jsonld); break;
@@ -281,7 +254,7 @@ function controller() {
                         $file_name = date('Y-m-d_H:i:s').'_shared_inbox_'.$jsonld['type'];
                         file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_input.json', $input);
                         if ($config['nodeDebugging'] == 1) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
-                        if (!$verify) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_verify_failed', '');
+                        if (!$verify) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_verify_failed.txt', $_SERVER['HTTP_SIGNATURE']);
                     }
                     if ($config['nodeInboxVerify'] && !$verify) break;
                     
@@ -295,40 +268,8 @@ function controller() {
                                 $jsonld['object'] = ['id' => $jsonld['object']];
                                 Club_Tombstone_Process($jsonld);
                             } break;
-                        case 'Follow':
-                            $club = explode('/club/', $jsonld['object'])[1];
-                            if (Club_Exist($club)) {
-                                $club_url = $base.'/club/'.$club;
-                                if ($actor = Club_Get_Actor($club, $jsonld['actor'])) {
-                                    $pdo = $db->prepare('insert into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
-                                    $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':timestamp' => time()]);
-                                    $pdo = $db->prepare('select f.id from `followers` as f left join `clubs` as `c` on f.cid = c.cid where f.uid = :uid and c.name = :club');
-                                    $pdo->execute([':club' => $club, ':uid' => $actor['uid']]);
-                                    if ($follow_id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
-                                        Club_Push_Activity($club, [
-                                            '@context' => 'https://www.w3.org/ns/activitystreams',
-                                            'id' => $club_url.'#accepts/follows/'.$follow_id,
-                                            'type' => 'Accept',
-                                            'actor' => $club_url,
-                                            'object' => [
-                                                'id' => $jsonld['id'],
-                                                'type' => 'Follow',
-                                                'actor' => $jsonld['actor'],
-                                                'object' => $club_url
-                                            ]
-                                        ], $actor['inbox']);
-                                    }
-                                } else Club_Json_Output(['message' => 'Actor not found'], 0, 400);
-                            } break;
-                        case 'Undo':
-                            switch ($jsonld['object']['type']) {
-                                case 'Follow':
-                                    $club = explode('/club/', $jsonld['object']['object'])[1];
-                                    file_put_contents(APP_ROOT.'/logs/club', $club);
-                                    $pdo = $db->prepare('delete from `followers` where `cid` in (select cid from `clubs` where `name` = :club) and `uid` in (select uid from `users` where `actor` = :actor)');
-                                    $pdo->execute([':club' => $club, ':actor' => $jsonld['actor']]); break;
-                                default: break;
-                            } break;
+                        case 'Follow': Club_Follow_Process($jsonld); break;
+                        case 'Undo': Club_Undo_Process($jsonld); break;
                         default: break;
                     }
                 }

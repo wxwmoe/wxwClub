@@ -58,17 +58,13 @@ function ActivityPub_Verification($input = null, $pull = true) {
         preg_match_all('/[,\s]*(.*?)="(.*?)"/', $_SERVER['HTTP_SIGNATURE'], $matches);
         foreach ($matches[1] as $k => $v) $signature[$v] = $matches[2][$k];
         if (($headers = explode(' ', $signature['headers']))[0] == '(request-target)') {
-            $url_parts = parse_url($signature['keyId']);
-            $actor = $url_parts['scheme'] . '://' . $url_parts['host'] . '/' . explode('/', $url_parts['path'])[1] . '/' . explode('/', $url_parts['path'])[2];
+            $actor = str_replace(['#main-key', '/main-key'], '', $signature['keyId']);
             $pdo = $db->prepare('select `public_key` from `users` where `actor` = :actor');
             $pdo->execute([':actor' => $actor]);
             if ($public_key = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                 $signed_string = '(request-target): '.strtolower($_SERVER['REQUEST_METHOD']).' '.$_SERVER['REQUEST_URI'];
-                if ($signature['algorithm'] == 'hs2019') {
-                    $signature['algorithm'] = 'rsa-sha256';
-                }
                 foreach (array_slice($headers, 1) as $header) $signed_string .= "\n".$header.': '.$_SERVER['HTTP_'.strtoupper(str_replace('-','_',$header))];
-                if (openssl_verify($signed_string, base64_decode($signature['signature']), $public_key, $signature['algorithm'])) {
+                if (openssl_verify($signed_string, base64_decode($signature['signature']), $public_key,  str_replace('hs2019', 'rsa-sha256', $signature['algorithm']))) {
                     if (isset($_SERVER['HTTP_DIGEST'])) {
                         preg_match('/^(.*?)=(.*?)$/', $_SERVER['HTTP_DIGEST'], $matches);
                         return (hash(str_replace('-','',$matches[1]), $input, 1) == base64_decode($matches[2]));
@@ -180,9 +176,7 @@ function Club_Announce_Process($jsonld) {
     $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
     $pdo->execute([':object' => $jsonld['object']['id']]);
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
-        $jsonld['to'] = (is_array($jsonld['to']) ? $jsonld['to'] : array($jsonld['to']));
-        $jsonld['cc'] = (is_array($jsonld['cc']) ? $jsonld['cc'] : array($jsonld['cc']));
-        foreach ($to = array_merge($jsonld['to'], $jsonld['cc']) as $cc)
+        foreach ($to = array_merge(to_array($jsonld['to']), to_array($jsonld['cc'])) as $cc)
             if (($club_url = $base.'/club/') == substr($cc, 0, strlen($club_url)))
                 if ($club = Club_Exist(explode('/', substr($cc, strlen($club_url)))[0])) $clubs[$club] = 1;
         if (!empty($clubs) && ($clubs = array_keys($clubs)) && in_array($public_streams, $to)) {
@@ -212,6 +206,31 @@ function Club_Announce_Process($jsonld) {
             } else Club_Json_Output(['message' => 'Actor not found'], 0, 400);
         }
     }
+}
+
+function Club_Follow_Process($jsonld) {
+    global $db, $base;
+    $club = explode('/club/', $jsonld['object'])[1];
+    if ($actor = Club_Get_Actor($club, $jsonld['actor'])) {
+        $pdo = $db->prepare('insert into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
+        $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':timestamp' => time()]);
+        $pdo = $db->prepare('select f.id from `followers` as f left join `clubs` as `c` on f.cid = c.cid where f.uid = :uid and c.name = :club');
+        $pdo->execute([':club' => $club, ':uid' => $actor['uid']]);
+        if ($follow_id = $pdo->fetch(PDO::FETCH_COLUMN, 0) && $club_url = $base.'/club/'.$club) {
+            Club_Push_Activity($club, [
+                '@context' => 'https://www.w3.org/ns/activitystreams',
+                'id' => $club_url.'#accepts/follows/'.$follow_id,
+                'type' => 'Accept',
+                'actor' => $club_url,
+                'object' => [
+                    'id' => $jsonld['id'],
+                    'type' => 'Follow',
+                    'actor' => $jsonld['actor'],
+                    'object' => $club_url
+                ]
+            ], $actor['inbox']);
+        }
+    } else Club_Json_Output(['message' => 'Actor not found'], 0, 400);
 }
 
 function Club_Tombstone_Process($jsonld) {
@@ -252,6 +271,16 @@ function Club_Tombstone_Process($jsonld) {
     }
 }
 
+function Club_Undo_Process($jsonld) {
+    global $db; switch ($jsonld['object']['type']) {
+        case 'Follow':
+            $club = explode('/club/', $jsonld['object']['object'])[1];
+            $pdo = $db->prepare('delete from `followers` where `cid` in (select cid from `clubs` where `name` = :club) and `uid` in (select uid from `users` where `actor` = :actor)');
+            $pdo->execute([':club' => $club, ':actor' => $jsonld['actor']]); break;
+        default: break;
+    }
+}
+
 function Club_Get_OrderedCollection($id, $arr = []) {
     $arr = array_merge([
         '@context' => 'https://www.w3.org/ns/activitystreams',
@@ -283,4 +312,8 @@ function Club_Json_Output($data, $format = 0, $status = 200) {
         http_response_code($status);
         $data = array_merge(['code' => $status], $data);
     } echo Club_Json_Encode($data);
+}
+
+function to_array($data) {
+    return is_array($data) ? $data : [$data];
 }
