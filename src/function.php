@@ -58,7 +58,8 @@ function ActivityPub_Verification($input = null, $pull = true) {
         preg_match_all('/[,\s]*(.*?)="(.*?)"/', $_SERVER['HTTP_SIGNATURE'], $matches);
         foreach ($matches[1] as $k => $v) $signature[$v] = $matches[2][$k];
         if (($headers = explode(' ', $signature['headers']))[0] == '(request-target)') {
-            $actor = explode('#', $signature['keyId'])[0];
+            $url_parts = parse_url($signature['keyId']);
+            $actor = $url_parts['scheme'] . '://' . $url_parts['host'] . '/' . explode('/', $url_parts['path'])[1] . '/' . explode('/', $url_parts['path'])[2];
             $pdo = $db->prepare('select `public_key` from `users` where `actor` = :actor');
             $pdo->execute([':actor' => $actor]);
             if ($public_key = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
