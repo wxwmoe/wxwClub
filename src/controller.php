@@ -279,19 +279,29 @@ function controller() {
             Club_Json_Output(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;
         
         case 'nodeinfo2':
+            $pdo = $db->prepare('select (select count(cid) from clubs) as clubs, (select count(id) from announces) as announces, (select count(distinct cid) from announces where timestamp >= :month) as activeMonth, (select count(distinct cid) from announces where timestamp >= :halfyear) as activeHalfyear');
+            $pdo->execute([':month' => time()-86400*30, ':halfyear' => time()-86400*30*6]);
+            $usage = $pdo->fetch(PDO::FETCH_ASSOC);
             Club_Json_Output([
                 'version' => '2.0',
                 'software' => ['name' => 'wxwClub', 'version' => $ver],
                 'protocols' => ['activitypub'],
                 'services' => ['inbound' => [], 'outbound' => []],
                 'openRegistrations' => $config['openRegistrations'],
-                'usage' => ['users'=> []],
+                'usage' => [
+                    'users' => [
+                        'total' => $usage['clubs'] ?? null,
+                        'activeMonth' => $usage['activeMonth'] ?? null,
+                        'activeHalfyear' => $usage['activeHalfyear'] ?? null
+                    ],
+                    'localPosts' => $usage['announces'] ?? 0
+                ],
                 'metadata' => [
                     'nodeName' => $config['nodeName'],
                     'nodeDescription' => $config['nodeDescription'],
                     'maintainer' => $config['nodeMaintainer'],
-                    'repositoryUrl' => '',
-                    'feedbackUrl' => ''
+                    'repositoryUrl' => 'https://github.com/wxwmoe/wxwClub',
+                    'feedbackUrl' => 'https://github.com/wxwmoe/wxwClub/issues/new'
                 ]
             ]); break;
         
