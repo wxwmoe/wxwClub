@@ -353,7 +353,9 @@ function controller() {
             $pdo->execute();
             foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $club)
                 echo '<p><a href="'.$base.'/club/'.$club['name'].'" target="_blank">'.($club['nickname'] ?: $club['name']).' (@'.$club['name'].'@'.$config['base'].')</a></p>';
-            echo '<br><p style="font-size:14px">Maintainer: '.$config['nodeMaintainer']['name'].' (mail: '.$config['nodeMaintainer']['email'].')</p>'; break;
+            $maintainer = explode('@', $config['nodeMaintainer']['name']);
+            $maintainer = '<a rel="me" href="https://'.$maintainer[2].'/@'.$maintainer[1].'" target="_blank">'.$config['nodeMaintainer']['name'].'</a>';
+            echo '<br><p style="font-size:14px">Maintainer: '.$maintainer.' (mail: '.$config['nodeMaintainer']['email'].')</p>'; break;
         
         default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
     }
