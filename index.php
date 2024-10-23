@@ -13,6 +13,7 @@ if ($config['nodeDebugging']) {
     if (!is_dir('logs/inbox')) mkdir('logs/inbox');
     if (!is_dir('logs/outbox')) mkdir('logs/outbox');
     if (!is_dir('logs/webfinger')) mkdir('logs/webfinger');
+    if (!is_dir('logs/blocklist')) mkdir('logs/blocklist');
     ini_set('error_log', 'logs/error/'.date('Y-m-d_H:i:s').'_error.log');
 }
 

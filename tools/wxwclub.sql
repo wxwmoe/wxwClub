@@ -111,3 +111,27 @@ CREATE TABLE `blacklist` (
   KEY `timestamp` (`timestamp`),
   KEY `inuse` (`inuse`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- Migration: 20241024
+
+CREATE TABLE `users_blocks` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `club_id` int DEFAULT NULL,
+  `target` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `created_at` int NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `club_target` (`club_id`, `target`),
+  KEY `club_id` (`club_id`),
+  CONSTRAINT `users_blocks_ibfk_1` FOREIGN KEY (`club_id`) REFERENCES `clubs` (`cid`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `instances_blocks` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `club_id` int DEFAULT NULL,
+  `target` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `created_at` int NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `club_target` (`club_id`, `target`),
+  KEY `club_id` (`club_id`),
+  CONSTRAINT `instances_blocks_ibfk_1` FOREIGN KEY (`club_id`) REFERENCES `clubs` (`cid`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
