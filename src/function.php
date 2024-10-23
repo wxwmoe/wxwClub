@@ -172,7 +172,7 @@ function Club_Push_Activity($club, $activity, $inbox = false) {
 }
 
 function Club_Announce_Process($jsonld) {
-    global $db, $base, $public_streams;
+    global $config, $db, $base, $public_streams;
     $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
     $pdo->execute([':object' => $jsonld['object']['id']]);
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
@@ -181,6 +181,12 @@ function Club_Announce_Process($jsonld) {
                 if ($club = Club_Exist(explode('/', substr($cc, strlen($club_url)))[0])) $clubs[$club] = 1;
         if (!empty($clubs) && ($clubs = array_keys($clubs)) && in_array($public_streams, $to)) {
             if ($actor = Club_Get_Actor($clubs[0], $jsonld['actor'])) {
+                if (isBlocked($actor['name'], $clubs)) {
+                    if ($config['nodeDebugging'] == 1) {
+                        file_put_contents(APP_ROOT.'/logs/blocklist/'.date('Y-m-d_H:i:s').'_blocked.json', Club_Json_Encode($jsonld));
+                    }
+                    return;
+                }
                 $pdo = $db->prepare('insert into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`) values(:uid, :type, :clubs, :object, :timestamp)');
                 $pdo->execute([':uid' => $actor['uid'], ':type' => 'Create', ':clubs' => Club_Json_Encode($clubs), 'object' => $jsonld['object']['id'], 'timestamp' => ($time = time())]);
                 $pdo = $db->query('select last_insert_id()');
@@ -316,4 +322,201 @@ function Club_Json_Output($data, $format = 0, $status = 200) {
 
 function to_array($data) {
     return is_array($data) ? $data : [$data];
+}
+
+function block($type, $target, $club = null) {
+    global $db;
+    $table = ($type == 'user') ? 'users_blocks' : 'instances_blocks';
+    $club_id = null;
+    if ($club) {
+        $pdo = $db->prepare('SELECT cid FROM clubs WHERE name = :name');
+        $pdo->execute([':name' => $club]);
+        $club_id = $pdo->fetchColumn();
+        if (!$club_id) {
+            echo "Error: Club $club not found.\n";
+            return;
+        }
+    }
+    $pdo = $db->prepare("INSERT INTO $table (club_id, target, created_at) VALUES (:club_id, :target, :created_at)");
+    $pdo->execute([':club_id' => $club_id, ':target' => $target, ':created_at' => time()]);
+    echo "Blocked $type: $target" . ($club ? " for club: $club" : "") . "\n";
+}
+
+function unblock($type, $target, $club = null) {
+    global $db;
+    $table = ($type == 'user') ? 'users_blocks' : 'instances_blocks';
+    $club_id = null;
+    if ($club) {
+        $pdo = $db->prepare('SELECT cid FROM clubs WHERE name = :name');
+        $pdo->execute([':name' => $club]);
+        $club_id = $pdo->fetchColumn();
+        if (!$club_id) {
+            echo "Error: Club $club not found.\n";
+            return;
+        }
+    }
+    $pdo = $db->prepare("DELETE FROM $table WHERE target = :target AND club_id " . ($club_id ? "= :club_id" : "IS NULL"));
+    $params = [':target' => $target];
+    if ($club_id) {
+        $params[':club_id'] = $club_id;
+    }
+    $pdo->execute($params);
+    echo "Unblocked $type: $target" . ($club ? " for club: $club" : "") . "\n";
+}
+
+function listBlocks($club = null) {
+    global $db;
+    $club_id = null;
+    if ($club) {
+        $pdo = $db->prepare('SELECT cid FROM clubs WHERE name = :name');
+        $pdo->execute([':name' => $club]);
+        $club_id = $pdo->fetchColumn();
+        if (!$club_id) {
+            echo "Error: Club $club not found.\n";
+            return;
+        }
+    }
+    
+    $tables = ['users_blocks', 'instances_blocks'];
+    foreach ($tables as $table) {
+        $type = ($table == 'users_blocks') ? 'User' : 'Instance';
+        echo "$type blocks:\n";
+        $pdo = $db->prepare("SELECT target FROM $table WHERE club_id " . ($club_id ? "= :club_id" : "IS NULL"));
+        if ($club_id) {
+            $pdo->execute([':club_id' => $club_id]);
+        } else {
+            $pdo->execute();
+        }
+        while ($row = $pdo->fetch(PDO::FETCH_ASSOC)) {
+            echo "- " . $row['target'] . "\n";
+        }
+        echo "\n";
+    }
+}
+
+function exportBlocks($club = null) {
+    global $db;
+    $club_id = null;
+    if ($club) {
+        $pdo = $db->prepare('SELECT cid FROM clubs WHERE name = :name');
+        $pdo->execute([':name' => $club]);
+        $club_id = $pdo->fetchColumn();
+        if (!$club_id) {
+            echo "Error: Club $club not found.\n";
+            return;
+        }
+    }
+    
+    $prefix = $club ? $club . '_' : '';
+    $users_file = fopen($prefix . 'users_blocks.txt', 'w');
+    $instances_file = fopen($prefix . 'instances_blocks.txt', 'w');
+    
+    $tables = ['users_blocks', 'instances_blocks'];
+    foreach ($tables as $table) {
+        $file = ($table == 'users_blocks') ? $users_file : $instances_file;
+        $pdo = $db->prepare("SELECT target FROM $table WHERE club_id " . ($club_id ? "= :club_id" : "IS NULL"));
+        if ($club_id) {
+            $pdo->execute([':club_id' => $club_id]);
+        } else {
+            $pdo->execute();
+        }
+        while ($row = $pdo->fetch(PDO::FETCH_ASSOC)) {
+            fwrite($file, $row['target'] . "\n");
+        }
+    }
+    
+    fclose($users_file);
+    fclose($instances_file);
+    echo "Blocks exported to " . $prefix . "users_blocks.txt and " . $prefix . "instances_blocks.txt\n";
+}
+
+function importBlocks($type, $file_path, $club = null) {
+    global $db;
+    $club_id = null;
+    if ($club) {
+        $pdo = $db->prepare('SELECT cid FROM clubs WHERE name = :name');
+        $pdo->execute([':name' => $club]);
+        $club_id = $pdo->fetchColumn();
+        if (!$club_id) {
+            echo "Error: Club $club not found.\n";
+            return;
+        }
+    }
+    
+    if (!file_exists($file_path)) {
+        echo "Error: File $file_path not found.\n";
+        return;
+    }
+    
+    $db->beginTransaction();
+    
+    try {
+        $table = ($type === 'user') ? 'users_blocks' : 'instances_blocks';
+        if ($club_id !== null) {
+            $checkStmt = $db->prepare("SELECT id FROM $table WHERE club_id = :club_id AND target = :target");
+        } else {
+            $checkStmt = $db->prepare("SELECT id FROM $table WHERE club_id IS NULL AND target = :target");
+        }
+        $insertStmt = $db->prepare("INSERT INTO $table (club_id, target, created_at) 
+                                    VALUES (:club_id, :target, :created_at)");
+        $targets = file($file_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($targets as $target) {
+            if ($club_id !== null) {
+                $checkStmt->execute([':club_id' => $club_id, ':target' => $target]);
+            } else {
+                $checkStmt->execute([':target' => $target]);
+            }
+            if ($checkStmt->fetch()) {
+                echo "Warning: Skipping existing rule: $target\n";
+                continue;
+            }
+            
+            $insertStmt->execute([':club_id' => $club_id, ':target' => $target, ':created_at' => time()]);
+        }
+        
+        $db->commit();
+        echo "Successfully imported block rules.\n";
+    } catch (Exception $e) {
+        $db->rollBack();
+        echo "Error importing block rules: " . $e->getMessage() . "\n";
+    }
+}
+
+function isBlocked($name, $clubs) {
+    global $db;
+    $instance = explode('@', $name)[1];
+
+    $pdo = $db->prepare('SELECT 1 FROM instances_blocks WHERE club_id IS NULL AND (target = :target OR :instance LIKE CONCAT("%.", target)) LIMIT 1');
+    $pdo->execute([':target' => $instance, ':instance' => $instance]);
+    if ($pdo->fetchColumn()) {
+        return true;
+    }
+
+    $pdo = $db->prepare('SELECT 1 FROM users_blocks WHERE club_id IS NULL AND target = :target LIMIT 1');
+    $pdo->execute([':target' => $name]);
+    if ($pdo->fetchColumn()) {
+        return true;
+    }
+
+    foreach ($clubs as $club) {
+        $pdo = $db->prepare('SELECT cid FROM clubs WHERE name = :name');
+        $pdo->execute([':name' => $club]);
+        $club_id = $pdo->fetchColumn();
+
+        if ($club_id) {
+            $pdo = $db->prepare('SELECT 1 FROM instances_blocks WHERE club_id = :club_id AND (target = :target OR :instance LIKE CONCAT("%.", target)) LIMIT 1');
+            $pdo->execute([':club_id' => $club_id, ':target' => $instance, ':instance' => $instance]);
+            if ($pdo->fetchColumn()) {
+                return true;
+            }
+
+            $pdo = $db->prepare('SELECT 1 FROM users_blocks WHERE club_id = :club_id AND target = :target LIMIT 1');
+            $pdo->execute([':club_id' => $club_id, ':target' => $name]);
+            if ($pdo->fetchColumn()) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
