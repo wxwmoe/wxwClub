@@ -1,4 +1,4 @@
-FROM php:7.3.32-cli-alpine
+FROM php:8.3.12-cli-alpine
 
 RUN apk add --no-cache --virtual .build-deps \
        autoconf \
