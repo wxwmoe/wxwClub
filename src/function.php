@@ -172,7 +172,7 @@ function Club_Push_Activity($club, $activity, $inbox = false) {
 }
 
 function Club_Announce_Process($jsonld) {
-    global $db, $base, $public_streams;
+    global $db, $base, $config, $public_streams;
     $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
     $pdo->execute([':object' => $jsonld['object']['id']]);
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
@@ -186,7 +186,17 @@ function Club_Announce_Process($jsonld) {
                 $pdo = $db->query('select last_insert_id()');
                 if ($activity_id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                     foreach ($clubs as $club) {
-                        $club_url = $base.'/club/'.$club;
+                        if (in_array($club, ['board'])) {
+                            $pdo = $db->prepare('select count(id) from announces join clubs on announces.cid = clubs.cid
+                                where announces.uid = :uid and announces.timestamp >= :timestamp and clubs.name = :club');
+                            $pdo->execute([':uid' => $actor['uid'], ':timestamp' => time() - 60 * 60 * 24, ':club' => $club]);
+                            if ($pdo->fetch(PDO::FETCH_COLUMN, 0) >= 10) {
+                                if ($config['nodeDebugging']) {
+                                    $file_name = date('Y-m-d_H:i:s_').$club.'_spam';
+                                    file_put_contents(APP_ROOT.'/logs/filter/'.$file_name.'.json', Club_Json_Encode($jsonld));
+                                } continue;
+                            }
+                        } $club_url = $base.'/club/'.$club;
                         Club_Push_Activity($club, [
                             '@context' => 'https://www.w3.org/ns/activitystreams',
                             'id' => $club_url.'/activity#'.$activity_id.'/announce',
