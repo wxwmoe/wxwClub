@@ -41,6 +41,8 @@ class Curl {
     private $headers = [];
     private $options = [];
     
+    public $headerCallbackData;
+
     public function __construct($base_url = null) {
         if (!extension_loaded('curl'))
             throw new \ErrorException('cURL library is not loaded');
@@ -194,13 +196,12 @@ class Curl {
     private function initialize() {
         $this->headers = [];
         $this->id = uniqid('', true);
-        $header_callback_data = new \stdClass();
-        $header_callback_data->rawResponseHeaders = '';
-        $header_callback_data->responseCookies = [];
-        $this->headerCallbackData = $header_callback_data;
+        $this->headerCallbackData = new \stdClass();
+        $this->headerCallbackData->rawResponseHeaders = '';
+        $this->headerCallbackData->responseCookies = [];
         $this->setOpt(CURLINFO_HEADER_OUT, true);
         $this->setOpt(CURLOPT_RETURNTRANSFER, true);
-        $this->setOpt(CURLOPT_HEADERFUNCTION, $this->createHeaderCallback($header_callback_data));
+        $this->setOpt(CURLOPT_HEADERFUNCTION, $this->createHeaderCallback($this->headerCallbackData));
     }
     
     private function parseHeaders($raw_headers) {
