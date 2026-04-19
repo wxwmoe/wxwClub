@@ -186,11 +186,20 @@ function Club_Announce_Process($jsonld) {
                 $pdo = $db->query('select last_insert_id()');
                 if ($activity_id = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                     foreach ($clubs as $club) {
+                        // Posting limits for large clubs
                         if (in_array($club, ['board'])) {
-                            $pdo = $db->prepare('select count(id) from announces join clubs on announces.cid = clubs.cid
-                                where announces.uid = :uid and announces.timestamp >= :timestamp and clubs.name = :club');
+                            $reject = false;
+                            // Reject duplicate content within 24 hours
+                            $pdo = $db->prepare('select count(id) from announces where uid = :uid and timestamp >= :timestamp and content = :content');
+                            $pdo->execute([':uid' => $actor['uid'], ':timestamp' => time() - 60 * 60 * 24, ':content' => strip_tags($jsonld['object']['content'])]);
+                            if ($pdo->fetch(PDO::FETCH_COLUMN, 0) > 0) $reject = true;
+                            // Limit regular posts to 10 within 24 hours
+                            $pdo = $db->prepare('select count(id) from announces join clubs on announces.cid = clubs.cid'.
+                                ' where announces.uid = :uid and announces.timestamp >= :timestamp and clubs.name = :club');
                             $pdo->execute([':uid' => $actor['uid'], ':timestamp' => time() - 60 * 60 * 24, ':club' => $club]);
-                            if ($pdo->fetch(PDO::FETCH_COLUMN, 0) >= 10) {
+                            if ($pdo->fetch(PDO::FETCH_COLUMN, 0) >= 10) $reject = true;
+                            // Skip content that exceeds the limits
+                            if ($reject) {
                                 if ($config['nodeDebugging']) {
                                     $file_name = date('Y-m-d_H:i:s_').$club.'_spam';
                                     file_put_contents(APP_ROOT.'/logs/filter/'.$file_name.'.json', Club_Json_Encode($jsonld));
