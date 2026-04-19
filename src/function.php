@@ -103,12 +103,13 @@ function Club_Create($club) {
 }
 
 function Club_Get_Actor($club, $actor) {
-    global $db; $pdo = $db->prepare('select `uid`,`name`,`inbox` from `users` where `actor` = :actor');
+    global $db; $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     if ($pdo = $pdo->fetch(PDO::FETCH_ASSOC)) {
         $uid = $pdo['uid'];
         $name = $pdo['name'];
         $inbox = $pdo['inbox'];
+        $shared_inbox = $pdo['shared_inbox'];
     } else {
         $jsonld = json_decode(ActivityPub_GET($actor, $club), 1);
         if ($jsonld['id'] == $actor) {
@@ -123,7 +124,7 @@ function Club_Get_Actor($club, $actor) {
             $pdo = $db->query('select last_insert_id()');
             $uid = $pdo->fetch(PDO::FETCH_COLUMN, 0);
         } else return false;
-    } return ['uid' => $uid, 'name' => $name, 'inbox' => $inbox];
+    } return ['uid' => $uid, 'name' => $name, 'inbox' => $inbox, 'shared_inbox' => $shared_inbox];
 }
 
 function Club_Task_Create($type, $club, $jsonld) {
@@ -147,7 +148,7 @@ function Club_Queue_Insert($task, $target) {
     } return false;
 }
 
-function Club_Push_Activity($club, $activity, $inbox = false) {
+function Club_Push_Activity($club, $activity, $inbox = false, $direct = false) {
     global $db, $config;
     $type = $activity['type'];
     $activity = Club_Json_Encode($activity);
@@ -159,11 +160,13 @@ function Club_Push_Activity($club, $activity, $inbox = false) {
     $commit = false;
     $pdo = $db->beginTransaction();
     if ($task = Club_Task_Create('push', $club, $activity)) {
-        if ($inbox) Club_Queue_Insert($task, $inbox);
+        if ($direct) Club_Queue_Insert($task, $inbox);
         else {
             $pdo = $db->prepare('select distinct u.shared_inbox from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid where c.name = :club');
             $pdo->execute([':club' => $club]);
-            foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $inbox) Club_Queue_Insert($task, $inbox);
+            $inboxes = $pdo->fetchAll(PDO::FETCH_COLUMN, 0);
+            if ($inbox !== false) array_unshift($inboxes, $inbox);
+            foreach (array_unique($inboxes) as $target) Club_Queue_Insert($task, $target);
         } $commit = $db->commit();
     } if (!$commit) {
         if ($config['nodeDebugging']) file_put_contents(APP_ROOT.'/logs/outbox/'.$file_name.'_commit_failed');
@@ -215,7 +218,7 @@ function Club_Announce_Process($jsonld) {
                             'to' => [$club_url.'/followers'],
                             'cc' => [$jsonld['actor'], $public_streams],
                             'object' => $jsonld['object']['id']
-                        ]);
+                        ], $actor['shared_inbox']);
                         $pdo = $db->prepare('insert into `announces`(`cid`,`uid`,`activity`,`summary`,`content`,`timestamp`)'.
                             ' select `cid`, :uid as `uid`, :activity as `activity`, :summary as `summary`, :content as `content`, :timestamp as `timestamp` from `clubs` where `name` = :club');
                         $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':activity' => $activity_id,
@@ -247,7 +250,7 @@ function Club_Follow_Process($jsonld) {
                     'actor' => $jsonld['actor'],
                     'object' => $club_url
                 ]
-            ], $actor['inbox']);
+            ], $actor['inbox'], true);
         }
     } else Club_Json_Output(['message' => 'Actor not found'], 0, 400);
 }
