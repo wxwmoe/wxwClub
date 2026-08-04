@@ -25,9 +25,16 @@ if ($config['nodeDebugging']) {
 
 try {
     $db = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'],
-        $config['mysql']['username'], $config['mysql']['password'], [PDO::ATTR_PERSISTENT => true]);
+        $config['mysql']['username'], $config['mysql']['password'],
+        [PDO::ATTR_PERSISTENT => true, PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     if (isset($argv[1])) switch ($argv[1]) {
-        case 'worker': echo date('[Y-m-d H:i:s]').' Start running worker ...',"\n"; while (!$stop) worker(); echo date('[Y-m-d H:i:s]').' Worker stopped',"\n"; break;
+        case 'worker':
+            echo date('[Y-m-d H:i:s]').' Start running worker ...',"\n";
+            while (!$stop) {
+                try { worker(); }
+                catch (PDOException $e) { echo date('[Y-m-d H:i:s]').' Database error: '.$e->getMessage(),"\n"; sleep(1); }
+            }
+            echo date('[Y-m-d H:i:s]').' Worker stopped',"\n"; break;
         default: echo 'Unknown parameters',"\n"; break;
     }
 } catch (PDOException $e) {

@@ -54,9 +54,8 @@ function worker() {
         $pdo = $db->prepare('update `blacklist` set `id` = last_insert_id(id), `inuse` = 1, `timestamp` = :timestamp where `inuse` = 0 and `timestamp` <= :timestamp order by `timestamp` asc limit 1');
         $pdo->execute([':timestamp' => time()]);
         $pdo = $db->query('select `id`, `retry`, `target` from `blacklist` where `id` = last_insert_id() and row_count() <> 0');
-        if ($target = $pdo->fetch(PDO::FETCH_ASSOC)) {
-            Club_Exist('blacklist_target_recheck');
-            if (ActivityPub_POST($target['target'], 'blacklist_target_recheck', '{}')) {
+        if (($target = $pdo->fetch(PDO::FETCH_ASSOC)) && ($club = Club_Any_Name())) {
+            if (ActivityPub_POST($target['target'], $club, '{}')) {
                 $pdo = $db->prepare('delete from `blacklist` where `id` = :id');
                 $pdo->execute([':id' => $target['id']]);
             } else {

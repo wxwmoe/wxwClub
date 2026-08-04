@@ -19,7 +19,8 @@ if ($config['nodeDebugging']) {
 
 try {
     $db = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'],
-        $config['mysql']['username'], $config['mysql']['password'], [PDO::ATTR_PERSISTENT => true]);
+        $config['mysql']['username'], $config['mysql']['password'],
+        [PDO::ATTR_PERSISTENT => true, PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     controller();
 } catch (PDOException $e) {
     http_response_code(500);

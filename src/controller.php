@@ -33,13 +33,8 @@ function controller() {
                                         $pdo->execute([':actor' => $jsonld['actor']]);
                                     } break;
                                 } else $verify = ActivityPub_Verification($input);
-                                if ($config['nodeDebugging']) {
-                                    $file_name = date('Y-m-d_H:i:s_').$club.'_'.$jsonld['type'];
-                                    file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_input.json', $input);
-                                    if ($config['nodeDebugging'] == 1)
-                                        file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
-                                    if (!$verify) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_verify_failed.txt', $_SERVER['HTTP_SIGNATURE']);
-                                }
+                                if ($config['nodeDebugging'])
+                                    Club_Inbox_Log(date('Y-m-d_H:i:s_').$club.'_'.$jsonld['type'], $input, $verify);
                                 if ($config['nodeInboxVerify'] && !$verify) break;
                                 
                                 switch ($jsonld['type']) {
@@ -250,12 +245,8 @@ function controller() {
                             $pdo->execute([':actor' => $jsonld['actor']]);
                         } break;
                     } else $verify = ActivityPub_Verification($input);
-                    if ($config['nodeDebugging']) {
-                        $file_name = date('Y-m-d_H:i:s').'_shared_inbox_'.$jsonld['type'];
-                        file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_input.json', $input);
-                        if ($config['nodeDebugging'] == 1) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_server.json', Club_Json_Encode($_SERVER));
-                        if (!$verify) file_put_contents(APP_ROOT.'/logs/inbox/'.$file_name.'_verify_failed.txt', $_SERVER['HTTP_SIGNATURE']);
-                    }
+                    if ($config['nodeDebugging'])
+                        Club_Inbox_Log(date('Y-m-d_H:i:s').'_shared_inbox_'.$jsonld['type'], $input, $verify);
                     if ($config['nodeInboxVerify'] && !$verify) break;
                     
                     switch ($jsonld['type']) {

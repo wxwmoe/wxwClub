@@ -47,6 +47,8 @@
     'nodeDescription' => 'A simple social groups compatible with ActivityPub.',
     // 禁用的群组名称
     'nodeSuspendedName' => ['yourgroupname'],
+    // 限流的群组名称（24 小时内同一用户最多 10 条，且拒绝重复内容）
+    'nodeLimitedName' => [],
     // 开放新群组注册
     'openRegistrations' => true
 ];

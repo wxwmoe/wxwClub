@@ -21,6 +21,7 @@ CREATE TABLE `users` (
   `public_key` text CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `shared_inbox` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `timestamp` int NOT NULL,
+  `refresh` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`uid`),
   UNIQUE KEY `name` (`name`),
   UNIQUE KEY `actor` (`actor`)
