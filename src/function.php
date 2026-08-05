@@ -422,6 +422,13 @@ function Club_Fetch_Actor($club, $actor) {
     return $pdo->fetch(PDO::FETCH_ASSOC);
 }
 
+// 本地缓存里有没有这个 actor。只查不拉，用来挡掉与本站无关的广播
+function Club_Has_Actor($actor) {
+    global $db; $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor');
+    $pdo->execute([':actor' => $actor]);
+    return (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
+}
+
 // 验签失败时刷新公钥，带冷却时间，防止伪造签名把本站当外连放大器
 function Club_Sync_Actor($actor, $cooldown = 3600) {
     global $db; $pdo = $db->prepare('select `refresh` from `users` where `actor` = :actor');
@@ -661,6 +668,13 @@ function Club_Inbox_Process($input, $club = null) {
         return Club_Json_Output(['message' => 'Request is invalid'], 0, 400);
     }
     $jsonld['actor'] = $actor;
+
+    // 销号和改资料是广播给所有见过的实例的，绝大多数是我们从没见过的用户。这两类都只作用于
+    // actor 自己，本地没缓存过它就是空操作：验签纯属白烧一次 RSA，还会记一堆 unknown actor 的
+    // 失败日志（Update 那条更糟，默认会顺带触发一次拉取）。判据与 Mastodon 的
+    // skip_unknown_actor_activity 一致，同样放在验签之前
+    if (in_array($type, ['Delete', 'Update'], true)
+        && $actor === Club_Object_Id($jsonld['object'] ?? '') && !Club_Has_Actor($actor)) return;
 
     // 对端注销账号，清掉本地缓存，关注关系靠外键级联删除
     if ($type == 'Delete' && $actor === Club_Object_Id($jsonld['object'] ?? '')) {
