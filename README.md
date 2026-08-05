@@ -18,9 +18,15 @@ A simple social groups compatible with ActivityPub.
 - 单个群组 Actor 支持自定义修改
   - 个人资料页　头像、横幅、昵称
   - 中文简介、英文简介、简介模板
-- Push 任务队列，自动重试
+- 投稿限流，支持 用户 / 群组 / 实例 / 重复内容 四类规则
+- 触发限流时私信提醒投稿者，原帖删除后自动撤回提醒
+- 提醒文案多语言，按对端 contentMap 自动选择
+- 站点首页、群组主页、Outbox，均为游标翻页
+- Push 任务队列，自动重试，多次失败进黑名单
 - Shared Inbox、Outbox 实现
 - 跨站消息 HTTP Signature 校验
+  - 校验 Date / Digest，签名主体与 actor 绑定
+  - 出站请求只允许公网地址，跳转逐跳重签
 - 兼容 Mastodon、Misskey、Pleroma
 
 ### 待实现
@@ -31,8 +37,8 @@ A simple social groups compatible with ActivityPub.
 
 ### 环境要求
 - MySQL 数据库
-- PHP 版本 >= 7.0
-- 依赖 PHP 扩展：curl, json, pcntl, pdo_mysql
+- PHP 版本 >= 7.3
+- 依赖 PHP 扩展：curl, json, pcntl, openssl, pdo_mysql
 
 ### 安装步骤
 1. 编辑 `config.php` 参数

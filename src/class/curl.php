@@ -37,6 +37,9 @@ class Curl {
     public $retryDecider = null;
     public $remainingRetries = 0;
 
+    // 上游 9.12.6 的修复：不声明的话 PHP 8.2+ 会报动态属性 deprecated
+    public $headerCallbackData = null;
+
     private $cookies = [];
     private $headers = [];
     private $options = [];
@@ -170,6 +173,7 @@ class Curl {
     public function setUserAgent($user_agent) { $this->setOpt(CURLOPT_USERAGENT, $user_agent); }
     public function setConnectTimeout($seconds) { $this->setOpt(CURLOPT_CONNECTTIMEOUT, $seconds); }
     public function setMaximumRedirects($maximum_redirects) { $this->setOpt(CURLOPT_MAXREDIRS, $maximum_redirects); }
+    public function setFollowLocation($follow_location = true) { $this->setOpt(CURLOPT_FOLLOWLOCATION, $follow_location); }
     
     public function attemptRetry() {
         $attempt_retry = false;

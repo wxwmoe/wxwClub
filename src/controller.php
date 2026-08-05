@@ -1,4 +1,4 @@
-<?php require('function.php');
+<?php require_once(__DIR__.'/function.php');
 
 function controller() {
     global $db, $ver, $base, $config, $public_streams;
@@ -19,87 +19,78 @@ function controller() {
     switch ($to) {
         
         case 'club':
-            if ($club = Club_Exist(($uri = explode('/', $uri))[2])) {
+            if ($club = Club_Exist(($uri = explode('/', $uri))[2] ?? '')) {
                 $club_url = $base.'/club/'.$club;
+                $system = Club_System_Name($club);
                 if (isset($uri[3])) switch ($uri[3]) {
                     case 'inbox':
-                        if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-                            $jsonld = json_decode($input = file_get_contents('php://input'), 1);
-                            if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base']) {
-                                
-                                if ($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object']) {
-                                    if (ActivityPub_Verification($input, false)) {
-                                        $pdo = $db->prepare('delete from `users` where `actor` = :actor');
-                                        $pdo->execute([':actor' => $jsonld['actor']]);
-                                    } break;
-                                } else $verify = ActivityPub_Verification($input);
-                                if ($config['nodeDebugging'])
-                                    Club_Inbox_Log(date('Y-m-d_H:i:s_').$club.'_'.$jsonld['type'], $input, $verify);
-                                if ($config['nodeInboxVerify'] && !$verify) break;
-                                
-                                switch ($jsonld['type']) {
-                                    case 'Create': Club_Announce_Process($jsonld); break;
-                                    case 'Follow': Club_Follow_Process($jsonld); break;
-                                    case 'Undo': Club_Undo_Process($jsonld); break;
-                                    case 'Delete':
-                                        if (isset($jsonld['object']['type'])) switch ($jsonld['object']['type']) {
-                                            case 'Tombstone': Club_Tombstone_Process($jsonld); break;
-                                            default: break;
-                                        } else {
-                                            $jsonld['object'] = ['id' => $jsonld['object']];
-                                            Club_Tombstone_Process($jsonld);
-                                        } break;
-                                    default: break;
-                                }
-                            } else Club_Json_Output(['message' => 'Request is invalid'], 0, 400);
-                        } else header('Content-type: application/activity+json'); break;
-                    
+                        if ($_SERVER['REQUEST_METHOD'] == 'POST')
+                            Club_Inbox_Process(file_get_contents('php://input'), $club);
+                        else header('Content-type: application/activity+json'); break;
+
                     case 'outbox':
                         if (isset($_GET['page'])) {
+                            // 游标分页，page 只表示「这是一页」，方向由 max / min 决定
+                            $tail = ($_GET['page'] ?? '') === 'last';
+                            $max = Club_Cursor_Parse($_GET['max'] ?? '');
+                            $min = Club_Cursor_Parse($_GET['min'] ?? '');
+                            // 往新翻要先升序取够再倒回来，页内顺序始终是新到旧
+                            $asc = $tail || $min;
+                            $where = ''; $params = [':club' => $club];
+                            if ($max) {
+                                $where = ' and a.timestamp <= :ts and (a.timestamp < :ts or a.id < :id)';
+                                $params[':ts'] = $max[0]; $params[':id'] = $max[1];
+                            } elseif ($min) {
+                                $where = ' and a.timestamp >= :ts and (a.timestamp > :ts or a.id > :id)';
+                                $params[':ts'] = $min[0]; $params[':id'] = $min[1];
+                            }
+                            // 排序键取自 announces 才能吃到 (cid,timestamp) 索引，换成 b.timestamp 会 filesort
+                            $pdo = $db->prepare('select a.id, a.timestamp, a.activity, u.actor, b.object, b.timestamp as `announced`'.
+                            ' from `announces` `a` join `clubs` `c` on a.cid = c.cid'.
+                            ' left join `users` `u` on a.uid = u.uid left join `activities` `b` on a.activity = b.id'.
+                            ' where c.name = :club'.$where.' order by a.timestamp '.($asc ? 'asc' : 'desc').
+                            ', a.id '.($asc ? 'asc' : 'desc').' limit 20');
+                            $pdo->execute($params);
+                            $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
+                            if ($asc) $rows = array_reverse($rows);
+
+                            $self = $club_url.'/outbox?page='.($tail ? 'last' : 'true');
+                            if ($max) $self .= '&max='.$max[0].'.'.$max[1];
+                            elseif ($min) $self .= '&min='.$min[0].'.'.$min[1];
                             $arr = [
                                 '@context' => 'https://www.w3.org/ns/activitystreams',
-                                'id' => $club_url.'/outbox?page='.($page = (int)$_GET['page']),
+                                'id' => $self,
                                 'type' => 'OrderedCollectionPage',
-                                'next' => $club_url.'/outbox?page=',
-                                'prev' => $club_url.'/outbox?page=',
                                 'partOf' => $club_url.'/outbox',
                                 'orderedItems' => []
                             ];
-                            if ($page < 0) {
-                                $order = '';
-                                $arr['next'] .= $page - 1;
-                                $arr['prev'] .= ($page == -1 ? $page - 1 : $page)  + 1;
-                                $page = abs($page);
-                            } else {
-                                $order = ' desc';
-                                if ($page == 0) $page = 1;
-                                $arr['next'] .= $page + 1;
-                                $arr['prev'] .= $page - 1;
+                            if ($rows) {
+                                $head = $rows[0]; $foot = $rows[count($rows) - 1];
+                                // 取满一页才给 next，抓取方据此判断到底了
+                                if (!$tail && count($rows) == 20)
+                                    $arr['next'] = $club_url.'/outbox?page=true&max='.$foot['timestamp'].'.'.$foot['id'];
+                                $arr['prev'] = $club_url.'/outbox?page=true&min='.$head['timestamp'].'.'.$head['id'];
                             }
-                            $pdo = $db->prepare('select u.actor, a.activity, b.object, b.timestamp from `announces` `a`'.
-                            ' left join `clubs` `c` on a.cid = c.cid left join `users` `u` on a.uid = u.uid left join `activities` `b` on a.activity = b.id'.
-                            ' where c.name = :club order by b.timestamp'.$order.' limit '.(($page-1)*20).', 20');
-                            $pdo->execute([':club' => $club]);
-                            foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $announce) {
+                            foreach ($rows as $announce) {
                                 $arr['orderedItems'][] = [
                                     '@context' => 'https://www.w3.org/ns/activitystreams',
                                     'id' => $club_url.'/activity#'.$announce['activity'].'/announce',
                                     'type' => 'Announce',
                                     'actor' => $club_url,
-                                    'published' => gmdate('Y-m-d\TH:i:s\Z', $announce['timestamp']),
+                                    'published' => gmdate('Y-m-d\TH:i:s\Z', $announce['announced']),
                                     'to' => [$club_url.'/followers'],
                                     'cc' => [$announce['actor'], $public_streams],
                                     'object' => $announce['object']
                                 ];
                             } Club_Json_Output($arr, 2);
                         } else {
-                            $pdo = $db->prepare('select count(a.id) from `announces` `a` left join `clubs` `c` on a.cid = c.cid where c.name = :club');
+                            $pdo = $db->prepare('select count(a.id) from `announces` `a` join `clubs` `c` on a.cid = c.cid where c.name = :club');
                             $pdo->execute([':club' => $club]);
                             $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
                             Club_Get_OrderedCollection($club_url.'/outbox', [
                                 'totalItems' => $count,
-                                'first' => $club_url.'/outbox?page=1',
-                                'last' => $club_url.'/outbox?page=-1',
+                                'first' => $club_url.'/outbox?page=true',
+                                'last' => $club_url.'/outbox?page=last',
                             ]);
                         } break;
                     
@@ -126,44 +117,12 @@ function controller() {
                     $nametag = array_merge($config['default']['infoname'], json_decode($pdo['infoname'], 1) ?: []);
                     $summary = $pdo['summary'] ?: Club_NameTag_Render($club, $config['default']['summary'], $nametag);
                     $nickname = $pdo['nickname'] ?: Club_NameTag_Render($club, $config['default']['nickname'], $nametag);
-                    if (isset($_SERVER['HTTP_ACCEPT']) && strpos($_SERVER['HTTP_ACCEPT'], 'json')) {
+                    // 系统群组没有主页，浏览器访问也只给 actor
+                    if ($system || (isset($_SERVER['HTTP_ACCEPT']) && strpos($_SERVER['HTTP_ACCEPT'], 'json'))) {
                         Club_Json_Output([
-                            '@context' => [
-                                'https://www.w3.org/ns/activitystreams',
-                                'https://w3id.org/security/v1',
-                                [
-                                    'manuallyApprovesFollowers' => 'as:manuallyApprovesFollowers',
-                                    'toot' => 'http://joinmastodon.org/ns#',
-                                    'featured' => ['@id' => 'toot:featured', '@type' => '@id'],
-                                    'featuredTags' => ['@id' => 'toot:featuredTags', '@type' => '@id'],
-                                    'alsoKnownAs' => ['@id' => 'as:alsoKnownAs', '@type' => '@id'],
-                                    'movedTo' => ['@id' => 'as:movedTo', '@type' => '@id'],
-                                    'schema' => 'http://schema.org#',
-                                    'PropertyValue' => 'schema:PropertyValue',
-                                    'value' => 'schema:value',
-                                    'IdentityProof' => 'toot:IdentityProof',
-                                    'discoverable' => 'toot:discoverable',
-                                    'Device' => 'toot:Device',
-                                    'Ed25519Signature' => 'toot:Ed25519Signature',
-                                    'Ed25519Key' => 'toot:Ed25519Key',
-                                    'Curve25519Key' => 'toot:Curve25519Key',
-                                    'EncryptedMessage' => 'toot:EncryptedMessage',
-                                    'publicKeyBase64' => 'toot:publicKeyBase64',
-                                    'deviceId' => 'toot:deviceId',
-                                    'claim' => ['@type' => '@id', '@id' => 'toot:claim'],
-                                    'fingerprintKey' => ['@type' => '@id', '@id' => 'toot:fingerprintKey'],
-                                    'identityKey' => ['@type' => '@id', '@id' => 'toot:identityKey'],
-                                    'devices' => ['@type' => '@id', '@id' => 'toot:devices'],
-                                    'messageFranking' => 'toot:messageFranking',
-                                    'messageType' => 'toot:messageType',
-                                    'cipherText' => 'toot:cipherText',
-                                    'suspended' => 'toot:suspended',
-                                    'Emoji' => 'toot:Emoji',
-                                    'focalPoint' => ['@container' => '@list', '@id' => 'toot:focalPoint']
-                                ]
-                            ],
+                            '@context' => Club_Template('context'),
                             'id' => $club_url,
-                            'type' => 'Group',
+                            'type' => $system ? 'Service' : 'Group',
                             'following' => $club_url.'/following',
                             'followers' => $club_url.'/followers',
                             'inbox' => $club_url.'/inbox',
@@ -174,7 +133,7 @@ function controller() {
                             'name' => $nickname,
                             'summary' => $summary,
                             'url' => $club_url,
-                            'manuallyApprovesFollowers' => false,
+                            'manuallyApprovesFollowers' => $system,
                             'discoverable' => false,
                             'published' => gmdate('Y-m-d\TH:i:s\Z', $pdo['timestamp']),
                             'devices' => $club_url.'/collections/devices',
@@ -195,77 +154,17 @@ function controller() {
                                 'url' => $pdo['banner'] ?: $config['default']['banner']
                             ]
                         ], 2);
-                    } else {
-                        echo '<title>',$nickname,' (@',$club,'@',$config['base'],')</title>',
-                            '<style>a{color:#000;text-decoration:none}details>summary{cursor:pointer;list-style:none}</style>',
-                            '<link href="'.$base.'/club/'.$club.'" rel="alternate" type="application/activity+json">',
-                            '<meta content="profile" property="og:type" />',
-                            '<meta content="',$summary,'" name="description">',
-                            '<meta content="'.$base.'/club/'.$club.'" property="og:url" />',
-                            '<meta content="',$config['nodeName'],'" property="og:site_name" />',
-                            '<meta content="',$nickname,' (@',$club,'@',$config['base'],')" property="og:title" />',
-                            '<meta content="',$summary,'" property="og:description" />',
-                            '<meta content="',($pdo['avatar'] ?: $config['default']['avatar']),'" property="og:image" />',
-                            '<meta content="400" property="og:image:width" />',
-                            '<meta content="400" property="og:image:height" />',
-                            '<meta content="summary" property="twitter:card" />',
-                            '<meta content="',$club,'@',$config['base'],'" property="profile:username" />',
-                            '<style>.info::before{content:"";background:url(',($pdo['banner'] ?: $config['default']['banner']),') no-repeat center;',
-                            'background-size:cover;opacity:0.35;z-index:-1;position:absolute;width:720px;height:220px;top:0px;left:0px;border-radius:8px;}</style>',
-                            '<div class="info"><img src="',($pdo['avatar'] ?: $config['default']['avatar']),'" width="50" /><p style="line-height:1px"><br></p>',
-                            '<h3 style="position:absolute;top:10px;left:68px">',$nickname,' (@',$club,'@',$config['base'],')</h3>',
-                            '<div style="font-size:14px">',$summary,'</div><p style="line-height:1px"><br></p></div>',
-                            '<div style="font-size:14px"><p>近期活动：</p>';
-                        $page = (int)($_GET['page'] ?? 1);
-                        $activities = $db->prepare('select u.name, act.object, a.summary, a.content, a.timestamp from `announces` as `a` left join `users` as `u` on a.uid = u.uid '.
-                            'left join `activities` as `act` on a.activity = act.id where a.cid = :cid order by a.timestamp desc limit '.(($page - 1) * 20).', 20');
-                        $activities->execute([':cid' => $pdo['cid']]);
-                        if ($activities = $activities->fetchAll(PDO::FETCH_ASSOC))
-                            foreach ($activities as $activity)
-                                echo $activity['summary'] ? '<details><summary>['.date('Y-m-d H:i:s', $activity['timestamp']).'] '.$activity['name'].': [CW] '.$activity['summary'].
-                                    '</summary><p><a href="'.$activity['object'].'" target="_blank">'.$activity['content'].'</a></p></details>':
-                                    '<p>['.date('Y-m-d H:i:s', $activity['timestamp']).'] '.
-                                    '<a href="'.$activity['object'].'" target="_blank">'.$activity['name'].': '.$activity['content'].'</a></p>';
-                        else echo '<p>群组还没有活动，快来发送一条吧 ~</p>';
-                        echo '<p>',($page > 1 ? '<a href="'.$base.'/club/'.$club.'?page='. ($page - 1) .'">上一页</a>' : '<span style="color:#aaa">上一页<span>'),' | '
-                            ,(count($activities) == 20 ? '<a href="'.$base.'/club/'.$club.'?page='. ($page + 1) .'">下一页</a>' : '<span style="color:#aaa">下一页</span>'),'</p>';
-                        echo '</div>';
-                    }
+                    } else Club_Template('profile', [
+                        'club' => $club, 'nickname' => $nickname, 'summary' => $summary, 'row' => $pdo
+                    ]);
                 }
             } else Club_Json_Output(['message' => 'User not found'], 0, 404); break;
         
         case 'inbox':
-            if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-                $jsonld = json_decode($input = file_get_contents('php://input'), 1);
-                if (isset($jsonld['actor']) && parse_url($jsonld['actor'])['host'] != $config['base']) {
-                    
-                    if ($jsonld['type'] == 'Delete' && $jsonld['actor'] == $jsonld['object']) {
-                        if (ActivityPub_Verification($input, false)) {
-                            $pdo = $db->prepare('delete from `users` where `actor` = :actor');
-                            $pdo->execute([':actor' => $jsonld['actor']]);
-                        } break;
-                    } else $verify = ActivityPub_Verification($input);
-                    if ($config['nodeDebugging'])
-                        Club_Inbox_Log(date('Y-m-d_H:i:s').'_shared_inbox_'.$jsonld['type'], $input, $verify);
-                    if ($config['nodeInboxVerify'] && !$verify) break;
-                    
-                    switch ($jsonld['type']) {
-                        case 'Create': Club_Announce_Process($jsonld); break;
-                        case 'Delete':
-                            if (isset($jsonld['object']['type'])) switch ($jsonld['object']['type']) {
-                                case 'Tombstone': Club_Tombstone_Process($jsonld); break;
-                                default: break;
-                            } else {
-                                $jsonld['object'] = ['id' => $jsonld['object']];
-                                Club_Tombstone_Process($jsonld);
-                            } break;
-                        case 'Follow': Club_Follow_Process($jsonld); break;
-                        case 'Undo': Club_Undo_Process($jsonld); break;
-                        default: break;
-                    }
-                }
-            } else header('Content-type: application/activity+json'); break;
-        
+            if ($_SERVER['REQUEST_METHOD'] == 'POST')
+                Club_Inbox_Process(file_get_contents('php://input'));
+            else header('Content-type: application/activity+json'); break;
+
         case 'nodeinfo':
             Club_Json_Output(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;
         
@@ -278,7 +177,7 @@ function controller() {
                 'software' => ['name' => 'wxwClub', 'version' => $ver],
                 'protocols' => ['activitypub'],
                 'services' => ['inbound' => [], 'outbound' => []],
-                'openRegistrations' => $config['openRegistrations'],
+                'openRegistrations' => $config['club']['open-registrations'],
                 'usage' => [
                     'users' => [
                         'total' => $usage['clubs'] ?? null,
@@ -288,20 +187,18 @@ function controller() {
                     'localPosts' => $usage['announces'] ?? 0
                 ],
                 'metadata' => [
-                    'nodeName' => $config['nodeName'],
-                    'nodeDescription' => $config['nodeDescription'],
-                    'maintainer' => $config['nodeMaintainer'],
+                    'nodeName' => $config['node']['name'],
+                    'nodeDescription' => $config['node']['description'],
+                    'maintainer' => $config['node']['maintainer'],
                     'repositoryUrl' => 'https://github.com/wxwmoe/wxwClub',
                     'feedbackUrl' => 'https://github.com/wxwmoe/wxwClub/issues/new'
                 ]
             ]); break;
         
         case 'webfinger':
-            $resource = $_GET['resource'];
-            if ($config['nodeDebugging'] == 1) {
-                $file_name = date('Y-m-d_H:i:s').'_'.str_replace(['/', ' ', '\\'], ['Ⳇ', '_', 'Ⳇ'], $resource);
-                file_put_contents(APP_ROOT.'/logs/webfinger/'.$file_name.'.json', Club_Json_Encode($_SERVER));
-            }
+            // ?resource[]=x 这种数组参数直接当空处理，否则 preg_match 会收到数组报错
+            $resource = is_scalar($_GET['resource'] ?? null) ? (string)$_GET['resource'] : '';
+            Club_Log_Write('debug', 'webfinger', [$resource], $_SERVER);
             if (preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches)) {
                 $resource_identifier = $matches[1];
                 if (($resource_host = $matches[2]) != $config['base']) {
@@ -316,6 +213,8 @@ function controller() {
                 break;
             }
     		
+    		// 系统群组也要应答，对端验签时会拿 keyId 反查 WebFinger，404 会让私信被回 401；
+    		// 不进目录靠 actor 的 discoverable = false，不靠这里藏
     		if ($club = Club_Exist($resource_identifier)) {
     		    $club_url = $base.'/club/'.$club;
     		    Club_Json_Output([
@@ -334,19 +233,7 @@ function controller() {
         		]]);
     		} else Club_Json_Output(['message' => 'User not found'], 0, 404); break;
         
-        case 'index':
-            echo '<title>'.$config['nodeName'].'</title>';
-            echo '<style>a{color:#000;text-decoration:none}</style>';
-            echo '<h3>'.$config['nodeName'].' (<a href="https://github.com/wxwmoe/wxwClub" target="_blank">wxwClub/'.$ver.'</a>)</h3><p>'.$config['nodeDescription'].'</p>';
-            echo '<p><b><br>热门群组</b></p>';
-            $pdo = $db->prepare('select name, nickname from (select c.name, c.nickname, (@id:=@id+1) as `id` from `announces` as `a` '.
-                'left join `clubs` as `c` on a.cid = c.cid, (select @id:=0) as `i` order by a.timestamp desc) as `h` group by name limit 20');
-            $pdo->execute();
-            foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $club)
-                echo '<p><a href="'.$base.'/club/'.$club['name'].'" target="_blank">'.($club['nickname'] ?: $club['name']).' (@'.$club['name'].'@'.$config['base'].')</a></p>';
-            $maintainer = explode('@', $config['nodeMaintainer']['name']);
-            $maintainer = '<a rel="me" href="https://'.$maintainer[2].'/@'.$maintainer[1].'" target="_blank">'.$config['nodeMaintainer']['name'].'</a>';
-            echo '<br><p style="font-size:14px">Maintainer: '.$maintainer.' (mail: '.$config['nodeMaintainer']['email'].')</p>'; break;
+        case 'index': Club_Template('index'); break;
         
         default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
     }

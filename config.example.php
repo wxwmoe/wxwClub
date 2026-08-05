@@ -33,22 +33,69 @@
         // 自定标签
         'infoname' => [':infoname_cn:' => ':club_name:', ':infoname_en:' => ':club_name:']
     ],
-    // 实例名称
-    'nodeName' => 'example.com',
-    // 实例时区
-    'nodeTimezone' => 'Asia/Shanghai',
-    // 调试模式
-    'nodeDebugging' => 0, // 0: 禁用日志，1: 记录所有，2: 只记错误
-    // 安全模式
-    'nodeInboxVerify' => false,
-    // 管理信息
-    'nodeMaintainer' => ['name' => '@admin', 'email' => 'support@example.com'],
-    // 实例描述
-    'nodeDescription' => 'A simple social groups compatible with ActivityPub.',
-    // 禁用的群组名称
-    'nodeSuspendedName' => ['yourgroupname'],
-    // 限流的群组名称（24 小时内同一用户最多 10 条，且拒绝重复内容）
-    'nodeLimitedName' => [],
-    // 开放新群组注册
-    'openRegistrations' => true
+    // 实例设置
+    'node' => [
+        // 实例名称
+        'name' => 'example.com',
+        // 实例描述
+        'description' => 'A simple social groups compatible with ActivityPub.',
+        // 实例时区
+        'timezone' => 'Asia/Shanghai',
+        // 管理信息，name 写成 @用户@实例 首页才出得了链接
+        'maintainer' => ['name' => '@admin@example.com', 'email' => 'support@example.com'],
+        // 预设语言，识别不出对方语言时使用（对应 src/i18n/ 下的文件名）
+        'language' => 'en',
+        // 安全模式，关掉等于谁都能往 inbox 里塞消息，不建议
+        'inbox-verify' => true,
+        // 日志级别，由少到多（ silent / error / warning / info / debug ）
+        // logs/event/ 是事件流，按天一个文件；其余目录按请求或事件切成单独文件
+        // 注意 silent 只关掉 logs/ 下的写入，PHP 自身的报错仍受 php.ini 的 log_errors 控制
+        'log-level' => 'info',
+        // 日志保留天数，0 不清理
+        'log-retention' => 30
+    ],
+    // 群组设置
+    'club' => [
+        // 开放新群组注册
+        'open-registrations' => true,
+        // 每小时最多新建的群组数，0 不限制
+        'create-limit' => 10,
+        // 禁用的群组名称
+        'suspended-names' => ['yourgroupname'],
+        
+        /********************************
+         *        限  流  规  则        *
+         * ---------------------------- *
+         * type   => 按谁计数           *
+         *   user => 单个用户           *
+         *   club => 整个群组           *
+         *   site => 投稿者的实例       *
+         *   dupl => 单个用户的重复内容 *
+         * hours  => 时间窗口，小时     *
+         * limit  => 窗口内的条数       *
+         ********************************/
+
+        // 同一群组可叠加多条规则，按顺序判断，触发哪条回哪条
+        // 四种都只统计本群组，同一内容投给不同群组互不影响
+        'limits' => [
+            'yourtestgroup' => ['type' => 'user', 'hours' => 24, 'limit' => 10],
+            'yourbusygroup' => [
+                ['type' => 'dupl', 'hours' => 24, 'limit' => 1],
+                ['type' => 'user', 'hours' => 24, 'limit' => 5],
+                ['type' => 'site', 'hours' => 1, 'limit' => 20],
+                ['type' => 'club', 'hours' => 1, 'limit' => 60]
+            ]
+        ],
+        // 用于私信提醒用户的系统群组，不开放注册、不进目录、不接受关注
+        'system-name' => 'system'
+    ],
+    // 触发限制时的私信提醒
+    'notice' => [
+        // 是否发送提醒
+        'enabled' => true,
+        // 每个用户每天最多收到的条数
+        'limit' => 20,
+        // 提醒保留天数，超过后撤回并清理，0 不清理
+        'retention' => 30
+    ]
 ];

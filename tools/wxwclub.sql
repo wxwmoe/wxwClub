@@ -10,7 +10,8 @@ CREATE TABLE `clubs` (
   `private_key` text CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `timestamp` int NOT NULL,
   PRIMARY KEY (`cid`),
-  UNIQUE KEY `name` (`name`)
+  UNIQUE KEY `name` (`name`),
+  KEY `timestamp` (`timestamp`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE `users` (
@@ -23,8 +24,8 @@ CREATE TABLE `users` (
   `timestamp` int NOT NULL,
   `refresh` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`uid`),
-  UNIQUE KEY `name` (`name`),
-  UNIQUE KEY `actor` (`actor`)
+  UNIQUE KEY `actor` (`actor`),
+  KEY `name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE `activities` (
@@ -47,7 +48,6 @@ CREATE TABLE `followers` (
   `timestamp` int NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `cid_uid` (`cid`,`uid`),
-  KEY `cid` (`cid`),
   KEY `uid` (`uid`),
   CONSTRAINT `followers_ibfk_4` FOREIGN KEY (`cid`) REFERENCES `clubs` (`cid`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `followers_ibfk_5` FOREIGN KEY (`uid`) REFERENCES `users` (`uid`) ON DELETE CASCADE ON UPDATE CASCADE
@@ -63,9 +63,10 @@ CREATE TABLE `announces` (
   `timestamp` int NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `cid_activity` (`cid`,`activity`),
-  KEY `uid` (`uid`),
   KEY `activity` (`activity`),
-  KEY `timestamp` (`timestamp`),
+  KEY `cid_timestamp` (`cid`,`timestamp`),
+  KEY `uid_timestamp` (`uid`,`timestamp`),
+  KEY `timestamp_cid` (`timestamp`,`cid`),
   CONSTRAINT `announces_ibfk_3` FOREIGN KEY (`cid`) REFERENCES `clubs` (`cid`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `announces_ibfk_5` FOREIGN KEY (`uid`) REFERENCES `users` (`uid`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `announces_ibfk_7` FOREIGN KEY (`activity`) REFERENCES `activities` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
@@ -80,8 +81,7 @@ CREATE TABLE `tasks` (
   `timestamp` int NOT NULL,
   PRIMARY KEY (`tid`),
   KEY `cid` (`cid`),
-  KEY `type` (`type`),
-  KEY `queues` (`queues`),
+  KEY `queues_timestamp` (`queues`,`timestamp`),
   CONSTRAINT `tasks_ibfk_2` FOREIGN KEY (`cid`) REFERENCES `clubs` (`cid`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
@@ -94,10 +94,22 @@ CREATE TABLE `queues` (
   `retry` tinyint NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   KEY `tid` (`tid`),
-  KEY `timestamp` (`timestamp`),
-  KEY `inuse` (`inuse`),
-  KEY `retry` (`retry`),
+  KEY `pending` (`inuse`,`retry`,`timestamp`),
   CONSTRAINT `queues_ibfk_2` FOREIGN KEY (`tid`) REFERENCES `tasks` (`tid`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `notices` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `uid` int NOT NULL,
+  `type` varchar(20) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `note` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL,
+  `object` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL,
+  `timestamp` int NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `uid_type_timestamp` (`uid`,`type`,`timestamp`),
+  KEY `object` (`object`),
+  KEY `timestamp` (`timestamp`),
+  CONSTRAINT `notices_ibfk_1` FOREIGN KEY (`uid`) REFERENCES `users` (`uid`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE `blacklist` (
@@ -109,6 +121,5 @@ CREATE TABLE `blacklist` (
   `retry` smallint NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   UNIQUE KEY `target` (`target`),
-  KEY `timestamp` (`timestamp`),
-  KEY `inuse` (`inuse`)
+  KEY `pending` (`inuse`,`timestamp`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

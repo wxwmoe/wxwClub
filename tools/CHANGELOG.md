@@ -1,5 +1,33 @@
 #### 2026-08-05
 
 ```sql
+CREATE TABLE `notices` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `uid` int NOT NULL,
+  `type` varchar(20) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `note` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL,
+  `object` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL,
+  `timestamp` int NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `uid_type_timestamp` (`uid`,`type`,`timestamp`),
+  KEY `object` (`object`),
+  KEY `timestamp` (`timestamp`),
+  CONSTRAINT `notices_ibfk_1` FOREIGN KEY (`uid`) REFERENCES `users` (`uid`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 ALTER TABLE `users` ADD `refresh` int NOT NULL DEFAULT '0';
+ALTER TABLE `users` DROP KEY `name`, ADD KEY `name` (`name`);
+ALTER TABLE `queues` ADD KEY `pending` (`inuse`,`retry`,`timestamp`);
+ALTER TABLE `queues` DROP KEY `inuse`, DROP KEY `retry`, DROP KEY `timestamp`;
+ALTER TABLE `announces` ADD KEY `cid_timestamp` (`cid`,`timestamp`);
+ALTER TABLE `announces` ADD KEY `uid_timestamp` (`uid`,`timestamp`);
+ALTER TABLE `announces` DROP KEY `uid`;
+ALTER TABLE `announces` ADD KEY `timestamp_cid` (`timestamp`,`cid`);
+ALTER TABLE `announces` DROP KEY `timestamp`;
+ALTER TABLE `clubs` ADD KEY `timestamp` (`timestamp`);
+ALTER TABLE `tasks` ADD KEY `queues_timestamp` (`queues`,`timestamp`);
+ALTER TABLE `tasks` DROP KEY `queues`, DROP KEY `type`;
+ALTER TABLE `blacklist` ADD KEY `pending` (`inuse`,`timestamp`);
+ALTER TABLE `blacklist` DROP KEY `inuse`, DROP KEY `timestamp`;
+ALTER TABLE `followers` DROP KEY `cid`;
 ```
