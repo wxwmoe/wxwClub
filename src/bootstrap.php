@@ -14,8 +14,15 @@ date_default_timezone_set($config['node']['timezone']);
 // 按请求分的话每秒都能生成一个，查一次错误要翻几千个文件
 Club_Log_Error_Path();
 
+set_exception_handler(function ($e) {
+    $where = $e->getFile().':'.$e->getLine();
+    Club_Log_Event('error', 'uncaught '.get_class($e), ['error' => $e->getMessage(), 'at' => $where]);
+    error_log('Uncaught '.get_class($e).': '.$e->getMessage().' in '.$where."\n".$e->getTraceAsString());
+    if (PHP_SAPI != 'cli' && !headers_sent()) Club_Json_Output(['message' => 'Internal error'], 0, 500);
+});
+
 try {
-    $db = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'],
+    $db = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'].';charset=utf8mb4',
         $config['mysql']['username'], $config['mysql']['password'],
         [PDO::ATTR_PERSISTENT => true, PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 } catch (PDOException $e) {

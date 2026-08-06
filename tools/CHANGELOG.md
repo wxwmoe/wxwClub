@@ -1,3 +1,12 @@
+#### 2026-08-06
+
+```sql
+ALTER TABLE `activities` ADD `updated` int NOT NULL DEFAULT '0' AFTER `object`;
+ALTER TABLE `tasks` MODIFY `jsonld` mediumtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL;
+ALTER TABLE `announces` MODIFY `summary` mediumtext COLLATE utf8mb4_general_ci;
+ALTER TABLE `announces` MODIFY `content` mediumtext COLLATE utf8mb4_general_ci NOT NULL;
+```
+
 #### 2026-08-05
 
 ```sql

@@ -6,23 +6,35 @@ function worker() {
     $pdo->execute([':timestamp' => time()]);
     $pdo = $db->query('select q.id, c.name as club, t.tid, t.type, t.jsonld, q.target, q.retry from `queues` as `q` left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid where `id` = last_insert_id() and row_count() <> 0');
     if ($task = $pdo->fetch(PDO::FETCH_ASSOC)) {
+        // worker 是长期进程，关联标记不像 web 那样每请求自动归零，每条任务都要重设。
+        // 用队列行号，同一条投递的入队、重试、成功几行就能串起来
+        Club_Log_Ref('queue#'.$task['id']);
         switch ($task['type']) {
             case 'push':
                 $pdo = $db->prepare('select count(*) from `blacklist` where `target` = :target');
                 $pdo->execute([':target' => $task['target']]);
                 if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) {
+                    // 入队之后目标才进的黑名单，出队时才发现
+                    Club_Log_Event('debug', 'push dropped, target blacklisted',
+                        ['club' => $task['club'], 'target' => $task['target']]);
                     $pdo = $db->prepare('delete from `queues` where `id` = :id');
                     $pdo->execute([':id' => $task['id']]);
                     $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
                     $pdo->execute([':tid' => $task['tid']]);
                 } else {
                     if (ActivityPub_POST($task['target'], $task['club'], $task['jsonld'])) {
+                        // 投递成功是 debug：正常运行时每条投稿都会刷一行乘以关注实例数
+                        Club_Log_Event('debug', 'push delivered', ['club' => $task['club'],
+                            'target' => $task['target'], 'retry' => $task['retry']]);
                         $pdo = $db->prepare('delete from `queues` where `id` = :id');
                         $pdo->execute([':id' => $task['id']]);
                         $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
                         $pdo->execute([':tid' => $task['tid']]);
                     } else {
                         $retry = $task['retry'] + 1;
+                        // 对端临时挂掉是常态，所以只在 debug；连续失败的后果由下面 127 那条 error 兜
+                        Club_Log_Event('debug', 'push failed, will retry',
+                            ['club' => $task['club'], 'target' => $task['target'], 'retry' => $retry]);
                         if ($retry <= 3) $timestamp = time() + 60;
                         elseif ($retry <= 5) $timestamp = time() + 300;
                         elseif ($retry <= 10) $timestamp = time() + 600;
@@ -45,6 +57,8 @@ function worker() {
                 } break;
             default: break;
         } $cycle++;
+        // 后面的 rotate、过期清理不属于这条任务，标记不清掉会挂到它头上
+        Club_Log_Ref('');
     } else $idle = 1;
     if ($idle || $cycle > 9) {
         Club_Log_Rotate($config['node']['log-retention'] ?? 30);
