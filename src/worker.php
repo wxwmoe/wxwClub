@@ -25,7 +25,7 @@ function worker($maintain = true) {
                     $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
                     $pdo->execute([':tid' => $task['tid']]);
                 } else {
-                    if (ActivityPub_POST($task['target'], $task['club'], $task['jsonld'])) {
+                    if (($result = ActivityPub_POST($task['target'], $task['club'], $task['jsonld']))) {
                         // 投递成功是 debug：正常运行时每条投稿都会刷一行乘以关注实例数
                         Club_Log_Event('debug', 'push delivered', ['club' => $task['club'],
                             'target' => $task['target'], 'retry' => $task['retry']]);
@@ -35,6 +35,10 @@ function worker($maintain = true) {
                         $pdo->execute([':tid' => $task['tid']]);
                     } else {
                         $retry = $task['retry'] + 1;
+                        // null 只在本站 DNS 整个坏掉时出现（对端自己注销域名走的是 false，
+                        // 照常拉黑）。这种时候所有对端会一起失败，不卡住计数的话，
+                        // 退避到 1 小时档以后连着挂 5 天就能把关注的实例全拉黑一遍
+                        if ($result === null && $retry > 100) $retry = 100;
                         // 对端临时挂掉是常态，所以只在 debug；连续失败的后果由下面 127 那条 error 兜
                         Club_Log_Event('debug', 'push failed, will retry',
                             ['club' => $task['club'], 'target' => $task['target'], 'retry' => $retry]);
@@ -85,7 +89,10 @@ function worker($maintain = true) {
         $pdo->execute([':timestamp' => time()]);
         $pdo = $db->query('select `id`, `retry`, `target` from `blacklist` where `id` = last_insert_id() and row_count() <> 0');
         if (($target = $pdo->fetch(PDO::FETCH_ASSOC)) && ($club = Club_System())) {
-            if (ActivityPub_POST($target['target'], $club, '{}')) {
+            if (ActivityPub_Alive($target['target'], $club)) {
+                // 恢复投递跟停止投递一样是个大事件，两头都留一行才对得上
+                Club_Log_Event('info', 'target removed from blacklist: '.$target['target'],
+                    ['retry' => $target['retry']]);
                 $pdo = $db->prepare('delete from `blacklist` where `id` = :id');
                 $pdo->execute([':id' => $target['id']]);
             } else {
@@ -94,9 +101,13 @@ function worker($maintain = true) {
             }
         } elseif ($idle) sleep(1); $cycle = 0;
     }
-    if (($usage = memory_get_usage(1)) > 10 * 1024 * 1024) {
+    // 0 关掉这道闸。调高之前先想清楚 DNS 缓存要占多少：dns-cache 一条约 0.4 KB，
+    // 装满 8192 条就是 3.2 MB，加上基线还留不下余量的话，这里跟着一起抬
+    $limit = ($config['node']['memory-limit'] ?? 10) * 1024 * 1024;
+    if ($limit > 0 && ($usage = memory_get_usage(1)) > $limit) {
         global $stop; $stop = true;
         // 多进程模式下 master 会补一个回来，单进程则要靠容器重启
-        Club_Log_Console('error', 'memory limit exceeded, stopping', ['bytes' => $usage, 'pid' => getmypid()]);
+        Club_Log_Console('error', 'memory limit exceeded, stopping',
+            ['bytes' => $usage, 'limit' => $limit, 'pid' => getmypid()]);
     }
 }

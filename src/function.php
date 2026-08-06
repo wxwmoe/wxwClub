@@ -5,8 +5,14 @@ function ActivityPub_GET($url, $club, $hops = 3) {
     global $curl;
     for ($i = 0; $i <= $hops; $i++) {
         // 拦下的是内网地址和非 http(s)，属于有人在拿本站当探针，不能只是静默返回
-        if (!Club_Url_Public($url)) {
+        if (($public = Club_Url_Public($url)) === false) {
             Club_Log_Event('warning', 'fetch blocked, url is not public', ['url' => $url, 'hop' => $i]);
+            return false;
+        }
+        // 解析不出来只是这次拉不到，跟被人当探针不是一回事，别混进 warning 里
+        if ($public === null) {
+            Club_Log_Event(Club_Url_Resolve_Healthy() ? 'info' : 'warning',
+                'fetch skipped, cannot resolve host', ['url' => $url, 'hop' => $i]);
             return false;
         }
         $date = gmdate('D, d M Y H:i:s T');
@@ -19,11 +25,22 @@ function ActivityPub_GET($url, $club, $hops = 3) {
     } return false;
 }
 
+// 返回 false = 投递失败，null = 连试都没试成（解析不出来），调用方要区分对待
 function ActivityPub_POST($url, $club, $jsonld) {
     // 队列里的 target 是很久以前拉取的，域名可能已经解析到内网，每次投递都要重判
-    if (!Club_Url_Public($url)) {
+    if (($public = Club_Url_Public($url)) === false) {
         Club_Log_Event('warning', 'push blocked, url is not public', ['url' => $url, 'club' => $club]);
         return false;
+    }
+    if ($public === null) {
+        // 别的域名解析得动，就是这个对端把域名撤了/过期了，跟连不上没区别，照常记失败
+        if (Club_Url_Resolve_Healthy()) {
+            Club_Log_Event('info', 'push failed, host does not resolve', ['url' => $url, 'club' => $club]);
+            return false;
+        }
+        // 一个都解析不动，是本站自己的毛病，返回 null 让调用方别记在对端头上
+        Club_Log_Event('warning', 'push deferred, local dns looks broken', ['url' => $url, 'club' => $club]);
+        return null;
     }
     $date = gmdate('D, d M Y H:i:s T');
 	$digest = base64_encode(hash('sha256', $jsonld, 1));
@@ -31,6 +48,25 @@ function ActivityPub_POST($url, $club, $jsonld) {
         'Signature' => ActivityPub_Signature($url, $club, $date, $digest),
         'Digest' => 'SHA-256='.$digest
     ], $jsonld);
+}
+
+// 黑名单探活只问一件事：对端还在不在。空 body 打 inbox 本来就会被 400/401 挡回来，
+// 而 Curl 把 4xx 也算进 $error，照投递成功与否来判的话，进了黑名单的实例永远出不来。
+// 这里只看有没有拿到状态码：拿到了就说明 DNS、TCP、TLS 到应用层全通。
+// 5xx 不算，CDN 回源失败也是有状态码的，那种情况对端其实还是死的
+function ActivityPub_Alive($url, $club) {
+    global $curl;
+    if (($public = Club_Url_Public($url)) !== true) {
+        Club_Log_Event($public === null ? 'info' : 'warning', 'probe skipped, '
+            .($public === null ? 'cannot resolve host' : 'url is not public'),
+            ['url' => $url, 'club' => $club]);
+        return false;
+    }
+    // 上面已经确认过一遍，这次 POST 必然会真的发出去，
+    // $curl 里留的就是本次请求的结果，不会是上一次请求的残留
+    ActivityPub_POST($url, $club, '{}');
+    return isset($curl) && !$curl->curlError
+        && $curl->httpStatusCode > 0 && $curl->httpStatusCode < 500;
 }
 
 function ActivityPub_CURL($url, $date, $head, $data = null) {
@@ -1122,27 +1158,68 @@ function Club_Url_Absolute($url, $base) {
 }
 
 // 只放行公网 http(s)：actor、keyId、inbox 都是对端给的，
-// 不挡的话伪造一个签名就能让本站去访问 127.0.0.1、云元数据服务之类的内网目标
+// 不挡的话伪造一个签名就能让本站去访问 127.0.0.1、云元数据服务之类的内网目标。
+// 三态：true 公网 / false 确证内网或协议不对，该拦 / null 解析不出来，什么都没证明
 function Club_Url_Public($url) {
     $parts = parse_url((string)$url);
     if (empty($parts['host']) || !in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'])) return false;
     // 域名要先解析成 IP 再判断，否则内网地址套个域名就绕过去了
     $host = trim($parts['host'], '[]');
-    $ips = filter_var($host, FILTER_VALIDATE_IP) ? [$host] : Club_Url_Resolve($host);
-    if (!$ips) return false;
+    if (filter_var($host, FILTER_VALIDATE_IP)) $ips = [$host];
+    // 「解析失败」和「对端指向内网」是两回事，混成同一个 false 的话，
+    // 本地 DNS 抽一次风就要报一堆 SSRF warning。至于这次失败该不该算对端的账，
+    // 这里判不了，交给调用方问 Club_Url_Resolve_Healthy()
+    elseif (!($ips = Club_Url_Resolve($host))) return null;
     foreach ($ips as $ip)
         if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) return false;
     return true;
 }
 
-// gethostbynamel 只查 A 记录，IPv6 单栈的对端要靠 AAAA 补上
-function Club_Url_Resolve($host) {
-    if ($ips = gethostbynamel($host)) return $ips;
-    $ips = [];
+// A 查到了就不查 AAAA 的话，对端只要 A 摆个公网地址、AAAA 指 ::1，
+// curl 默认优先走 v6 就绕过了检查，所以两种记录都要查，取并集一起校验。
+// 进程内缓存：worker 是长期进程，同一个 host 每条投递都重解析一遍，
+// 既拖慢投递也在给 DNS 加压；缓存随进程重启重建，不落盘。
+// 一条存成 [时间, "ip,ip"] 而不是嵌套数组：实测前者单条 417 字节，后者 870，
+// 对端上万时这个差别直接决定会不会撞到 worker 的内存自停阈值
+function Club_Url_Resolve($host, $ttl = 300, $stale = 3600) {
+    global $config; static $cache = []; $now = time();
+    if (isset($cache[$host]) && $cache[$host][0] > $now - $ttl) return explode(',', $cache[$host][1]);
+    $ips = gethostbynamel($host) ?: [];
     if (function_exists('dns_get_record'))
         foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $rr)
             if (!empty($rr['ipv6'])) $ips[] = $rr['ipv6'];
-    return $ips;
+    if ($ips) {
+        // 先删再插，PHP 数组保持插入顺序，于是表头天然就是最久没更新的那批
+        unset($cache[$host]);
+        $cache[$host] = [$now, implode(',', $ips)];
+        // 满了砍掉最旧的四分之一。整表清空的话，对端比上限多就会反复全清，
+        // 下面的 stale 兜底跟着一起没；一次砍一批则把重建成本摊开
+        if (count($cache) > ($max = $config['node']['dns-cache'] ?? 4096)) {
+            $cache = array_slice($cache, (int)($max / 4), null, true);
+            Club_Log_Event('debug', 'dns cache trimmed', ['max' => $max, 'left' => count($cache)]);
+        }
+        Club_Url_Resolve_Healthy(true);
+        return $ips;
+    }
+    // 解析失败时沿用上次的结果，扛过一次性的 SERVFAIL。窗口只给 1 小时：
+    // 再长的话，域名真的改指到内网了，我们这边还会拿旧地址放行
+    if (isset($cache[$host]) && $cache[$host][0] > $now - $stale) {
+        Club_Log_Event('debug', 'dns lookup failed, reusing cached address',
+            ['host' => $host, 'age' => $now - $cache[$host][0], 'ip' => $cache[$host][1]]);
+        return explode(',', $cache[$host][1]);
+    }
+    Club_Log_Event('debug', 'dns lookup failed, no usable cache', ['host' => $host]);
+    return [];
+}
+
+// 一次查不到，到底是对端注销了域名、还是本站 DNS 坏了？单看这一次分不出来。
+// 但本站 DNS 坏了不会只坏一个 host：最近还成功解析过别的域名，就说明出口是通的，
+// 那这次查不到就是对端自己的事，该照常记失败；反之才是我们的问题，不能算在对端头上。
+// 进程内状态，worker 重启后先按「不健康」算，宁可晚一点拉黑也别误伤
+function Club_Url_Resolve_Healthy($mark = false, $window = 600) {
+    static $last = 0;
+    if ($mark) { $last = time(); return true; }
+    return $last > time() - $window;
 }
 
 function Club_NameTag_Render($club, $str, $tag) {
