@@ -22,9 +22,7 @@ set_exception_handler(function ($e) {
 });
 
 try {
-    $db = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'].';charset=utf8mb4',
-        $config['mysql']['username'], $config['mysql']['password'],
-        [PDO::ATTR_PERSISTENT => true, PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    Club_DB_Connect();
 } catch (PDOException $e) {
     if (PHP_SAPI == 'cli') exit('Error: '.$e->getMessage()."\n");
     http_response_code(500); exit('Error: '.$e->getMessage());

@@ -199,6 +199,18 @@ function Club_I18n($key, $locale, $vars = []) {
     } return '';
 }
 
+// 建库连接。worker 开多进程时，每个子进程 fork 完都要自己调一次重新建：
+// fork 继承的是父进程那条连接的 socket，而领队列用的 last_insert_id() 是连接级状态，
+// 共用一条会让两个子进程领到同一行，同一条投递发两遍。
+// 持久连接只对 fpm 有意义（进程复用），CLI 下进程活着连接就活着，
+// 而且持久连接的池子也会被 fork 继承，子进程再 new PDO 会直接拿回父进程那条
+function Club_DB_Connect() {
+    global $db, $config;
+    return $db = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'].';charset=utf8mb4',
+        $config['mysql']['username'], $config['mysql']['password'],
+        [PDO::ATTR_PERSISTENT => PHP_SAPI != 'cli', PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+}
+
 // 当前级别是否包含 $level。false 等同 silent，其他无法识别的取值按默认的 info 处理
 function Club_Log_Level($level) {
     global $config; static $rank = ['silent' => 0, 'error' => 1, 'warning' => 2, 'info' => 3, 'debug' => 4];
@@ -307,10 +319,13 @@ function Club_Log_Event($level, $message, $context = []) {
         FILE_APPEND);
 }
 
-// worker 的输出既要实时给人看，也要留档，两边共用一个入口
-function Club_Log_Console($level, $message) {
-    if (PHP_SAPI == 'cli') echo date('[Y-m-d H:i:s]').' '.$message, "\n";
-    Club_Log_Event($level, $message);
+// worker 的输出既要实时给人看，也要留档，两边共用一个入口。
+// 上下文照着 Club_Log_Event 的样子拼在消息后面，终端和 event 日志里是同一行；
+// 多进程模式下几个进程的输出混在一起，靠这里的 pid 才分得清哪句是谁说的
+function Club_Log_Console($level, $message, $context = []) {
+    if (PHP_SAPI == 'cli')
+        echo date('[Y-m-d H:i:s]').' '.$message.($context ? ' '.Club_Json_Encode($context) : ''), "\n";
+    Club_Log_Event($level, $message, $context);
 }
 
 // logs/ 按请求写文件，长期跑会占满 inode，由 worker 空闲时清理

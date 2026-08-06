@@ -1,6 +1,9 @@
 <?php require_once(__DIR__.'/function.php');
 
-function worker() {
+// $maintain：rotate、过期清理这些是全站一份的活，跟领了哪条任务无关。
+// 开多进程时每个进程都跑一遍只是把同样的事做 N 遍（rotate 要 glob 整个 logs/），
+// 所以只交给 0 号进程，其余的专心投递
+function worker($maintain = true) {
     global $db, $cycle, $config; $idle = 0; if (!isset($cycle)) $cycle = 0;
     $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1, `timestamp` = :timestamp where `inuse` = 0 and `timestamp` <= :timestamp order by `retry`, `timestamp` asc limit 1');
     $pdo->execute([':timestamp' => time()]);
@@ -61,17 +64,23 @@ function worker() {
         Club_Log_Ref('');
     } else $idle = 1;
     if ($idle || $cycle > 9) {
-        Club_Log_Rotate($config['node']['log-retention'] ?? 30);
-        // 长期进程要自己换天，rotate 也可能刚把当前这个文件清掉
+        if ($maintain) Club_Log_Rotate($config['node']['log-retention'] ?? 30);
+        // 长期进程要自己换天，rotate 也可能刚把当前这个文件清掉。
+        // ini_set 的作用范围是本进程，这条不能跟着 $maintain 一起跳过
         Club_Log_Error_Path();
-        // 会入队新任务，必须放在下面依赖 last_insert_id() 的语句之前
-        Club_Notice_Expire($config['notice']['retention'] ?? 30);
-        $pdo = $db->prepare('delete from `tasks` where `queues` < 1 and `timestamp` <= :timestamp');
-        $pdo->execute([':timestamp' => time() - 30]);
-        $pdo = $db->prepare('update `queues` set `inuse` = 0 where `inuse` = 1 and `timestamp` <= :timestamp');
-        $pdo->execute([':timestamp' => time() - 30]);
-        $pdo = $db->prepare('update `blacklist` set `inuse` = 0 where `inuse` = 1 and `timestamp` <= :timestamp');
-        $pdo->execute([':timestamp' => time() - 30]);
+        if ($maintain) {
+            // 会入队新任务，必须放在下面依赖 last_insert_id() 的语句之前
+            Club_Notice_Expire($config['notice']['retention'] ?? 30);
+            $pdo = $db->prepare('delete from `tasks` where `queues` < 1 and `timestamp` <= :timestamp');
+            $pdo->execute([':timestamp' => time() - 30]);
+            // 复位的是被 SIGKILL 带走的进程留下的行，30 秒的窗口比一次投递的超时长
+            $pdo = $db->prepare('update `queues` set `inuse` = 0 where `inuse` = 1 and `timestamp` <= :timestamp');
+            $pdo->execute([':timestamp' => time() - 30]);
+            $pdo = $db->prepare('update `blacklist` set `inuse` = 0 where `inuse` = 1 and `timestamp` <= :timestamp');
+            $pdo->execute([':timestamp' => time() - 30]);
+        }
+        // 探活也是一次 curl，慢起来一样堵进程，所以不归 0 号独占；
+        // 领取语句本身是原子的，多进程各领各的
         $pdo = $db->prepare('update `blacklist` set `id` = last_insert_id(id), `inuse` = 1, `timestamp` = :timestamp where `inuse` = 0 and `timestamp` <= :timestamp order by `timestamp` asc limit 1');
         $pdo->execute([':timestamp' => time()]);
         $pdo = $db->query('select `id`, `retry`, `target` from `blacklist` where `id` = last_insert_id() and row_count() <> 0');
@@ -85,8 +94,9 @@ function worker() {
             }
         } elseif ($idle) sleep(1); $cycle = 0;
     }
-    if (memory_get_usage(1) > 10 * 1024 * 1024) {
+    if (($usage = memory_get_usage(1)) > 10 * 1024 * 1024) {
         global $stop; $stop = true;
-        Club_Log_Console('error', 'Memory limit exceeded, stopping ...');
+        // 多进程模式下 master 会补一个回来，单进程则要靠容器重启
+        Club_Log_Console('error', 'memory limit exceeded, stopping', ['bytes' => $usage, 'pid' => getmypid()]);
     }
 }

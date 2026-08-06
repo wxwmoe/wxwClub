@@ -38,7 +38,7 @@ A simple social groups compatible with ActivityPub.
 ### 环境要求
 - MySQL 数据库
 - PHP 版本 >= 7.3
-- 依赖 PHP 扩展：curl, json, pcntl, openssl, pdo_mysql
+- 依赖 PHP 扩展：curl, json, pcntl, posix, openssl, pdo_mysql
 
 ### 安装步骤
 1. 编辑 `config.php` 参数
@@ -53,10 +53,10 @@ A simple social groups compatible with ActivityPub.
 ```
     1. cd wxwClub/
     2. docker build -t 'wxwclub:worker' .
-    3. docker run -d --restart always -v $(pwd):/wxwClub \
-    --name wxwclub_worker wxwclub:worker php /wxwClub/cli.php worker
+    3. docker run -d --restart always --stop-timeout 30 -v $(pwd):/wxwClub \
+    --name wxwclub_worker wxwclub:worker php /wxwClub/cli.php worker 4
 ```
-5. （可选）运行多个 `wxwClub worker` 执行队列
+5. （可选）调整并发队列数，默认 1，上限 32；需要更多队列可运行多个 worker
 
 ## 版权声明
 
