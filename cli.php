@@ -29,7 +29,7 @@ function worker_loop($maintain = true) {
     global $stop;
     while (!$stop) {
         try { worker($maintain); }
-        // 之前只 echo 到 stdout，进程被托管起来跑的话这些报错等于没有
+        // 只 echo 到 stdout 的话，进程被托管起来跑时这些报错等于没有
         catch (PDOException $e) {
             // 多进程抢同一张队列表，偶尔会撞出死锁，重来一次就好；连成片才是真出事了
             Club_Log_Console('error', 'database error', ['error' => $e->getMessage(), 'pid' => getmypid()]);

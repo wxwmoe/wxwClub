@@ -26,8 +26,8 @@ function ActivityPub_GET($url, $club, $hops = 3) {
     } return false;
 }
 
-// 返回原因码，调用方要分开处置 —— 这几种失败的自愈概率差好几个数量级，
-// 压成同一个 false 的话，一个注销了域名的对端会拿着「对端临时挂掉」那套阶梯每分钟重试：
+// 返回原因码，调用方要分开处置：这几种失败的自愈概率差好几个数量级，
+// 共用一套退避阶梯的话，注销了域名的对端会被按「临时挂掉」每分钟重试：
 //   ok         成功
 //   failed     对端在，但没收下（curl 报错或 5xx）
 //   unresolved 域名解析不出来，而本站 DNS 是好的
@@ -81,10 +81,11 @@ function ActivityPub_CURL($url, $date, $head, $data = null, $ips = null) {
     if (!isset($curl)) $curl = new Curl();
     $curl->setTimeout(10);
     $curl->setConnectTimeout(3);
-    // 调用方验的是它自己解析出来的 IP，而 curl 会拿 URL 再解析一遍 —— 两次之间
-    // 对端换掉记录就绕过了那道内网检查（DNS rebinding）。把验过的地址直接钉给 curl，
-    // 中间就没有第二次解析的机会。钉进去的条目在 curl 自己的 DNS 缓存里是永久的，
-    // 所以每次先把上一条撤掉，否则长期进程会越积越多，还会拿旧地址去连
+    // 内网检查的另一半：Club_Url_Public 只交上来公网地址，私网那些是靠
+    // 「curl 拿不到就连不上」拦住的。不钉的话 curl 会拿 URL 自己再解析一遍，
+    // 既把剔掉的地址捡回来，也留下 DNS rebinding 的空子。
+    // 钉进去的条目在 curl 自己的 DNS 缓存里是永久的，所以每次先撤掉上一条，
+    // 否则长期进程会越积越多，还会拿旧地址去连
     $resolve = [];
     if (isset($pinned)) { $resolve[] = '-'.$pinned; $pinned = null; }
     // URL 里直接写 IP 的不钉：本来就没有解析这一步，没有可乘之机，
@@ -773,8 +774,8 @@ function Club_Inbox_Skip($reason, $context = []) {
     Club_Log_Event('debug', 'inbox skip, '.$reason, $context);
 }
 
-// inbox 的对外入口。DB 抛异常时以前只在 logs/error/ 留一条 PHP 报错，event 里是
-// 「inbox in」之后戛然而止，光看 event 判断不出是没匹配到分支还是中途挂了。
+// inbox 的对外入口。DB 抛异常必须在 event 里也留一行，否则那边是「inbox in」之后
+// 戛然而止，判断不出是没匹配到分支还是中途挂了。
 // 500 会让对端重投，这对临时性的 DB 故障是对的行为，跟未捕获时一致
 function Club_Inbox_Process($input, $club = null) {
     try { Club_Inbox_Dispatch($input, $club); }
@@ -1060,7 +1061,7 @@ function Club_Tombstone_Process($jsonld, $input = null) {
     if (!is_array($jsonld['object'] ?? null) || !($object = Club_Object_Id($jsonld['object']['id'] ?? '')))
         return Club_Inbox_Skip('delete without object id', ['actor' => $jsonld['actor']]);
     // Delete 的 id 只拿来去重，不能当准入条件：activity 的 id 在规范里是 SHOULD，
-    // GoToSocial 一类实现会省掉，之前那版在这里直接 return，删嘟静默失效。
+    // GoToSocial 一类实现会省掉，拿它当准入条件的话删嘟会静默失效。
     // 更隐蔽的是有的实现拿被删对象的 URI 当 activity id，而 activities.object 的唯一键
     // 是全表共用的，那样去重查询会命中帖子自己的 Create 记录，同样静默跳过。
     // 统一补成 <对象>#delete 两种都躲开，这也正是 Mastodon 自己用的形式
@@ -1188,8 +1189,8 @@ function Club_Url_Absolute($url, $base) {
 
 // 只放行公网 http(s)：actor、keyId、inbox 都是对端给的，
 // 不挡的话伪造一个签名就能让本站去访问 127.0.0.1、云元数据服务之类的内网目标。
-// 三态：IP 列表 = 公网 / false 确证内网或协议不对，该拦 / null 解析不出来，什么都没证明。
-// 放行时返回的是验过的那几个 IP，调用方要把它钉给 curl，别再解析第二遍
+// 三态：IP 列表 = 可投的公网地址 / false 一个公网地址都没有或协议不对，该拦 /
+// null 解析不出来，什么都没证明。返回的是筛过的地址，调用方必须把它钉给 curl
 function Club_Url_Public($url) {
     $parts = parse_url((string)$url);
     if (empty($parts['host']) || !in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'])) return false;
@@ -1200,18 +1201,30 @@ function Club_Url_Public($url) {
     // 本地 DNS 抽一次风就要报一堆 SSRF warning。至于这次失败该不该算对端的账，
     // 这里判不了，交给调用方问 Club_Url_Resolve_Healthy()
     elseif (!($ips = Club_Url_Resolve($host))) return null;
+    // 剔掉私网和保留段，剩下的公网地址才交出去。剔掉就等于对 curl 不存在，所以
+    // 只拦坏地址不牵连整家：把虚拟机的 fe80:: 发到公网 DNS 的实例并不少见，
+    // 一条垃圾 AAAA 不该让一个 A 记录正常的对端整个失联。
+    // 这道防线依赖「出网必钉地址」，新增出网路径时必须一起把 $ips 带上，
+    // 否则 curl 自己解析一遍就把这里剔掉的地址捡了回去
+    $public = [];
     foreach ($ips as $ip)
-        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) return false;
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE))
+            $public[] = $ip;
+    if (!$public) return false;
+    // 剔掉了什么不能不留痕：对端解析结果变成内网是它自己配错还是被劫持，事后要能查
+    if (count($public) < count($ips))
+        Club_Log_Event('debug', 'dropped non-public addresses', ['host' => $host,
+            'kept' => implode(',', $public), 'dropped' => implode(',', array_diff($ips, $public))]);
     // 是不是公网每次都由 IP 现算，不缓存这个结论：它是 IP 的纯函数，而 IP 已经缓存过了。
     // 单独存一份就是第二个时钟，放行的有效期可能超过 IP 的，安全窗口会悄悄漂长
-    return $ips;
+    return $public;
 }
 
 // A 查到了就不查 AAAA 的话，对端只要 A 摆个公网地址、AAAA 指 ::1，
 // curl 默认优先走 v6 就绕过了检查，所以两种记录都要查，取并集一起校验。
-// 缓存只有 hosts 表这一层，32 个 worker 加 fpm 共用。进程内再存一份没意义：
-// 一次推送几千个对端、每个进程只经手 1/32，下一条推送 31/32 的 host 还是冷的，
-// 白占内存还多一个时钟；而查一次主键比查一次 DNS 快两个数量级，省不省无所谓
+// 缓存只有 hosts 表这一层，几十个 worker 加 fpm 共用。别再往进程内加一层：
+// 一次推送几千个对端、每个进程只经手其中一小份，下一条推送绝大多数 host 还是冷的，
+// 白占内存还多一个时钟；而查一次主键比查一次 DNS 快两个数量级
 function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
     $now = time(); $row = Club_Host_Read($host);
     // 负结果的 TTL 短得多：域名可能刚续费、刚换完 NS，一分钟后就该再试一次
@@ -1287,18 +1300,19 @@ function Club_Host_Resolved($host, $now, $ips) {
 }
 
 // 投递失败落到对端这一层：一家挂掉只学一次，它名下几千行在领取时就被跳过，
-// 不用每行各付一次 13 秒超时。返回 [熔断到什么时候, 要不要放弃这家]。
-// 退避档位看 fails，放不放弃看 since 撑了多久 —— 探测频率和放弃期限得是两个量，
-// 混成「失败 N 次就放弃」的话，把探测调密就等于把放弃时间提前
+// 不用每行各付一次 13 秒超时。返回 [熔断到什么时候, 要不要放弃这家]
 function Club_Host_Fail($host, $reason) {
     global $db; $now = time(); $row = Club_Host_Read($host);
     $fails = ($row['fails'] ?? 0) + 1;
     $since = ($row['since'] ?? 0) ?: $now;
     $age = $now - $since;
+    // 三条阶梯一律读 age，不读 fails。熔断拦不住已经领走的行：一家挂掉的那一刻
+    // 几十个 worker 手上各有一行，一轮下来 fails 加的是在途行数而不是 1，
+    // 拿它定档位等于让队列积压的多少决定退避快慢。fails 只留着看
     if ($reason == 'blocked') {
         // 指向内网是确定性的，重试不会有不同结果。但内网判定依赖 DNS，
-        // 本站解析被投毒或抽一次风就会误伤，所以还是给三次确认的机会
-        $wait = 3600; $drop = $fails >= 3;
+        // 本站解析被投毒或抽一次风就会误伤，所以隔两小时还是这个结论才算数
+        $wait = 3600; $drop = $age > 7200;
     } elseif ($reason == 'unresolved') {
         // 换 NS 的传播、域名续费后恢复、DNSSEC 配错修好，都是小时级的事，
         // 前两天密集探测才接得住；之后逐档拉开，一个月还没回来才认定是真没了
@@ -1306,7 +1320,7 @@ function Club_Host_Fail($host, $reason) {
         $drop = $age > 2592000;
     } else {
         // 对端临时挂掉是常态，这套阶梯本来就是照着它调的
-        $wait = $fails <= 3 ? 60 : ($fails <= 5 ? 300 : ($fails <= 10 ? 600 : 3600));
+        $wait = $age < 300 ? 60 : ($age < 1800 ? 300 : ($age < 7200 ? 600 : 3600));
         $drop = $age > 604800;
     }
     // 整批行现在共用一个 until，抖动只要算一次。不抖的话一家恢复的那一秒

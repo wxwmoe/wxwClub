@@ -6,8 +6,9 @@
 function worker($maintain = true) {
     global $db, $cycle, $config; $idle = 0; if (!isset($cycle)) $cycle = 0;
     // 熔断中的对端整家跳过，不用它名下每一行各去撞一次超时。
-    // 排序去掉了 retry：重试行的 timestamp 已经推到未来，本来就排在后面，
-    // 留着 retry 只会让 timestamp 用不上索引范围，每次领取白扫一遍所有退避中的行
+    // 排序只认 timestamp，别往前面插列：插了的话 timestamp 用不上 pending 索引的
+    // 范围过滤，每次领取都要扫遍所有退避中的行。重试行的 timestamp 已经推到未来，
+    // 本来就排在后面，再按 retry 排一道是多余的
     $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1, `timestamp` = :timestamp where `inuse` = 0 and `timestamp` <= :timestamp and `host` not in (select `host` from `hosts` where `until` > :timestamp) order by `timestamp` asc limit 1');
     $pdo->execute([':timestamp' => time()]);
     // 顺带把这家的 fails 带出来：投递成功时靠它判断要不要清熔断状态，
@@ -49,9 +50,9 @@ function worker($maintain = true) {
                 } else {
                     // 失败先算到对端头上，退避和放弃都由它定
                     list($until, $drop) = Club_Host_Fail($task['host'], $result);
-                    // 这家整体在挂的话，这次失败是它的账，不算在这一行上。否则一个只有一行的
-                    // 对端，那行会在几十分钟内爬到上限被丢掉，前面按天设计的退避全白费。
-                    // 剩下的 retry 只认一种情况：这家好好的，就这一条发不出去
+                    // retry 只认一种情况：这家好好的，就这一条发不出去。整体在挂时也计数的话，
+                    // 一个只有一行的对端，那行会在几十分钟内爬到上限被丢掉，
+                    // 而对端那套按天算的退避还没走完第一档
                     $retry = $task['fails'] ? $task['retry'] : $task['retry'] + 1;
                     Club_Log_Event('debug', 'push failed, will retry', ['club' => $task['club'],
                         'target' => $task['target'], 'reason' => $result, 'retry' => $retry]);
