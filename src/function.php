@@ -793,6 +793,14 @@ function Club_Inbox_Process($input, $club = null) {
 function Club_Inbox_Dispatch($input, $club = null) {
     global $db, $config, $verify_reason;
     $jsonld = is_array($jsonld = json_decode($input, 1)) ? $jsonld : [];
+    // 顶层数组是合法 JSON-LD（node object 的数组），Foundkey 一类实现这么发。
+    // 单个活动拆开照常处理；多元素是活动集合，只认第一条等于把其余的静默丢掉，那种不收
+    $wrapped = count($jsonld) === 1 && isset($jsonld[0]) && is_array($jsonld[0]);
+    if ($wrapped) $jsonld = $jsonld[0];
+    // 拆过的包不能再转发：原始字节仍是数组形态，下游多半跟我们一样只认单个对象。
+    // 清掉之后走的就是对端没签 LD 签名时那条路 —— 本站照删、群发 Undo 撤回，只是不转原报文。
+    // $input 得留着，日志里那份要的是对端发来的原样字节
+    $payload = $wrapped ? null : $input;
     // type 会进日志文件名，不限成纯字母的话对端能用 ../ 穿出 logs 目录
     $type = is_string($t = $jsonld['type'] ?? '') && preg_match('/^[A-Za-z]+$/', $t) ? $t : '';
     $actor = Club_Object_Id($jsonld['actor'] ?? '');
@@ -805,6 +813,9 @@ function Club_Inbox_Dispatch($input, $club = null) {
     if ($type === 'Delete' && $actor !== '' && $actor === Club_Object_Id($jsonld['object'] ?? ''))
         $parts[] = 'actor';
     Club_Log_Ref($name = Club_Log_Name('inbox', $parts));
+    // 转发那一半会因此降级，不留痕的话事后看不出这条为什么只撤回没转发
+    if ($wrapped) Club_Log_Event('debug', 'inbox unwrapped json-ld array, relay disabled',
+        ['club' => $club ?? 'shared', 'type' => $type ?: 'unknown']);
 
     if ($type === '' || $host === '' || strcasecmp($host, $config['base']) === 0) {
         // 这三种都进不了验签，不留痕的话冒充本站身份这种明显的攻击特征就完全看不到
@@ -860,12 +871,12 @@ function Club_Inbox_Dispatch($input, $club = null) {
         case 'Follow': Club_Follow_Process($jsonld); break;
         case 'Undo': Club_Undo_Process($jsonld); break;
         // 转发要发原始报文，$jsonld 这边被归一化过（actor 拍平、Tombstone 补形状），不能拿去发
-        case 'Update': Club_Update_Process($jsonld, $input); break;
+        case 'Update': Club_Update_Process($jsonld, $payload); break;
         case 'Delete':
             // object 可以是内嵌的 Tombstone，也可以直接是被删对象的 id
             if (!isset($jsonld['object']['type']))
                 $jsonld['object'] = ['id' => Club_Object_Id($jsonld['object'] ?? ''), 'type' => 'Tombstone'];
-            if ($jsonld['object']['type'] == 'Tombstone') Club_Tombstone_Process($jsonld, $input);
+            if ($jsonld['object']['type'] == 'Tombstone') Club_Tombstone_Process($jsonld, $payload);
             else Club_Inbox_Skip('delete of non-tombstone', ['object type' => $jsonld['object']['type']]);
             break;
         default: Club_Inbox_Skip('no handler for type', ['type' => $type, 'actor' => $actor]);
@@ -1300,7 +1311,7 @@ function Club_Host_Resolved($host, $now, $ips) {
 }
 
 // 投递失败落到对端这一层：一家挂掉只学一次，它名下几千行在领取时就被跳过，
-// 不用每行各付一次 13 秒超时。返回 [熔断到什么时候, 要不要放弃这家]
+// 不用每行各付一次 13 秒超时。返回 [熔断到什么时候, 要不要放弃这家, 连续第几次失败]
 function Club_Host_Fail($host, $reason) {
     global $db; $now = time(); $row = Club_Host_Read($host);
     $fails = ($row['fails'] ?? 0) + 1;
@@ -1335,7 +1346,7 @@ function Club_Host_Fail($host, $reason) {
     Club_Log_Event($fails == 1 || $drop ? 'info' : 'debug', 'host '
         .($drop ? 'given up' : ($fails == 1 ? 'started failing' : 'still failing')).': '.$host,
         ['reason' => $reason, 'fails' => $fails, 'age' => $age, 'wait' => $until - $now]);
-    return [$until, $drop];
+    return [$until, $drop, $fails];
 }
 
 // 投递成功。$fails 是领取时读到的旧值，为 0 就一个字都不写 ——

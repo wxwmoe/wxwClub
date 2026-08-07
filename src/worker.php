@@ -52,11 +52,13 @@ function worker($maintain = true) {
                     $pdo->execute([':id' => $task['id'], ':timestamp' => time() + 300]);
                 } else {
                     // 失败先算到对端头上，退避和放弃都由它定
-                    list($until, $drop) = Club_Host_Fail($task['host'], $result);
+                    list($until, $drop, $fails) = Club_Host_Fail($task['host'], $result);
                     // retry 只认一种情况：这家好好的，就这一条发不出去。整体在挂时也计数的话，
                     // 一个只有一行的对端，那行会在几十分钟内爬到上限被丢掉，
-                    // 而对端那套按天算的退避还没走完第一档
-                    $retry = $task['fails'] ? $task['retry'] : $task['retry'] + 1;
+                    // 而对端那套按天算的退避还没走完第一档。
+                    // 判据要用刚落库的 fails 而不是领取时那份：领取发生在失败写进去之前，
+                    // 一轮里第一条读到的永远是 0，照那个算等于每轮都给一行记一笔
+                    $retry = $fails > 1 ? $task['retry'] : $task['retry'] + 1;
                     Club_Log_Event('debug', 'push failed, will retry', ['club' => $task['club'],
                         'target' => $task['target'], 'reason' => $result, 'retry' => $retry]);
                     if ($drop) {
