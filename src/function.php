@@ -16,38 +16,45 @@ function ActivityPub_GET($url, $club, $hops = 3) {
             return false;
         }
         $date = gmdate('D, d M Y H:i:s T');
+        // 把验过的 IP 一起交下去，别让 curl 自己再解析一遍
         $result = ActivityPub_CURL($url, $date, [
             'Signature' => ActivityPub_Signature($url, $club, $date)
-        ]);
+        ], null, $public);
         if ($result === false || !in_array($curl->httpStatusCode, [301, 302, 303, 307, 308])) return $result;
         if (!($location = Club_Header_Get($curl->responseHeaders, 'Location'))) return $result;
         $url = Club_Url_Absolute($location, $url);
     } return false;
 }
 
-// 返回 false = 投递失败，null = 连试都没试成（解析不出来），调用方要区分对待
+// 返回原因码，调用方要分开处置 —— 这几种失败的自愈概率差好几个数量级，
+// 压成同一个 false 的话，一个注销了域名的对端会拿着「对端临时挂掉」那套阶梯每分钟重试：
+//   ok         成功
+//   failed     对端在，但没收下（curl 报错或 5xx）
+//   unresolved 域名解析不出来，而本站 DNS 是好的
+//   blocked    目标指向内网或协议不对，该拦
+//   local-dns  本站自己解析不动，什么都没证明，不能算在对端头上
 function ActivityPub_POST($url, $club, $jsonld) {
     // 队列里的 target 是很久以前拉取的，域名可能已经解析到内网，每次投递都要重判
     if (($public = Club_Url_Public($url)) === false) {
         Club_Log_Event('warning', 'push blocked, url is not public', ['url' => $url, 'club' => $club]);
-        return false;
+        return 'blocked';
     }
     if ($public === null) {
         // 别的域名解析得动，就是这个对端把域名撤了/过期了，跟连不上没区别，照常记失败
         if (Club_Url_Resolve_Healthy()) {
             Club_Log_Event('info', 'push failed, host does not resolve', ['url' => $url, 'club' => $club]);
-            return false;
+            return 'unresolved';
         }
-        // 一个都解析不动，是本站自己的毛病，返回 null 让调用方别记在对端头上
+        // 一个都解析不动，是本站自己的毛病
         Club_Log_Event('warning', 'push deferred, local dns looks broken', ['url' => $url, 'club' => $club]);
-        return null;
+        return 'local-dns';
     }
     $date = gmdate('D, d M Y H:i:s T');
 	$digest = base64_encode(hash('sha256', $jsonld, 1));
     return ActivityPub_CURL($url, $date, [
         'Signature' => ActivityPub_Signature($url, $club, $date, $digest),
         'Digest' => 'SHA-256='.$digest
-    ], $jsonld);
+    ], $jsonld, $public) === false ? 'failed' : 'ok';
 }
 
 // 黑名单探活只问一件事：对端还在不在。空 body 打 inbox 本来就会被 400/401 挡回来，
@@ -56,7 +63,7 @@ function ActivityPub_POST($url, $club, $jsonld) {
 // 5xx 不算，CDN 回源失败也是有状态码的，那种情况对端其实还是死的
 function ActivityPub_Alive($url, $club) {
     global $curl;
-    if (($public = Club_Url_Public($url)) !== true) {
+    if (!is_array($public = Club_Url_Public($url))) {
         Club_Log_Event($public === null ? 'info' : 'warning', 'probe skipped, '
             .($public === null ? 'cannot resolve host' : 'url is not public'),
             ['url' => $url, 'club' => $club]);
@@ -69,11 +76,27 @@ function ActivityPub_Alive($url, $club) {
         && $curl->httpStatusCode > 0 && $curl->httpStatusCode < 500;
 }
 
-function ActivityPub_CURL($url, $date, $head, $data = null) {
-    global $ver, $base, $curl, $config; static $last_head = [];
+function ActivityPub_CURL($url, $date, $head, $data = null, $ips = null) {
+    global $ver, $base, $curl, $config; static $last_head = [], $pinned = null;
     if (!isset($curl)) $curl = new Curl();
     $curl->setTimeout(10);
     $curl->setConnectTimeout(3);
+    // 调用方验的是它自己解析出来的 IP，而 curl 会拿 URL 再解析一遍 —— 两次之间
+    // 对端换掉记录就绕过了那道内网检查（DNS rebinding）。把验过的地址直接钉给 curl，
+    // 中间就没有第二次解析的机会。钉进去的条目在 curl 自己的 DNS 缓存里是永久的，
+    // 所以每次先把上一条撤掉，否则长期进程会越积越多，还会拿旧地址去连
+    $resolve = [];
+    if (isset($pinned)) { $resolve[] = '-'.$pinned; $pinned = null; }
+    // URL 里直接写 IP 的不钉：本来就没有解析这一步，没有可乘之机，
+    // 而且 host:port:addr 这个格式塞进一个 IPv6 字面量就分不出哪个冒号是分隔符了
+    if ($ips && !empty(($parts = parse_url($url))['host'])
+        && !filter_var($host = trim($parts['host'], '[]'), FILTER_VALIDATE_IP)) {
+        $port = $parts['port'] ?? (strtolower($parts['scheme'] ?? '') == 'http' ? 80 : 443);
+        // 地址侧的 IPv6 要套方括号，不然跟格式自己的冒号分不开
+        foreach ($ips as $i => $ip) if (strpos($ip, ':') !== false) $ips[$i] = '['.$ip.']';
+        $resolve[] = ($pinned = $host.':'.$port).':'.implode(',', $ips);
+    }
+    if ($resolve) $curl->setOpt(CURLOPT_RESOLVE, $resolve);
     // 跳转由 ActivityPub_GET 自己跟，POST 则完全不跟：curl 会把它降级成 GET
     $curl->setFollowLocation(false);
     // 只放行 http(s)，否则能把我们带到 file:// 之类的协议上
@@ -242,9 +265,15 @@ function Club_I18n($key, $locale, $vars = []) {
 // 而且持久连接的池子也会被 fork 继承，子进程再 new PDO 会直接拿回父进程那条
 function Club_DB_Connect() {
     global $db, $config;
+    $options = [PDO::ATTR_PERSISTENT => PHP_SAPI != 'cli', PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
+    // worker 全程 autocommit，RC 和 RR 对它没有语义差别，但领队列那条 UPDATE 的
+    // timestamp 过滤用不上索引，RR 下扫过的行全要上锁，几十个进程抢同一段索引就撞死锁。
+    // RC 开着 semi-consistent read，不匹配的行当场放锁。web 端有事务，保持 RR 不动。
+    // 空字符串不能留给 web：mysqlnd 会拿它当一条查询发出去，连上就报 Query was empty
+    if (PHP_SAPI == 'cli')
+        $options[PDO::MYSQL_ATTR_INIT_COMMAND] = 'set session transaction isolation level read committed';
     return $db = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'].';charset=utf8mb4',
-        $config['mysql']['username'], $config['mysql']['password'],
-        [PDO::ATTR_PERSISTENT => PHP_SAPI != 'cli', PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $config['mysql']['username'], $config['mysql']['password'], $options);
 }
 
 // 当前级别是否包含 $level。false 等同 silent，其他无法识别的取值按默认的 info 处理
@@ -1159,7 +1188,8 @@ function Club_Url_Absolute($url, $base) {
 
 // 只放行公网 http(s)：actor、keyId、inbox 都是对端给的，
 // 不挡的话伪造一个签名就能让本站去访问 127.0.0.1、云元数据服务之类的内网目标。
-// 三态：true 公网 / false 确证内网或协议不对，该拦 / null 解析不出来，什么都没证明
+// 三态：IP 列表 = 公网 / false 确证内网或协议不对，该拦 / null 解析不出来，什么都没证明。
+// 放行时返回的是验过的那几个 IP，调用方要把它钉给 curl，别再解析第二遍
 function Club_Url_Public($url) {
     $parts = parse_url((string)$url);
     if (empty($parts['host']) || !in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'])) return false;
@@ -1172,42 +1202,47 @@ function Club_Url_Public($url) {
     elseif (!($ips = Club_Url_Resolve($host))) return null;
     foreach ($ips as $ip)
         if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) return false;
-    return true;
+    // 是不是公网每次都由 IP 现算，不缓存这个结论：它是 IP 的纯函数，而 IP 已经缓存过了。
+    // 单独存一份就是第二个时钟，放行的有效期可能超过 IP 的，安全窗口会悄悄漂长
+    return $ips;
 }
 
 // A 查到了就不查 AAAA 的话，对端只要 A 摆个公网地址、AAAA 指 ::1，
 // curl 默认优先走 v6 就绕过了检查，所以两种记录都要查，取并集一起校验。
-// 进程内缓存：worker 是长期进程，同一个 host 每条投递都重解析一遍，
-// 既拖慢投递也在给 DNS 加压；缓存随进程重启重建，不落盘。
-// 一条存成 [时间, "ip,ip"] 而不是嵌套数组：实测前者单条 417 字节，后者 870，
-// 对端上万时这个差别直接决定会不会撞到 worker 的内存自停阈值
-function Club_Url_Resolve($host, $ttl = 300, $stale = 3600) {
-    global $config; static $cache = []; $now = time();
-    if (isset($cache[$host]) && $cache[$host][0] > $now - $ttl) return explode(',', $cache[$host][1]);
+// 缓存只有 hosts 表这一层，32 个 worker 加 fpm 共用。进程内再存一份没意义：
+// 一次推送几千个对端、每个进程只经手 1/32，下一条推送 31/32 的 host 还是冷的，
+// 白占内存还多一个时钟；而查一次主键比查一次 DNS 快两个数量级，省不省无所谓
+function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
+    $now = time(); $row = Club_Host_Read($host);
+    // 负结果的 TTL 短得多：域名可能刚续费、刚换完 NS，一分钟后就该再试一次
+    if ($row && $row['resolved'] > $now - ($row['ips'] === '' ? $miss : $ttl)) {
+        // 别的进程刚成功解析过，就是本站 DNS 通着的实据 —— 但成功的时刻是它的，不是此刻
+        if ($row['ips'] !== '') Club_Url_Resolve_Healthy($row['resolved']);
+        return $row['ips'] === '' ? [] : explode(',', $row['ips']);
+    }
+    // 几十个进程同时发现同一个 host 过期会一起去查 DNS。抢到 probe 的那个才真去解析，
+    // 其余的拿旧值先顶一轮；连旧值都没有的只能自己查
+    $stock = $row && $row['ips'] !== '' && $row['resolved'] > $now - $stale ? $row['ips'] : null;
+    if (isset($stock) && !Club_Host_Probe($host, $now)) return explode(',', $stock);
     $ips = gethostbynamel($host) ?: [];
     if (function_exists('dns_get_record'))
         foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $rr)
             if (!empty($rr['ipv6'])) $ips[] = $rr['ipv6'];
     if ($ips) {
-        // 先删再插，PHP 数组保持插入顺序，于是表头天然就是最久没更新的那批
-        unset($cache[$host]);
-        $cache[$host] = [$now, implode(',', $ips)];
-        // 满了砍掉最旧的四分之一。整表清空的话，对端比上限多就会反复全清，
-        // 下面的 stale 兜底跟着一起没；一次砍一批则把重建成本摊开
-        if (count($cache) > ($max = $config['node']['dns-cache'] ?? 4096)) {
-            $cache = array_slice($cache, (int)($max / 4), null, true);
-            Club_Log_Event('debug', 'dns cache trimmed', ['max' => $max, 'left' => count($cache)]);
-        }
         Club_Url_Resolve_Healthy(true);
+        Club_Host_Resolved($host, $now, implode(',', $ips));
         return $ips;
     }
     // 解析失败时沿用上次的结果，扛过一次性的 SERVFAIL。窗口只给 1 小时：
     // 再长的话，域名真的改指到内网了，我们这边还会拿旧地址放行
-    if (isset($cache[$host]) && $cache[$host][0] > $now - $stale) {
+    if (isset($stock)) {
         Club_Log_Event('debug', 'dns lookup failed, reusing cached address',
-            ['host' => $host, 'age' => $now - $cache[$host][0], 'ip' => $cache[$host][1]]);
-        return explode(',', $cache[$host][1]);
+            ['host' => $host, 'age' => $now - $row['resolved'], 'ip' => $stock]);
+        return explode(',', $stock);
     }
+    // 负结果也要落库。不记的话，一家解析不出来的对端，它名下每一行都要重查一遍，
+    // 几千行乘以两次阻塞查询，足够把容器的 UDP conntrack 打满、把好域名也拖成解析失败
+    Club_Host_Resolved($host, $now, '');
     Club_Log_Event('debug', 'dns lookup failed, no usable cache', ['host' => $host]);
     return [];
 }
@@ -1215,11 +1250,113 @@ function Club_Url_Resolve($host, $ttl = 300, $stale = 3600) {
 // 一次查不到，到底是对端注销了域名、还是本站 DNS 坏了？单看这一次分不出来。
 // 但本站 DNS 坏了不会只坏一个 host：最近还成功解析过别的域名，就说明出口是通的，
 // 那这次查不到就是对端自己的事，该照常记失败；反之才是我们的问题，不能算在对端头上。
-// 进程内状态，worker 重启后先按「不健康」算，宁可晚一点拉黑也别误伤
+// 进程内状态，worker 重启后先按「不健康」算，宁可晚一点拉黑也别误伤。
+// $mark 可以传时间戳：L2 命中时用的是别的进程的成功记录，那是实据，但时刻是它的
 function Club_Url_Resolve_Healthy($mark = false, $window = 600) {
     static $last = 0;
-    if ($mark) { $last = time(); return true; }
+    if ($mark !== false) { $last = max($last, $mark === true ? time() : (int)$mark); return true; }
     return $last > time() - $window;
+}
+
+function Club_Host_Read($host) {
+    global $db;
+    $pdo = $db->prepare('select `ips`, `resolved`, `fails`, `since`, `until` from `hosts` where `host` = :host');
+    $pdo->execute([':host' => $host]);
+    return $pdo->fetch(PDO::FETCH_ASSOC) ?: null;
+}
+
+// 抢刷新权。行还不存在时 insert ignore 建出来，插进去的那个自然就是抢到的。
+// 用单独一列而不是拿 resolved 兼职：抢到就先推 resolved 的话，这次解析要是失败了，
+// 旧 IP 的 stale 窗口会跟着一起续命，上面那道 1 小时的安全边界就守不住了
+function Club_Host_Probe($host, $now, $window = 30) {
+    global $db;
+    $pdo = $db->prepare('update `hosts` set `probe` = :now where `host` = :host and `probe` <= :expire');
+    $pdo->execute([':now' => $now, ':host' => $host, ':expire' => $now - $window]);
+    if ($pdo->rowCount()) return true;
+    $pdo = $db->prepare('insert ignore into `hosts`(`host`, `probe`, `timestamp`) values (:host, :now, :now)');
+    $pdo->execute([':host' => $host, ':now' => $now]);
+    return (bool)$pdo->rowCount();
+}
+
+function Club_Host_Resolved($host, $now, $ips) {
+    global $db;
+    $pdo = $db->prepare('insert into `hosts`(`host`, `ips`, `resolved`, `probe`, `timestamp`)'.
+        ' values (:host, :ips, :now, :now, :now) on duplicate key update'.
+        ' `ips` = :ips, `resolved` = :now, `timestamp` = :now');
+    return $pdo->execute([':host' => $host, ':ips' => $ips, ':now' => $now]);
+}
+
+// 投递失败落到对端这一层：一家挂掉只学一次，它名下几千行在领取时就被跳过，
+// 不用每行各付一次 13 秒超时。返回 [熔断到什么时候, 要不要放弃这家]。
+// 退避档位看 fails，放不放弃看 since 撑了多久 —— 探测频率和放弃期限得是两个量，
+// 混成「失败 N 次就放弃」的话，把探测调密就等于把放弃时间提前
+function Club_Host_Fail($host, $reason) {
+    global $db; $now = time(); $row = Club_Host_Read($host);
+    $fails = ($row['fails'] ?? 0) + 1;
+    $since = ($row['since'] ?? 0) ?: $now;
+    $age = $now - $since;
+    if ($reason == 'blocked') {
+        // 指向内网是确定性的，重试不会有不同结果。但内网判定依赖 DNS，
+        // 本站解析被投毒或抽一次风就会误伤，所以还是给三次确认的机会
+        $wait = 3600; $drop = $fails >= 3;
+    } elseif ($reason == 'unresolved') {
+        // 换 NS 的传播、域名续费后恢复、DNSSEC 配错修好，都是小时级的事，
+        // 前两天密集探测才接得住；之后逐档拉开，一个月还没回来才认定是真没了
+        $wait = $age < 172800 ? 300 : ($age < 604800 ? 3600 : 21600);
+        $drop = $age > 2592000;
+    } else {
+        // 对端临时挂掉是常态，这套阶梯本来就是照着它调的
+        $wait = $fails <= 3 ? 60 : ($fails <= 5 ? 300 : ($fails <= 10 ? 600 : 3600));
+        $drop = $age > 604800;
+    }
+    // 整批行现在共用一个 until，抖动只要算一次。不抖的话一家恢复的那一秒
+    // 几十个进程会一起扑上去，对端更容易把我们限流，然后所有行齐步走向放弃
+    $until = $now + $wait + mt_rand(0, (int)($wait / 4));
+    $pdo = $db->prepare('insert into `hosts`(`host`, `fails`, `since`, `until`, `timestamp`)'.
+        ' values (:host, :fails, :since, :until, :now) on duplicate key update'.
+        ' `fails` = :fails, `since` = :since, `until` = :until, `timestamp` = :now');
+    $pdo->execute([':host' => $host, ':fails' => $fails, ':since' => $since,
+        ':until' => $until, ':now' => $now]);
+    // 开始挂和放弃是状态变化，中间那些重复失败只记 debug，否则一家大实例挂一天就刷满日志
+    Club_Log_Event($fails == 1 || $drop ? 'info' : 'debug', 'host '
+        .($drop ? 'given up' : ($fails == 1 ? 'started failing' : 'still failing')).': '.$host,
+        ['reason' => $reason, 'fails' => $fails, 'age' => $age, 'wait' => $until - $now]);
+    return [$until, $drop];
+}
+
+// 投递成功。$fails 是领取时读到的旧值，为 0 就一个字都不写 ——
+// 正常投递没有状态变化可记，而热门对端那一行会被几十个进程反复撞
+function Club_Host_Pass($host, $fails) {
+    global $db;
+    if (!$fails) return false;
+    $pdo = $db->prepare('update `hosts` set `fails` = 0, `since` = 0, `until` = 0, `timestamp` = :now where `host` = :host');
+    $pdo->execute([':host' => $host, ':now' => time()]);
+    Club_Log_Event('info', 'host recovered: '.$host, ['fails' => $fails]);
+    return true;
+}
+
+// 放弃一家对端：把它在队列里的所有目标一次性拉黑清干净，而不是等那几千行各自爬到上限。
+// 顺序不能反 —— 先扣 tasks 的计数再删队列行，中间挂掉的话计数偏小，
+// 那条 tasks 会被维护块提前删掉，剩下的队列行由外键 ON DELETE CASCADE 带走，仍然自洽
+function Club_Host_Purge($host) {
+    global $db; $now = time();
+    $pdo = $db->prepare('insert ignore into `blacklist`(`target`, `create`)'.
+        ' select distinct `target`, :create from `queues` where `host` = :host');
+    $pdo->execute([':host' => $host, ':create' => $now]);
+    $targets = $pdo->rowCount();
+    $pdo = $db->prepare('update `tasks` `t` join (select `tid`, count(*) as `n` from `queues`'.
+        ' where `host` = :host group by `tid`) `q` on t.tid = q.tid set t.queues = t.queues - q.n');
+    $pdo->execute([':host' => $host]);
+    $pdo = $db->prepare('delete from `queues` where `host` = :host');
+    $pdo->execute([':host' => $host]);
+    $queues = $pdo->rowCount();
+    // 连续失败到此为止，后面改由 blacklist 每天探活。留着不清的话，
+    // 将来探活把它放回来，熔断状态还挂着旧的 until，第一批投递又要白等一轮
+    $pdo = $db->prepare('update `hosts` set `fails` = 0, `since` = 0, `until` = 0, `timestamp` = :now where `host` = :host');
+    $pdo->execute([':host' => $host, ':now' => $now]);
+    // 停止对整个实例投递是个大事件，不记的话事后完全无从追溯
+    Club_Log_Event('error', 'host blacklisted: '.$host, ['targets' => $targets, 'queues' => $queues]);
+    return $targets;
 }
 
 function Club_NameTag_Render($club, $str, $tag) {

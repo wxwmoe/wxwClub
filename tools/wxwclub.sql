@@ -93,9 +93,15 @@ CREATE TABLE `queues` (
   `timestamp` int NOT NULL,
   `inuse` tinyint NOT NULL DEFAULT '0',
   `retry` tinyint NOT NULL DEFAULT '0',
+  `host` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci GENERATED ALWAYS AS (
+    if(substring_index(substring_index(`target`, '/', 3), '/', -1) like '[%',
+       substring_index(substring_index(substring_index(substring_index(`target`, '/', 3), '/', -1), ']', 1), '[', -1),
+       substring_index(substring_index(substring_index(`target`, '/', 3), '/', -1), ':', 1))
+  ) VIRTUAL,
   PRIMARY KEY (`id`),
   KEY `tid` (`tid`),
-  KEY `pending` (`inuse`,`retry`,`timestamp`),
+  KEY `pending` (`inuse`,`timestamp`),
+  KEY `host` (`host`),
   CONSTRAINT `queues_ibfk_2` FOREIGN KEY (`tid`) REFERENCES `tasks` (`tid`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
@@ -123,4 +129,18 @@ CREATE TABLE `blacklist` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `target` (`target`),
   KEY `pending` (`inuse`,`timestamp`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `hosts` (
+  `host` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `ips` varchar(1024) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT '',
+  `resolved` int NOT NULL DEFAULT '0',
+  `probe` int NOT NULL DEFAULT '0',
+  `fails` smallint NOT NULL DEFAULT '0',
+  `since` int NOT NULL DEFAULT '0',
+  `until` int NOT NULL DEFAULT '0',
+  `timestamp` int NOT NULL DEFAULT '0',
+  PRIMARY KEY (`host`),
+  KEY `until` (`until`),
+  KEY `timestamp` (`timestamp`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

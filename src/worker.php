@@ -5,9 +5,14 @@
 // 所以只交给 0 号进程，其余的专心投递
 function worker($maintain = true) {
     global $db, $cycle, $config; $idle = 0; if (!isset($cycle)) $cycle = 0;
-    $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1, `timestamp` = :timestamp where `inuse` = 0 and `timestamp` <= :timestamp order by `retry`, `timestamp` asc limit 1');
+    // 熔断中的对端整家跳过，不用它名下每一行各去撞一次超时。
+    // 排序去掉了 retry：重试行的 timestamp 已经推到未来，本来就排在后面，
+    // 留着 retry 只会让 timestamp 用不上索引范围，每次领取白扫一遍所有退避中的行
+    $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1, `timestamp` = :timestamp where `inuse` = 0 and `timestamp` <= :timestamp and `host` not in (select `host` from `hosts` where `until` > :timestamp) order by `timestamp` asc limit 1');
     $pdo->execute([':timestamp' => time()]);
-    $pdo = $db->query('select q.id, c.name as club, t.tid, t.type, t.jsonld, q.target, q.retry from `queues` as `q` left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid where `id` = last_insert_id() and row_count() <> 0');
+    // 顺带把这家的 fails 带出来：投递成功时靠它判断要不要清熔断状态，
+    // 失败时靠它判断这次该不该算在这一行头上，两处都不用再多查一次
+    $pdo = $db->query('select q.id, c.name as club, t.tid, t.type, t.jsonld, q.target, q.host, q.retry, coalesce(h.fails, 0) as fails from `queues` as `q` left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid left join `hosts` as `h` on q.host = h.host where `id` = last_insert_id() and row_count() <> 0');
     if ($task = $pdo->fetch(PDO::FETCH_ASSOC)) {
         // worker 是长期进程，关联标记不像 web 那样每请求自动归零，每条任务都要重设。
         // 用队列行号，同一条投递的入队、重试、成功几行就能串起来
@@ -24,42 +29,49 @@ function worker($maintain = true) {
                     $pdo->execute([':id' => $task['id']]);
                     $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
                     $pdo->execute([':tid' => $task['tid']]);
+                } elseif (($result = ActivityPub_POST($task['target'], $task['club'], $task['jsonld'])) == 'ok') {
+                    // 投递成功是 debug：正常运行时每条投稿都会刷一行乘以关注实例数
+                    Club_Log_Event('debug', 'push delivered', ['club' => $task['club'],
+                        'target' => $task['target'], 'retry' => $task['retry']]);
+                    // 这家之前挂着，现在活了：清掉熔断，它名下其余行下一轮就能领
+                    Club_Host_Pass($task['host'], $task['fails']);
+                    $pdo = $db->prepare('delete from `queues` where `id` = :id');
+                    $pdo->execute([':id' => $task['id']]);
+                    $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
+                    $pdo->execute([':tid' => $task['tid']]);
+                } elseif ($result == 'local-dns') {
+                    // 本站自己解析不动，什么都没证明：retry 和 fails 都不加，只把这行往后推。
+                    // 记在对端头上的话，本站 DNS 挂几天就能把关注的实例全拉黑一遍
+                    Club_Log_Event('debug', 'push deferred, waiting for local dns',
+                        ['club' => $task['club'], 'target' => $task['target']]);
+                    $pdo = $db->prepare('update `queues` set `inuse` = 0, `timestamp` = :timestamp where `id` = :id');
+                    $pdo->execute([':id' => $task['id'], ':timestamp' => time() + 300]);
                 } else {
-                    if (($result = ActivityPub_POST($task['target'], $task['club'], $task['jsonld']))) {
-                        // 投递成功是 debug：正常运行时每条投稿都会刷一行乘以关注实例数
-                        Club_Log_Event('debug', 'push delivered', ['club' => $task['club'],
-                            'target' => $task['target'], 'retry' => $task['retry']]);
+                    // 失败先算到对端头上，退避和放弃都由它定
+                    list($until, $drop) = Club_Host_Fail($task['host'], $result);
+                    // 这家整体在挂的话，这次失败是它的账，不算在这一行上。否则一个只有一行的
+                    // 对端，那行会在几十分钟内爬到上限被丢掉，前面按天设计的退避全白费。
+                    // 剩下的 retry 只认一种情况：这家好好的，就这一条发不出去
+                    $retry = $task['fails'] ? $task['retry'] : $task['retry'] + 1;
+                    Club_Log_Event('debug', 'push failed, will retry', ['club' => $task['club'],
+                        'target' => $task['target'], 'reason' => $result, 'retry' => $retry]);
+                    if ($drop) {
+                        // 这家判死刑，它在队列里的目标一次清干净，不用几千行各爬各的
+                        Club_Host_Purge($task['host']);
+                    } elseif ($retry >= 8) {
+                        // 对端是好的，就这条过不去（多半是这条活动的 payload 让它 500），
+                        // 按行放弃，不牵连这家的其他投递
+                        Club_Log_Event('warning', 'push dropped after '.$retry.' failed attempts',
+                            ['club' => $task['club'], 'target' => $task['target']]);
                         $pdo = $db->prepare('delete from `queues` where `id` = :id');
                         $pdo->execute([':id' => $task['id']]);
                         $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
                         $pdo->execute([':tid' => $task['tid']]);
                     } else {
-                        $retry = $task['retry'] + 1;
-                        // null 只在本站 DNS 整个坏掉时出现（对端自己注销域名走的是 false，
-                        // 照常拉黑）。这种时候所有对端会一起失败，不卡住计数的话，
-                        // 退避到 1 小时档以后连着挂 5 天就能把关注的实例全拉黑一遍
-                        if ($result === null && $retry > 100) $retry = 100;
-                        // 对端临时挂掉是常态，所以只在 debug；连续失败的后果由下面 127 那条 error 兜
-                        Club_Log_Event('debug', 'push failed, will retry',
-                            ['club' => $task['club'], 'target' => $task['target'], 'retry' => $retry]);
-                        if ($retry <= 3) $timestamp = time() + 60;
-                        elseif ($retry <= 5) $timestamp = time() + 300;
-                        elseif ($retry <= 10) $timestamp = time() + 600;
-                        elseif ($retry <= 100) $timestamp = time() + 3600;
-                        else $timestamp = time() + 86400;
-                        if ($retry == 127) {
-                            // 停止对整个实例投递是个大事件，不记的话事后完全无从追溯
-                            Club_Log_Event('error', 'target blacklisted after '.$retry.' failed pushes: '.$task['target']);
-                            $pdo = $db->prepare('insert ignore into `blacklist`(`target`, `create`) values (:target, :create);');
-                            $pdo->execute([':target' => $task['target'], ':create' => time()]);
-                            $pdo = $db->prepare('delete from `queues` where `id` = :id');
-                            $pdo->execute([':id' => $task['id']]);
-                            $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
-                            $pdo->execute([':tid' => $task['tid']]);
-                        } else {
-                            $pdo = $db->prepare('update `queues` set `inuse` = 0, `retry` = :retry, `timestamp` = :timestamp where `id` = :id');
-                            $pdo->execute([':id' => $task['id'], ':retry' => $retry, ':timestamp' => $timestamp]);
-                        }
+                        // 行的 timestamp 也要跟着推到熔断之后。只靠 until 拦的话，这几千行
+                        // 一直是「到期可领」，堆在 pending 索引最前面，领取时每次都要跳一遍
+                        $pdo = $db->prepare('update `queues` set `inuse` = 0, `retry` = :retry, `timestamp` = :timestamp where `id` = :id');
+                        $pdo->execute([':id' => $task['id'], ':retry' => $retry, ':timestamp' => $until]);
                     }
                 } break;
             default: break;
@@ -82,6 +94,10 @@ function worker($maintain = true) {
             $pdo->execute([':timestamp' => time() - 30]);
             $pdo = $db->prepare('update `blacklist` set `inuse` = 0 where `inuse` = 1 and `timestamp` <= :timestamp');
             $pdo->execute([':timestamp' => time() - 30]);
+            // 熔断早过期了、一天没再碰过、队列里也没它的行，这条就是纯粹的历史残留。
+            // 删掉最多让它下次重解析一次 DNS，表的大小跟着活跃对端数走而不是一直涨
+            $pdo = $db->prepare('delete from `hosts` where `until` <= :timestamp and `timestamp` <= :expire and `host` not in (select `host` from `queues`)');
+            $pdo->execute([':timestamp' => time(), ':expire' => time() - 86400]);
         }
         // 探活也是一次 curl，慢起来一样堵进程，所以不归 0 号独占；
         // 领取语句本身是原子的，多进程各领各的
@@ -101,13 +117,10 @@ function worker($maintain = true) {
             }
         } elseif ($idle) sleep(1); $cycle = 0;
     }
-    // 0 关掉这道闸。调高之前先想清楚 DNS 缓存要占多少：dns-cache 一条约 0.4 KB，
-    // 装满 8192 条就是 3.2 MB，加上基线还留不下余量的话，这里跟着一起抬
-    $limit = ($config['node']['memory-limit'] ?? 10) * 1024 * 1024;
-    if ($limit > 0 && ($usage = memory_get_usage(1)) > $limit) {
+    if (($usage = memory_get_usage(1)) > 10 * 1024 * 1024) {
         global $stop; $stop = true;
         // 多进程模式下 master 会补一个回来，单进程则要靠容器重启
         Club_Log_Console('error', 'memory limit exceeded, stopping',
-            ['bytes' => $usage, 'limit' => $limit, 'pid' => getmypid()]);
+            ['bytes' => $usage, 'pid' => getmypid()]);
     }
 }

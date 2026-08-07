@@ -52,13 +52,7 @@
         // 注意 silent 只关掉 logs/ 下的写入，PHP 自身的报错仍受 php.ini 的 log_errors 控制
         'log-level' => 'info',
         // 日志保留天数，0 不清理
-        'log-retention' => 30,
-        // DNS 解析结果的进程内缓存条数，够装下常投递的对端就行，不必等于互联实例总数
-        // 单条约 0.4 KB，跟下面的 memory-limit 是一本账，调大了要一起抬
-        'dns-cache' => 4096,
-        // 单个 worker 进程的内存上限（MB），超了自己退出，多进程模式下 master 会补一个回来
-        // 长期进程难免有碎片和缓存堆积，靠定期换进程比查漏省事；0 关掉这道闸
-        'memory-limit' => 10
+        'log-retention' => 30
     ],
     // 群组设置
     'club' => [

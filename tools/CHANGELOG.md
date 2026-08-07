@@ -1,3 +1,30 @@
+#### 2026-08-07
+
+```sql
+CREATE TABLE `hosts` (
+  `host` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `ips` varchar(1024) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT '',
+  `resolved` int NOT NULL DEFAULT '0',
+  `probe` int NOT NULL DEFAULT '0',
+  `fails` smallint NOT NULL DEFAULT '0',
+  `since` int NOT NULL DEFAULT '0',
+  `until` int NOT NULL DEFAULT '0',
+  `timestamp` int NOT NULL DEFAULT '0',
+  PRIMARY KEY (`host`),
+  KEY `until` (`until`),
+  KEY `timestamp` (`timestamp`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+ALTER TABLE `queues` ADD `host` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci GENERATED ALWAYS AS (
+  if(substring_index(substring_index(`target`, '/', 3), '/', -1) like '[%',
+     substring_index(substring_index(substring_index(substring_index(`target`, '/', 3), '/', -1), ']', 1), '[', -1),
+     substring_index(substring_index(substring_index(`target`, '/', 3), '/', -1), ':', 1))
+) VIRTUAL;
+ALTER TABLE `queues` ADD KEY `host` (`host`);
+ALTER TABLE `queues` DROP KEY `pending`, ADD KEY `pending` (`inuse`,`timestamp`);
+UPDATE `queues` SET `retry` = 0;
+```
+
 #### 2026-08-06
 
 ```sql
