@@ -1274,17 +1274,25 @@ function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
 // 一次查不到，到底是对端注销了域名、还是本站 DNS 坏了？单看这一次分不出来。
 // 但本站 DNS 坏了不会只坏一个 host：最近还成功解析过别的域名，就说明出口是通的，
 // 那这次查不到就是对端自己的事，该照常记失败；反之才是我们的问题，不能算在对端头上。
-// 进程内状态，worker 重启后先按「不健康」算，宁可晚一点拉黑也别误伤。
-// $mark 可以传时间戳：L2 命中时用的是别的进程的成功记录，那是实据，但时刻是它的
+// $mark 可以传时间戳：拿的是别的进程的成功记录，那是实据，但时刻是它的
 function Club_Url_Resolve_Healthy($mark = false, $window = 600) {
-    static $last = 0;
+    global $db; static $last = 0;
     if ($mark !== false) { $last = max($last, $mark === true ? time() : (int)$mark); return true; }
-    return $last > time() - $window;
+    if ($last > time() - $window) return true;
+    // 本进程手上没有实据就问全站。只靠进程内那个 static 的话，刚 fork 出来的 worker
+    // 它是 0，接手的头几条只要正好是解析不出来的对端，就会一口咬定本站 DNS 坏了 ——
+    // 解析结果挪进 hosts 表之后真解析本来就少，这个信号单靠一个进程攒不起来。
+    // 只在准备下结论前跑，正常时随便扫几行就命中；真出口断了才会扫满，而那时也确实该断言
+    $pdo = $db->prepare('select `resolved` from `hosts` where length(`ips`) > 0 and `resolved` > :window limit 1');
+    $pdo->execute([':window' => time() - $window]);
+    if (!($resolved = $pdo->fetch(PDO::FETCH_COLUMN, 0))) return false;
+    $last = max($last, (int)$resolved);
+    return true;
 }
 
 function Club_Host_Read($host) {
     global $db;
-    $pdo = $db->prepare('select `ips`, `resolved`, `fails`, `since`, `until` from `hosts` where `host` = :host');
+    $pdo = $db->prepare('select `ips`, `resolved`, `fails`, `since`, `until`, `timestamp` from `hosts` where `host` = :host');
     $pdo->execute([':host' => $host]);
     return $pdo->fetch(PDO::FETCH_ASSOC) ?: null;
 }
@@ -1302,11 +1310,14 @@ function Club_Host_Probe($host, $now, $window = 30) {
     return (bool)$pdo->rowCount();
 }
 
+// timestamp 只记「上次失败是什么时候」，解析刷新不碰它。碰了的话，一个正常投递的对端
+// 每 300 秒被刷一次 DNS，timestamp 就永远是新的，Club_Host_Fail 里那个「静默够久就
+// 重新起算」永远不成立，偶然失败一次会带着几天的 age 直接被判放弃
 function Club_Host_Resolved($host, $now, $ips) {
     global $db;
     $pdo = $db->prepare('insert into `hosts`(`host`, `ips`, `resolved`, `probe`, `timestamp`)'.
         ' values (:host, :ips, :now, :now, :now) on duplicate key update'.
-        ' `ips` = :ips, `resolved` = :now, `timestamp` = :now');
+        ' `ips` = :ips, `resolved` = :now');
     return $pdo->execute([':host' => $host, ':ips' => $ips, ':now' => $now]);
 }
 
@@ -1315,7 +1326,14 @@ function Club_Host_Resolved($host, $now, $ips) {
 function Club_Host_Fail($host, $reason) {
     global $db; $now = time(); $row = Club_Host_Read($host);
     $fails = ($row['fails'] ?? 0) + 1;
-    $since = ($row['since'] ?? 0) ?: $now;
+    // 成功不清 since，所以这里判断是不是新的一段：离上次失败太久才重新起算。
+    // 「太久」必须跟着退避档位走。写死一小时的话，退到 1 小时档以后每次重试的间隔
+    // 本身就超过它，于是段段从头算、age 永远涨不上去，三条放弃线就全都够不着了。
+    // until - timestamp 正是上次排的退避，留两倍余量把抖动一起盖住；
+    // 成功过的对端 until 已被清零，落到 3600 那个下限，一小时不再挂就算真恢复
+    $quiet = $now - ($row['timestamp'] ?? 0);
+    $scheduled = max(0, ($row['until'] ?? 0) - ($row['timestamp'] ?? 0));
+    $since = ($row['since'] ?? 0) && $quiet < max(3600, $scheduled * 2) ? $row['since'] : $now;
     $age = $now - $since;
     // 三条阶梯一律读 age，不读 fails。熔断拦不住已经领走的行：一家挂掉的那一刻
     // 几十个 worker 手上各有一行，一轮下来 fails 加的是在途行数而不是 1，
@@ -1349,17 +1367,20 @@ function Club_Host_Fail($host, $reason) {
     return [$until, $drop, $fails];
 }
 
-// 投递成功。$fails 是领取时读到的旧值，为 0 就一个字都不写 ——
-// 正常投递没有状态变化可记，而热门对端那一行会被几十个进程反复撞
-function Club_Host_Pass($host, $fails) {
+// 投递成功。$fails 和 $since 都是领取时读到的旧值，fails 为 0 就一个字都不写 ——
+// 正常投递没有状态变化可记，而热门对端那一行会被几十个进程反复撞。
+// 解除熔断但不动 since 和 timestamp：这次成功证明得了「现在能投」，证明不了「这段故障结束了」
+function Club_Host_Pass($host, $fails, $since = 0) {
     global $db;
     if (!$fails) return false;
     // fails > 0 这个条件是让数据库裁决谁真的清掉了状态：同一批并发成功的行手上都是
     // 领取那一刻的旧计数，各自都会认为是自己恢复的，只有第一条 update 真的改到行
-    $pdo = $db->prepare('update `hosts` set `fails` = 0, `since` = 0, `until` = 0, `timestamp` = :now where `host` = :host and `fails` > 0');
-    $pdo->execute([':host' => $host, ':now' => time()]);
+    $pdo = $db->prepare('update `hosts` set `fails` = 0, `until` = 0 where `host` = :host and `fails` > 0');
+    $pdo->execute([':host' => $host]);
     if (!$pdo->rowCount()) return false;
-    Club_Log_Event('info', 'host recovered: '.$host, ['fails' => $fails]);
+    // 带上这段故障已经持续多久：反复恢复又反复挂的对端，这个数会一路涨，一眼能认出来
+    Club_Log_Event('info', 'host recovered: '.$host,
+        ['fails' => $fails, 'age' => $since ? time() - $since : 0]);
     return true;
 }
 

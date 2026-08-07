@@ -16,7 +16,7 @@ function worker($maintain = true) {
     $pdo->execute([':timestamp' => time()]);
     // 顺带把这家的 fails 带出来：投递成功时靠它判断要不要清熔断状态，
     // 失败时靠它判断这次该不该算在这一行头上，两处都不用再多查一次
-    $pdo = $db->query('select q.id, c.name as club, t.tid, t.type, t.jsonld, q.target, q.host, q.retry, coalesce(h.fails, 0) as fails from `queues` as `q` left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid left join `hosts` as `h` on q.host = h.host where `id` = last_insert_id() and row_count() <> 0');
+    $pdo = $db->query('select q.id, c.name as club, t.tid, t.type, t.jsonld, q.target, q.host, q.retry, coalesce(h.fails, 0) as fails, coalesce(h.since, 0) as since from `queues` as `q` left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid left join `hosts` as `h` on q.host = h.host where `id` = last_insert_id() and row_count() <> 0');
     if ($task = $pdo->fetch(PDO::FETCH_ASSOC)) {
         // worker 是长期进程，关联标记不像 web 那样每请求自动归零，每条任务都要重设。
         // 用队列行号，同一条投递的入队、重试、成功几行就能串起来
@@ -38,7 +38,7 @@ function worker($maintain = true) {
                     Club_Log_Event('debug', 'push delivered', ['club' => $task['club'],
                         'target' => $task['target'], 'retry' => $task['retry']]);
                     // 这家之前挂着，现在活了：清掉熔断，它名下其余行下一轮就能领
-                    Club_Host_Pass($task['host'], $task['fails']);
+                    Club_Host_Pass($task['host'], $task['fails'], $task['since']);
                     $pdo = $db->prepare('delete from `queues` where `id` = :id');
                     $pdo->execute([':id' => $task['id']]);
                     $pdo = $db->prepare('update `tasks` set `queues` = `queues` - 1 where `tid` = :tid');
