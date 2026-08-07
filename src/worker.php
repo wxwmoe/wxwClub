@@ -5,11 +5,14 @@
 // 所以只交给 0 号进程，其余的专心投递
 function worker($maintain = true) {
     global $db, $cycle, $config; $idle = 0; if (!isset($cycle)) $cycle = 0;
-    // 熔断中的对端整家跳过，不用它名下每一行各去撞一次超时。
+    // 两道按对端的闸门：熔断中的整家跳过，正在投递的一家也只放一条进去。
+    // 后者靠 inuse 认在途 —— 熔断是失败落库之后才生效的，而一次投递要烧十几秒，
+    // 这段时间里所有进程会把同一个死对端的行全部领走，各自白等一次超时。
+    // 子查询必须带 distinct：不然 MySQL 会把它并进外层，报「不能对同一张表边改边查」。
     // 排序只认 timestamp，别往前面插列：插了的话 timestamp 用不上 pending 索引的
     // 范围过滤，每次领取都要扫遍所有退避中的行。重试行的 timestamp 已经推到未来，
     // 本来就排在后面，再按 retry 排一道是多余的
-    $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1, `timestamp` = :timestamp where `inuse` = 0 and `timestamp` <= :timestamp and `host` not in (select `host` from `hosts` where `until` > :timestamp) order by `timestamp` asc limit 1');
+    $pdo = $db->prepare('update `queues` set `id` = last_insert_id(id), `inuse` = 1, `timestamp` = :timestamp where `inuse` = 0 and `timestamp` <= :timestamp and `host` not in (select `host` from `hosts` where `until` > :timestamp) and `host` not in (select `h` from (select distinct `host` as `h` from `queues` where `inuse` = 1) as `busy`) order by `timestamp` asc limit 1');
     $pdo->execute([':timestamp' => time()]);
     // 顺带把这家的 fails 带出来：投递成功时靠它判断要不要清熔断状态，
     // 失败时靠它判断这次该不该算在这一行头上，两处都不用再多查一次

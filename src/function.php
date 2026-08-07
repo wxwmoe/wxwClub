@@ -1343,8 +1343,11 @@ function Club_Host_Fail($host, $reason) {
 function Club_Host_Pass($host, $fails) {
     global $db;
     if (!$fails) return false;
-    $pdo = $db->prepare('update `hosts` set `fails` = 0, `since` = 0, `until` = 0, `timestamp` = :now where `host` = :host');
+    // fails > 0 这个条件是让数据库裁决谁真的清掉了状态：同一批并发成功的行手上都是
+    // 领取那一刻的旧计数，各自都会认为是自己恢复的，只有第一条 update 真的改到行
+    $pdo = $db->prepare('update `hosts` set `fails` = 0, `since` = 0, `until` = 0, `timestamp` = :now where `host` = :host and `fails` > 0');
     $pdo->execute([':host' => $host, ':now' => time()]);
+    if (!$pdo->rowCount()) return false;
     Club_Log_Event('info', 'host recovered: '.$host, ['fails' => $fails]);
     return true;
 }
