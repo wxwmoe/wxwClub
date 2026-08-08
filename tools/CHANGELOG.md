@@ -1,3 +1,9 @@
+#### 2026-08-08
+
+```sql
+ALTER TABLE `hosts` ADD `noticed` int NOT NULL DEFAULT '0' AFTER `since`;
+```
+
 #### 2026-08-07
 
 ```sql

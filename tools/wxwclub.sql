@@ -138,6 +138,7 @@ CREATE TABLE `hosts` (
   `probe` int NOT NULL DEFAULT '0',
   `fails` smallint NOT NULL DEFAULT '0',
   `since` int NOT NULL DEFAULT '0',
+  `noticed` int NOT NULL DEFAULT '0',
   `until` int NOT NULL DEFAULT '0',
   `timestamp` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`host`),

@@ -1242,12 +1242,18 @@ function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
     if ($row && $row['resolved'] > $now - ($row['ips'] === '' ? $miss : $ttl)) {
         // 别的进程刚成功解析过，就是本站 DNS 通着的实据 —— 但成功的时刻是它的，不是此刻
         if ($row['ips'] !== '') Club_Url_Resolve_Healthy($row['resolved']);
+        else Club_Log_Event('debug', 'dns lookup skipped, negative cache still fresh',
+            ['host' => $host, 'age' => $now - $row['resolved'], 'retry' => $row['resolved'] + $miss - $now]);
         return $row['ips'] === '' ? [] : explode(',', $row['ips']);
     }
     // 几十个进程同时发现同一个 host 过期会一起去查 DNS。抢到 probe 的那个才真去解析，
     // 其余的拿旧值先顶一轮；连旧值都没有的只能自己查
     $stock = $row && $row['ips'] !== '' && $row['resolved'] > $now - $stale ? $row['ips'] : null;
-    if (isset($stock) && !Club_Host_Probe($host, $now)) return explode(',', $stock);
+    if (isset($stock) && !Club_Host_Probe($host, $now)) {
+        Club_Log_Event('debug', 'dns refresh deferred, another worker is probing',
+            ['host' => $host, 'age' => $now - $row['resolved'], 'ip' => $stock]);
+        return explode(',', $stock);
+    }
     $ips = gethostbynamel($host) ?: [];
     if (function_exists('dns_get_record'))
         foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $rr)
@@ -1348,21 +1354,35 @@ function Club_Host_Fail($host, $reason) {
         $wait = $age < 172800 ? 300 : ($age < 604800 ? 3600 : 21600);
         $drop = $age > 2592000;
     } else {
-        // 对端临时挂掉是常态，这套阶梯本来就是照着它调的
-        $wait = $age < 300 ? 60 : ($age < 1800 ? 300 : ($age < 7200 ? 600 : 3600));
+        // 对端临时挂掉是常态，这套阶梯本来就是照着它调的。顶档不敢拉太长：
+        // 领取时同一 host 只放一行，这个间隔就等于探活间隔，拉长它不省并发、
+        // 只让恢复更晚被发现，而多探那几次不到 32 个 worker 日容量的 1%
+        $wait = $age < 300 ? 60 : ($age < 1800 ? 300 : ($age < 7200 ? 600 : 900));
         $drop = $age > 604800;
     }
     // 整批行现在共用一个 until，抖动只要算一次。不抖的话一家恢复的那一秒
     // 几十个进程会一起扑上去，对端更容易把我们限流，然后所有行齐步走向放弃
     $until = $now + $wait + mt_rand(0, (int)($wait / 4));
+    // 是不是新的一段看 age 不看 fails：一次成功就把 fails 清 0，而抖动的对端成功失败交替出现，
+    // 照 fails 判的话一段故障里每失败一次都要重报一次「开始挂」，这条 info 就没法数故障段了
+    $begin = $age == 0;
     $pdo = $db->prepare('insert into `hosts`(`host`, `fails`, `since`, `until`, `timestamp`)'.
         ' values (:host, :fails, :since, :until, :now) on duplicate key update'.
         ' `fails` = :fails, `since` = :since, `until` = :until, `timestamp` = :now');
     $pdo->execute([':host' => $host, ':fails' => $fails, ':since' => $since,
         ':until' => $until, ':now' => $now]);
+    // 一家挂掉的那一秒几十个 worker 手上各有一行，它们算出来的 age 全是 0，光看 age
+    // 这一批会一起报「开始挂」。noticed 记住已经报过开始的那个 since，让数据库裁决：
+    // 真改到行的那一条才是这一段的第一条。段中间不问，否则报过的开始会被重新打开
+    if ($begin) {
+        $pdo = $db->prepare('update `hosts` set `noticed` = :since'.
+            ' where `host` = :host and `noticed` <> :since');
+        $pdo->execute([':host' => $host, ':since' => $since]);
+        $begin = (bool)$pdo->rowCount();
+    }
     // 开始挂和放弃是状态变化，中间那些重复失败只记 debug，否则一家大实例挂一天就刷满日志
-    Club_Log_Event($fails == 1 || $drop ? 'info' : 'debug', 'host '
-        .($drop ? 'given up' : ($fails == 1 ? 'started failing' : 'still failing')).': '.$host,
+    Club_Log_Event($begin || $drop ? 'info' : 'debug', 'host '
+        .($drop ? 'given up' : ($begin ? 'started failing' : 'still failing')).': '.$host,
         ['reason' => $reason, 'fails' => $fails, 'age' => $age, 'wait' => $until - $now]);
     return [$until, $drop, $fails];
 }
@@ -1374,12 +1394,22 @@ function Club_Host_Pass($host, $fails, $since = 0) {
     global $db;
     if (!$fails) return false;
     // fails > 0 这个条件是让数据库裁决谁真的清掉了状态：同一批并发成功的行手上都是
-    // 领取那一刻的旧计数，各自都会认为是自己恢复的，只有第一条 update 真的改到行
+    // 领取那一刻的旧计数，各自都会认为是自己恢复的，只有第一条 update 真的改到行。
+    // 再要求 noticed > 0，清到的就是这一段里唯一配得上那条「开始挂」的恢复
+    $pdo = $db->prepare('update `hosts` set `fails` = 0, `until` = 0, `noticed` = 0'.
+        ' where `host` = :host and `fails` > 0 and `noticed` > 0');
+    $pdo->execute([':host' => $host]);
+    if ($pdo->rowCount()) {
+        // 带上这段故障已经持续多久：反复恢复又反复挂的对端，这个数会一路涨，一眼能认出来
+        Club_Log_Event('info', 'host recovered: '.$host,
+            ['fails' => $fails, 'age' => $since ? time() - $since : 0]);
+        return true;
+    }
+    // 这一段的恢复已经报过了。熔断照样要清，但它不是状态变化，抖动的对端一段里能撞出几十次
     $pdo = $db->prepare('update `hosts` set `fails` = 0, `until` = 0 where `host` = :host and `fails` > 0');
     $pdo->execute([':host' => $host]);
     if (!$pdo->rowCount()) return false;
-    // 带上这段故障已经持续多久：反复恢复又反复挂的对端，这个数会一路涨，一眼能认出来
-    Club_Log_Event('info', 'host recovered: '.$host,
+    Club_Log_Event('debug', 'host deliverable again: '.$host,
         ['fails' => $fails, 'age' => $since ? time() - $since : 0]);
     return true;
 }
@@ -1401,7 +1431,7 @@ function Club_Host_Purge($host) {
     $queues = $pdo->rowCount();
     // 连续失败到此为止，后面改由 blacklist 每天探活。留着不清的话，
     // 将来探活把它放回来，熔断状态还挂着旧的 until，第一批投递又要白等一轮
-    $pdo = $db->prepare('update `hosts` set `fails` = 0, `since` = 0, `until` = 0, `timestamp` = :now where `host` = :host');
+    $pdo = $db->prepare('update `hosts` set `fails` = 0, `since` = 0, `noticed` = 0, `until` = 0, `timestamp` = :now where `host` = :host');
     $pdo->execute([':host' => $host, ':now' => $now]);
     // 停止对整个实例投递是个大事件，不记的话事后完全无从追溯
     Club_Log_Event('error', 'host blacklisted: '.$host, ['targets' => $targets, 'queues' => $queues]);
