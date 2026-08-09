@@ -91,6 +91,7 @@ Levels are `silent` / `error` / `warning` / `info` / `debug` (`config.node.log-l
 
 - **Silent returns are not acceptable.** Every early exit leaves a log line: `info` for a state change, `debug` for *why no delivery or write happened*.
 - But idling must not flood. Paths that dozens of processes hit every round (no work claimed, no candidates) only bump a `Club_Stat` counter. A fully idle system must not emit one all-zero summary per process per minute.
+- Periodic output — worker summary, heartbeat, request summary, maintenance snapshot — goes to `logs/stat/` (`Club_Log_Event`'s `$dir` argument), never to `logs/event/`: its line count follows the process count and the window, not what happened, and it drowns the event stream. Anything triggered by an actual event stays in `logs/event/`.
 - Workers clear `Club_Log_Ref('')` at the end of each task.
 - `logs/` directories are created 0777 and files 0666, each followed by an explicit `chmod`: web and worker usually run as different users, `umask` trims the mode `mkdir` was given, and `unlink` checks the directory's permissions rather than the file's.
 

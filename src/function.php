@@ -431,9 +431,10 @@ function Club_Log_Ref($ref = null) {
     return $current;
 }
 
-// 低频事件写成按天追加的一个文件：拉黑、建群、销号这类一行就说清楚的事，按事件切成一堆 JSON 文件反而难查。跟 logs/error/ 分开，那边只留 PHP 引擎自己的报错
-function Club_Log_Event($level, $message, $context = []) {
-    if (!Club_Log_Level($level) || !($path = Club_Log_Dir('event'))) return false;
+// 低频事件写成按天追加的一个文件：拉黑、建群、销号这类一行就说清楚的事，按事件切成一堆 JSON 文件反而难查。跟 logs/error/ 分开，那边只留 PHP 引擎自己的报错。
+// 汇总和心跳传 $dir = 'stat' 写到 logs/stat/：那几行按窗口定期输出，条数由进程数决定，混在 event 里会把真正发生过的事顶出屏幕
+function Club_Log_Event($level, $message, $context = [], $dir = 'event') {
+    if (!Club_Log_Level($level) || !($path = Club_Log_Dir($dir))) return false;
     if ($ref = Club_Log_Ref()) $message = $ref.' '.$message;
     if ($context) $message .= ' '.Club_Json_Encode($context);
     // 一条事件一行，消息里的换行要压掉，否则 grep 出来只有半句
@@ -529,7 +530,7 @@ function Club_Stat_Flush($force = false, $window = 60, $heartbeat = 900) {
         Club_Log_Event('info', 'worker heartbeat', ['slot' => $slot, 'pid' => getmypid(), 'window_s' => $elapsed, 'last_progress_at' => $progress, 'idle_ms' => (int)($pending['idle_ms'] ?? 0),
             'endpoint_claim_attempts' => (int)($pending['endpoint_claim_attempts'] ?? 0), 'endpoint_claim_misses' => (int)($pending['endpoint_misses'] ?? 0),
             // 一直在抢、一直没抢到的槽位跟真空闲的槽位在这里长得一模一样，而前者说明并发开过头了，只有这一个数能把两者分开
-            'endpoint_claim_races' => (int)($pending['endpoint_claim_races'] ?? 0), 'scheduler_db_ops' => (int)($pending['scheduler_db_ops'] ?? 0)]);
+            'endpoint_claim_races' => (int)($pending['endpoint_claim_races'] ?? 0), 'scheduler_db_ops' => (int)($pending['scheduler_db_ops'] ?? 0)], 'stat');
         $pending = []; $pending_samples = []; $pending_gauges = [];
         return true;
     }
@@ -545,7 +546,7 @@ function Club_Stat_Flush($force = false, $window = 60, $heartbeat = 900) {
     foreach ($pending_gauges as $key => $value) $summary[$key] = $value;
     foreach ($pending as $key => $value) if (!isset($summary[$key]) && $key != 'endpoint_misses') $summary[$key] = $value;
     $summary['busy_ratio'] = $elapsed ? round(max(0, min(1, 1 - ($pending['idle_ms'] ?? 0) / ($elapsed * 1000))), 3) : 0;
-    Club_Log_Event('info', 'worker summary', $summary);
+    Club_Log_Event('info', 'worker summary', $summary, 'stat');
     $pending = []; $pending_samples = []; $pending_gauges = [];
     return true;
 }
@@ -558,7 +559,7 @@ function Club_Stat_Request() {
     foreach ($counters as $key => $value) if (strpos($key, 'dns_') === 0) $dns += $value;
     if (!$dns) return false;
     foreach ($samples as $key => $values) $counters[$key] = Club_Stat_Percentile($values);
-    Club_Log_Event('info', 'request summary', ['sapi' => PHP_SAPI, 'pid' => getmypid()] + $counters);
+    Club_Log_Event('info', 'request summary', ['sapi' => PHP_SAPI, 'pid' => getmypid()] + $counters, 'stat');
     return true;
 }
 
@@ -2514,7 +2515,7 @@ function Club_Monitor_Snapshot($interval = 300) {
         'endpoint_schedule_lag_s' => isset($endpoints['oldest']) ? max(0, $now - (int)$endpoints['oldest']) : 0, 'blacklist' => (int)$blacklist['total'],
         'blacklist_due' => (int)$blacklist['due'], 'blacklist_overdue' => (int)$blacklist['overdue'], 'blacklist_pending' => (int)$blacklist['pending'],
         'blacklist_check_lag_s' => isset($blacklist['oldest']) ? max(0, $now - (int)$blacklist['oldest']) : 0, 'blacklisted_queues' => $backlog,
-        'dns_rows' => (int)$dns['total'], 'dns_positive' => (int)$dns['positive'], 'dns_locked' => (int)$dns['locked']] + Club_Monitor_Count(null));
+        'dns_rows' => (int)$dns['total'], 'dns_positive' => (int)$dns['positive'], 'dns_locked' => (int)$dns['locked']] + Club_Monitor_Count(null), 'stat');
     // 查询完整跑完再推进节流点；中途的 PDOException 会让外层重试立即补上这一轮。
     $last = $now;
     return true;

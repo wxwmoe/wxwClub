@@ -48,7 +48,7 @@
         // 安全模式，关掉等于谁都能往 inbox 里塞消息，不建议
         'inbox-verify' => true,
         // 日志级别，由少到多（ silent / error / warning / info / debug ）
-        // logs/event/ 是事件流，按天一个文件；其余目录按请求或事件切成单独文件
+        // logs/event/ 是事件流，logs/stat/ 是各进程的定期汇总和心跳，都按天一个文件；其余目录按请求或事件切成单独文件
         // 注意 silent 只关掉 logs/ 下的写入，PHP 自身的报错仍受 php.ini 的 log_errors 控制
         'log-level' => 'info',
         // 日志保留天数，0 不清理
