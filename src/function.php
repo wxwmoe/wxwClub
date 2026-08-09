@@ -3,7 +3,7 @@
 // 这份代码要求的数据库结构版本，对应 src/migrate/ 下最大的那个步骤文件。
 // 库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，
 // 入站活动会写进本地状态再报错，对端重放就是半处理
-define('DB_VERSION', 2);
+define('DB_VERSION', 3);
 
 // 跳转自己跟：交给 curl 的话每一跳既过不了内网检查，签名也对不上新 host。跳数与 Mastodon 一致
 function ActivityPub_GET($url, $club, $hops = 3) {
@@ -904,7 +904,9 @@ function Club_Endpoint_Upsert($task) {
     // 分组列不能直接在 on duplicate key update 里引用，套一层 derived table 才行；
     // order by 让批量 upsert 按主键的二进制序取锁，减少和别的入队互相咬住的机会。
     // greatest(retry_at, ...) 是硬边界：新活动不能把退避中的 endpoint 提前唤醒；
-    // next_at 为空的分支保证空 endpoint 收到新 queue 之后重新可调度
+    // next_at 为空的分支保证空 endpoint 收到新 queue 之后重新可调度。
+    // 算出来的 next_at 必然非空（incoming 是 min(due_at)，而 blacklist target 根本
+    // 入不了 queue），所以 idle_since 无条件清零：这一行重新排上了，不再是待回收的空行
     $pdo = $db->prepare('insert into `endpoints` (`url`, `next_at`)'.
         ' select `incoming`.`url`, `incoming`.`next_at` from ('.
         ' select `q`.`target` collate ascii_bin as `url`, min(`q`.`due_at`) as `next_at`'.
@@ -912,7 +914,7 @@ function Club_Endpoint_Upsert($task) {
         ') as `incoming` order by `incoming`.`url` collate ascii_bin'.
         ' on duplicate key update `next_at` = greatest(`endpoints`.`retry_at`,'.
         ' if(`endpoints`.`next_at` is null, `incoming`.`next_at`,'.
-        ' least(`endpoints`.`next_at`, `incoming`.`next_at`)))');
+        ' least(`endpoints`.`next_at`, `incoming`.`next_at`))), `idle_since` = 0');
     return $pdo->execute([':tid' => $task]);
 }
 
@@ -2224,11 +2226,15 @@ function Club_Endpoint_Desired($url, $retry_at) {
 // 并发入队的 upsert 要改这一行就得先等我们的行锁，所以它要么排在前面已经
 // 被这次 min 看见，要么排在后面再用 least 把更早的时间写回来，不会被盖掉
 function Club_Endpoint_Reschedule($url, $token, $retry_at) {
-    global $db;
+    global $db; $now = time();
     $next = Club_Endpoint_Desired($url, $retry_at);
+    // idle_since 只在「变空」的那一次落时刻，已经空着的保持原值：每次重排都刷新的话
+    // 空置时长永远回到零，回收的宽限期就再也到不了
     $pdo = $db->prepare('update `endpoints` set `next_at` = :next, `lease_token` = null,'.
-        ' `lease_until` = 0 where `url` = :url and `lease_token` = unhex(:token)');
-    $pdo->execute([':url' => $url, ':token' => $token, ':next' => $next]);
+        ' `lease_until` = 0, `idle_since` = if(:next is null,'.
+        ' if(`idle_since` > 0, `idle_since`, :now), 0)'.
+        ' where `url` = :url and `lease_token` = unhex(:token)');
+    $pdo->execute([':url' => $url, ':token' => $token, ':next' => $next, ':now' => $now]);
     Club_Stat('scheduler_db_ops');
     return (bool)$pdo->rowCount();
 }
@@ -2632,7 +2638,7 @@ function Club_Blacklist_Restore($target, $now) {
 // 三段各自留一个稳定游标，每次只走一页，中途被打断下次接着走
 function Club_Reconcile_Step($limit = 200) {
     global $db; static $phase = 0, $cursor = '';
-    $now = time(); $seen = 0; $repairs = 0;
+    $now = time(); $seen = 0; $repairs = 0; $pruned = 0;
     if ($phase === 0) {
         // 等着被清理的黑名单 queue 不能算数，否则刚拉黑的 endpoint 会被重新排上
         $pdo = $db->prepare('select `q`.`target` from `queues` `q`'.
@@ -2660,48 +2666,58 @@ function Club_Reconcile_Step($limit = 200) {
         $pdo->execute([':cursor' => $cursor, ':now' => $now]);
         foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $url) {
             $cursor = $url; $seen++;
-            if (Club_Endpoint_Prune($url, $now)) $repairs++;
+            // 起算点缺失的行只是被扶正，不算回收
+            if (($took = Club_Endpoint_Prune($url, $now)) === 'pruned') $pruned++;
+            elseif ($took) $repairs++;
         }
     }
     Club_Stat('scheduler_db_ops');
+    // 回收跟修复分开计：修复是「不变量被破坏过」，回收是「一条 endpoint 真的离开了」，
+    // 合在一个数里的话，稳态下的回收流量会把偶发的修复彻底盖住
     Club_Monitor_Count('reconciliation_repairs', $repairs);
+    Club_Monitor_Count('endpoints_pruned', $pruned);
     // 这一页没走满就是走到头了，换下一段重新开始
     if ($seen < $limit) { $phase = ($phase + 1) % 3; $cursor = ''; }
     return $seen;
 }
 
-// 单条 endpoint 的修复。缺行先按健康默认值补出来，再在短事务里锁行重算 next_at。
-// 只碰 next_at —— fails/fail_since/retry_at 是 endpoint 自己的故障历史，
+// 单条 endpoint 的修复。缺行先按健康默认值补出来，再在短事务里锁行重算 next_at 和 idle_since。
+// 只写这两列 —— fails/fail_since/retry_at 是 endpoint 自己的故障历史，
 // queues 里恢复不出来，被这里覆盖掉就等于把一家挂了一个月的实例重新当成健康的
 function Club_Reconcile_Endpoint($url, $now) {
     global $db; $repaired = false; $next = null;
     // 先无锁看一眼。直接 for update 的话，每一轮对账都要在每一条 endpoint 上排到
     // 正在投递的那个完成事务后面去等锁，等到了却发现租约还在、什么都不用做；
     // 稳态下绝大多数行本来就是对的，脏读只用来跳过，进了事务照样从头重判
-    $pdo = $db->prepare('select `next_at`, `retry_at`, `lease_until` from `endpoints`'.
+    $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until` from `endpoints`'.
         ' where `url` = :url');
     $pdo->execute([':url' => $url]); Club_Stat('scheduler_db_ops');
     if (($peek = $pdo->fetch(PDO::FETCH_ASSOC)) !== false) {
         if ((int)$peek['lease_until'] > $now) return false;
+        // idle_since 和 next_at 必须同进同出。next_at 本身对得上就跳过的话，
+        // 一行两者不一致的记录没有任何路径会去修：回收只认 idle_since，
+        // 而它错了这行就永远等不到宽限期
         if (Club_Endpoint_Desired($url, (int)$peek['retry_at'])
-            === (isset($peek['next_at']) ? (int)$peek['next_at'] : null)) return false;
+            === (isset($peek['next_at']) ? (int)$peek['next_at'] : null)
+            && ((int)$peek['idle_since'] > 0) === !isset($peek['next_at'])) return false;
     }
     try {
         $db->beginTransaction();
-        $pdo = $db->prepare('select `next_at`, `retry_at`, `lease_until` from `endpoints`'.
-            ' where `url` = :url for update');
+        $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until`'.
+            ' from `endpoints` where `url` = :url for update');
         $pdo->execute([':url' => $url]);
         // 缺行才补，而且补在事务里：并发入队已经建好这一行时 insert ignore 不写，
         // 重新 select 会等它提交后拿到它的版本，不会把它的故障状态盖掉
         if (($row = $pdo->fetch(PDO::FETCH_ASSOC)) === false) {
-            $pdo = $db->prepare('insert ignore into `endpoints`(`url`, `next_at`) values (:url, null)');
-            $pdo->execute([':url' => $url]);
+            $pdo = $db->prepare('insert ignore into `endpoints`(`url`, `next_at`, `idle_since`)'.
+                ' values (:url, null, :now)');
+            $pdo->execute([':url' => $url, ':now' => $now]);
             // 健康历史是 endpoint 自己的状态，queues 里恢复不出来，补出来的是有损的
             if ($pdo->rowCount())
                 Club_Log_Event('warning', 'endpoint control row rebuilt with healthy defaults',
                     ['endpoint' => $url]);
-            $pdo = $db->prepare('select `next_at`, `retry_at`, `lease_until` from `endpoints`'.
-                ' where `url` = :url for update');
+            $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until`'.
+                ' from `endpoints` where `url` = :url for update');
             $pdo->execute([':url' => $url]);
             $row = $pdo->fetch(PDO::FETCH_ASSOC);
         }
@@ -2709,8 +2725,9 @@ function Club_Reconcile_Endpoint($url, $now) {
         if ($row !== false && (int)$row['lease_until'] <= $now) {
             $next = Club_Endpoint_Desired($url, (int)$row['retry_at']);
             $current = isset($row['next_at']) ? (int)$row['next_at'] : null;
-            if ($next !== $current) {
-                $pdo = $db->prepare('update `endpoints` set `next_at` = :next'.
+            if ($next !== $current || ((int)$row['idle_since'] > 0) !== !isset($next)) {
+                $pdo = $db->prepare('update `endpoints` set `next_at` = :next,'.
+                    ' `idle_since` = if(:next is null, if(`idle_since` > 0, `idle_since`, :now), 0)'.
                     ' where `url` = :url and `lease_until` <= :now');
                 $pdo->execute([':url' => $url, ':next' => $next, ':now' => $now]);
                 $repaired = (bool)$pdo->rowCount();
@@ -2727,21 +2744,36 @@ function Club_Reconcile_Endpoint($url, $now) {
     return $repaired;
 }
 
-// 删空控制行。事务外确认过的条件到这里可能已经不成立，锁上之后要全部重判一遍
-function Club_Endpoint_Prune($url, $now) {
-    global $db; $pruned = false;
+// 回收空置够久的控制行。事务外确认过的条件到这里可能已经不成立，锁上之后要全部重判一遍。
+// 空了就删是错的：投递完成只把 next_at 置空，一个几千人的群组每投一轮就让名下几千行
+// 同时变空，几分钟后的下一轮又原样建回来。那样换不回空间（页只回到 free list，
+// 文件不缩），却要拿维护槽把同一批主键删一遍建一遍，还会顺手丢掉 fails/fail_since。
+// 隔一周再看，剩下的才是真的不会再来的 inbox：群组的投稿间隔本来就可能按周算，
+// 宽限期比它短的话，同一批行每个投稿周期都要重来一遍，等于没有宽限期。
+// 不判 fails：它只在投成功时清零，而一条没有 queue 的 endpoint 永远等不到下一次投递，
+// 要求 fails 为零等于让带过故障的空行永久留下。
+// idle_since 还没起算的无主行在这里就地转成空闲态而不是删掉：它们通常由领取路径
+// 自愈（领到手发现没有 queue 就重排），但 next_at 若损坏成未来时间就永远领不到，
+// 而这一段是唯一还会扫到它的地方。返回 'pruned' 或 'idled' 区分这两件事
+function Club_Endpoint_Prune($url, $now, $idle = 604800) {
+    global $db; $pruned = false; $idled = false; $before = $now - $idle;
     // 跟对账同一个道理：能删的是少数，不先筛一遍就是每一行都开一次写锁事务，
     // 把维护 slot 一条条押在投递的完成事务后面
-    $pdo = $db->prepare('select (select `lease_until` from `endpoints` where `url` = :url) as `lease`,'.
+    $pdo = $db->prepare('select `e`.`lease_until` as `lease`, `e`.`idle_since` as `idle`,'.
+        ' `e`.`retry_at` as `retry`,'.
         ' (select count(*) from `queues` where `target` = :url) as `queued`,'.
-        ' (select count(*) from `blacklist` where `target` = :url) as `blocked`');
+        ' (select count(*) from `blacklist` where `target` = :url) as `blocked`'.
+        ' from `endpoints` as `e` where `e`.`url` = :url');
     $pdo->execute([':url' => $url]); Club_Stat('scheduler_db_ops');
     $peek = $pdo->fetch(PDO::FETCH_ASSOC) ?: [];
     if (!isset($peek['lease']) || (int)$peek['lease'] > $now
         || (int)$peek['queued'] || (int)$peek['blocked']) return false;
+    // 稳态下没有 queue 的行必然已经起算过，所以放这一类进事务不会加成本
+    if ((int)$peek['idle'] && ((int)$peek['idle'] > $before || (int)$peek['retry'] > $now)) return false;
     try {
         $db->beginTransaction();
-        $pdo = $db->prepare('select `next_at`, `lease_until` from `endpoints` where `url` = :url for update');
+        $pdo = $db->prepare('select `idle_since`, `retry_at`, `lease_until` from `endpoints`'.
+            ' where `url` = :url for update');
         $pdo->execute([':url' => $url]);
         $row = $pdo->fetch(PDO::FETCH_ASSOC);
         if ($row !== false && (int)$row['lease_until'] <= $now) {
@@ -2750,9 +2782,18 @@ function Club_Endpoint_Prune($url, $now) {
             $pdo->execute([':url' => $url]);
             $keep = $pdo->fetch(PDO::FETCH_ASSOC);
             if (!(int)$keep['queued'] && !(int)$keep['blocked']) {
-                $pdo = $db->prepare('delete from `endpoints` where `url` = :url and `lease_until` <= :now');
-                $pdo->execute([':url' => $url, ':now' => $now]);
-                $pruned = (bool)$pdo->rowCount();
+                if (!(int)$row['idle_since']) {
+                    $pdo = $db->prepare('update `endpoints` set `next_at` = null, `idle_since` = :now'.
+                        ' where `url` = :url and `lease_until` <= :now and `idle_since` = 0');
+                    $pdo->execute([':url' => $url, ':now' => $now]);
+                    $idled = (bool)$pdo->rowCount();
+                } elseif ((int)$row['idle_since'] <= $before && (int)$row['retry_at'] <= $now) {
+                    $pdo = $db->prepare('delete from `endpoints` where `url` = :url'.
+                        ' and `lease_until` <= :now and `retry_at` <= :now'.
+                        ' and `idle_since` > 0 and `idle_since` <= :before');
+                    $pdo->execute([':url' => $url, ':now' => $now, ':before' => $before]);
+                    $pruned = (bool)$pdo->rowCount();
+                }
             }
         }
         $db->commit();
@@ -2761,8 +2802,12 @@ function Club_Endpoint_Prune($url, $now) {
         throw $e;
     }
     Club_Stat('scheduler_db_ops', 3);
-    if ($pruned) Club_Log_Event('debug', 'empty endpoint removed', ['endpoint' => $url]);
-    return $pruned;
+    // 一条 = 一个 inbox 真的从这个站消失了，频率就是关注者的流失速率
+    if ($pruned) Club_Log_Event('debug', 'idle endpoint removed',
+        ['endpoint' => $url, 'idle' => $now - (int)$row['idle_since']]);
+    // 起算点缺失说明有路径没把 next_at 和 idle_since 一起写，不是常态
+    elseif ($idled) Club_Log_Event('warning', 'endpoint idle clock repaired', ['endpoint' => $url]);
+    return $pruned ? 'pruned' : ($idled ? 'idled' : false);
 }
 
 // 只有维护队列统计的那几个区间计数。跟 Club_Stat 分开：那一组每 60 秒被汇总带走，
@@ -2783,9 +2828,13 @@ function Club_Monitor_Snapshot($interval = 300) {
     if (!$last) { $last = $now; return false; }
     if ($last > $now - $interval) return false;
     $window = $now - $last;
+    // total 含着待回收的空行，单看它读不出「有多少 endpoint 在排队投递」。
+    // idle 减去同一行日志里的 blacklist 就是等着被回收的那部分，卡住了它只会单调涨；
+    // due/leased/oldest 都带 next_at 非空或租约条件，空行本来就进不去
     $pdo = $db->prepare('select count(*) as `total`,'.
         ' sum(`next_at` is not null and `next_at` <= :now and `retry_at` <= :now'.
         ' and `lease_until` <= :now) as `due`, sum(`lease_until` > :now) as `leased`,'.
+        ' sum(`idle_since` > 0) as `idle`,'.
         ' min(if(`next_at` is not null and `lease_until` <= :now, `next_at`, null)) as `oldest`'.
         ' from `endpoints`');
     $pdo->execute([':now' => $now]);
@@ -2808,6 +2857,7 @@ function Club_Monitor_Snapshot($interval = 300) {
     Club_Log_Event('info', 'maintenance snapshot', ['window_s' => $window,
         'endpoints' => (int)$endpoints['total'], 'endpoints_due' => (int)$endpoints['due'],
         'endpoints_leased' => (int)$endpoints['leased'],
+        'endpoints_idle' => (int)$endpoints['idle'],
         'endpoint_schedule_lag_s' => isset($endpoints['oldest']) ? max(0, $now - (int)$endpoints['oldest']) : 0,
         'blacklist' => (int)$blacklist['total'], 'blacklist_due' => (int)$blacklist['due'],
         'blacklist_overdue' => (int)$blacklist['overdue'],

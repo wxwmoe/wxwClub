@@ -56,13 +56,13 @@ A simple social groups compatible with ActivityPub.
     3. docker run -d --restart always --stop-timeout 30 -v $(pwd):/wxwClub \
     --name wxwclub_worker wxwclub:worker php /wxwClub/cli.php worker
 ```
-5. （可选）在 `config.php` 的 `worker` 里调整各类队列的进程数。每个部署只运行一个
-   worker master，扩容请调大 `worker.delivery` / `worker.probe`，不要再起一个容器：
-   维护队列是每个 master 固定一个，多开会重复扫描并让监控指标翻倍
-6. 升级前先做可恢复快照、停止 worker，并在拉取代码期间挡住 web 写入口。数据库结构与
-   代码版本不相等时前端返回 503；库落后时 worker 自动合并并直接退出，容器按
-   `--restart always` 重启后才起队列进程。直接运行 CLI 则要在迁移成功后再启动一次 worker。
-   库比代码新时旧代码会拒绝启动，不会尝试降级。也可以用 `php cli.php migrate` 手动合并
+5. （可选）调整 `config.php` 里 `worker` 的各类队列数，worker 只能运行一个。
+
+### 升级步骤
+1. `git pull` 拉取新代码
+2. `docker restart wxwclub_worker`
+
+数据库结构由 worker 自动合并，合并期间前端返回 503，完成后恢复。
 
 ## 版权声明
 

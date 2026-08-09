@@ -103,6 +103,7 @@ CREATE TABLE `endpoints` (
   `fail_since` int unsigned NOT NULL DEFAULT '0',
   `retry_at` int unsigned NOT NULL DEFAULT '0',
   `next_at` int unsigned DEFAULT NULL,
+  `idle_since` int unsigned NOT NULL DEFAULT '0',
   `lease_until` int unsigned NOT NULL DEFAULT '0',
   `lease_token` binary(16) DEFAULT NULL,
   PRIMARY KEY (`url`),
@@ -154,4 +155,4 @@ CREATE TABLE `meta` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- 结构版本。与代码里的 DB_VERSION 不相等时 web 全挡；只允许 worker 向前合并
-INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '2');
+INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '3');
