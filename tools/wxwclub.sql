@@ -18,9 +18,9 @@ CREATE TABLE `users` (
   `uid` int NOT NULL AUTO_INCREMENT,
   `name` varchar(100) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `actor` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
-  `inbox` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `inbox` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `public_key` text CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
-  `shared_inbox` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `shared_inbox` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `timestamp` int NOT NULL,
   `refresh` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`uid`),
@@ -78,31 +78,46 @@ CREATE TABLE `tasks` (
   `cid` int NOT NULL,
   `type` varchar(10) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `jsonld` mediumtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
-  `queues` int NOT NULL DEFAULT '0',
   `timestamp` int NOT NULL,
   PRIMARY KEY (`tid`),
   KEY `cid` (`cid`),
-  KEY `queues_timestamp` (`queues`,`timestamp`),
+  KEY `timestamp` (`timestamp`),
   CONSTRAINT `tasks_ibfk_2` FOREIGN KEY (`cid`) REFERENCES `clubs` (`cid`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE `queues` (
   `id` int NOT NULL AUTO_INCREMENT,
   `tid` int NOT NULL,
-  `target` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
-  `timestamp` int NOT NULL,
-  `inuse` tinyint NOT NULL DEFAULT '0',
-  `retry` tinyint NOT NULL DEFAULT '0',
-  `host` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci GENERATED ALWAYS AS (
-    if(substring_index(substring_index(`target`, '/', 3), '/', -1) like '[%',
-       substring_index(substring_index(substring_index(substring_index(`target`, '/', 3), '/', -1), ']', 1), '[', -1),
-       substring_index(substring_index(substring_index(`target`, '/', 3), '/', -1), ':', 1))
-  ) VIRTUAL,
+  `target` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `due_at` int unsigned NOT NULL,
+  `retries` tinyint unsigned NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
-  KEY `tid` (`tid`),
-  KEY `pending` (`inuse`,`timestamp`),
-  KEY `host` (`host`),
+  UNIQUE KEY `tid_target` (`tid`,`target`),
+  KEY `target_due` (`target`,`due_at`,`id`),
   CONSTRAINT `queues_ibfk_2` FOREIGN KEY (`tid`) REFERENCES `tasks` (`tid`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `endpoints` (
+  `url` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `fails` smallint unsigned NOT NULL DEFAULT '0',
+  `fail_since` int unsigned NOT NULL DEFAULT '0',
+  `retry_at` int unsigned NOT NULL DEFAULT '0',
+  `next_at` int unsigned DEFAULT NULL,
+  `lease_until` int unsigned NOT NULL DEFAULT '0',
+  `lease_token` binary(16) DEFAULT NULL,
+  PRIMARY KEY (`url`),
+  KEY `schedule` (`next_at`,`lease_until`),
+  UNIQUE KEY `lease_token` (`lease_token`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `dns` (
+  `host` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `ips` varchar(1024) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT '',
+  `checked_at` int unsigned NOT NULL DEFAULT '0',
+  `lock_until` int unsigned NOT NULL DEFAULT '0',
+  `lock_token` binary(16) DEFAULT NULL,
+  PRIMARY KEY (`host`),
+  KEY `checked_at` (`checked_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE `notices` (
@@ -120,28 +135,23 @@ CREATE TABLE `notices` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE `blacklist` (
-  `id` int NOT NULL AUTO_INCREMENT,
-  `target` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
-  `create` int DEFAULT NULL,
-  `timestamp` int NOT NULL DEFAULT '0',
-  `inuse` tinyint NOT NULL DEFAULT '0',
-  `retry` smallint NOT NULL DEFAULT '0',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `target` (`target`),
-  KEY `pending` (`inuse`,`timestamp`)
+  `target` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `created_at` int unsigned NOT NULL,
+  `check_at` int unsigned NOT NULL,
+  `checks` smallint unsigned NOT NULL DEFAULT '0',
+  `restore_pending_at` int unsigned DEFAULT NULL,
+  `lease_until` int unsigned NOT NULL DEFAULT '0',
+  `lease_token` binary(16) DEFAULT NULL,
+  PRIMARY KEY (`target`),
+  UNIQUE KEY `lease_token` (`lease_token`),
+  KEY `schedule` (`restore_pending_at`,`check_at`,`lease_until`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE `hosts` (
-  `host` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
-  `ips` varchar(1024) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT '',
-  `resolved` int NOT NULL DEFAULT '0',
-  `probe` int NOT NULL DEFAULT '0',
-  `fails` smallint NOT NULL DEFAULT '0',
-  `since` int NOT NULL DEFAULT '0',
-  `noticed` int NOT NULL DEFAULT '0',
-  `until` int NOT NULL DEFAULT '0',
-  `timestamp` int NOT NULL DEFAULT '0',
-  PRIMARY KEY (`host`),
-  KEY `until` (`until`),
-  KEY `timestamp` (`timestamp`)
+CREATE TABLE `meta` (
+  `name` varchar(30) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `value` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  PRIMARY KEY (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- 结构版本。与代码里的 DB_VERSION 不相等时 web 全挡；只允许 worker 向前合并
+INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '2');
