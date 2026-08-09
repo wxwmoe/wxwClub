@@ -49,8 +49,7 @@ function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
     if ($public === null) {
         // 刷新锁在别人手上、本地又没有可用旧值：这一轮压根没查 DNS，问健康与否都是错的
         if (Club_Resolver_Deferred()) {
-            Club_Log_Event('debug', 'push deferred, dns refresh is held by another worker',
-                ['url' => $url, 'club' => $club]);
+            Club_Log_Event('debug', 'push deferred, dns refresh is held by another worker', ['url' => $url, 'club' => $club]);
             return 'local-dns';
         }
         // 别的域名解析得动，就是这个对端把域名撤了/过期了，跟连不上没区别，照常记失败
@@ -1335,6 +1334,8 @@ function Club_Inbox_Dispatch($input, $club = null) {
         $verify = ActivityPub_Verification($input, false) && ActivityPub_Verify_Actor($actor);
         // 销号会连带级联删掉关注关系，是破坏性最大的一条，成没成都要留痕
         Club_Log_Inbox($name, $input, $verify);
+        // 查的是即将被删掉的那行 users，只能赶在删除事务前面。这个人没了，同实例的其它用户还在，那条 shared_inbox 照样该提前探活
+        if ($verify) Club_Blacklist_Sooner($actor);
         // 删除和它派生的转发队列必须一起提交：分开提交时中途出错会留下删了一半的名单，而对端重投的那一包在上面 Club_Has_Actor 那里就被挡掉，剩下的群组永远等不到 Delete
         if ($verify) Club_DB_Transaction('actor delete inbox', function () use ($db, $jsonld, $payload, $actor) {
             // 先锁住 users 那行再读 activities：并发的投稿插 activities 时要拿这行的外键共享锁，不先锁的话，读完名单到删除之间落库的那个群组会被级联一并删掉 ——
@@ -1377,6 +1378,8 @@ function Club_Inbox_Dispatch($input, $club = null) {
         return Club_Inbox_Skip('verification failed', ['actor' => $actor, 'reason' => $verify_reason ?? '-']);
     if (!$verify) Club_Log_Event('warning', 'inbox unverified but accepted, inbox-verify is off',
         ['actor' => $actor, 'reason' => $verify_reason ?? '-']);
+    // 验过签才算数：不验签就凭 actor 提前探活，等于让任何人点名让我们去敲谁
+    else Club_Blacklist_Sooner($actor);
     // 系统群组只负责发私信，不接受关注也不转发投稿
     if (isset($club) && Club_System_Name($club))
         return Club_Inbox_Skip('system club accepts nothing', ['club' => $club, 'type' => $type]);
@@ -2274,6 +2277,26 @@ function Club_Blacklist_Add($url, $now) {
     return (bool)$pdo->rowCount();
 }
 
+// 对端有活动发得进来，说明它至少已经能出网，这是黑名单目标复活最早的旁证，比摊到一天里的探活周期早得多。
+// 但这只是旁证：能出网不等于它自己的 inbox 收得下，判活仍旧由探活那一次出网说了算，所以这里只动 check_at 这个调度提示，checks 不碰 —— 那是这个目标的失败历史，跟 endpoints.fails 一样不该被一次旁证抹掉。
+// 提前到一小时上下而不是立刻，是因为对端一直在给我们发东西、自己的 inbox 却真的坏着时，这条路会被它的入站流量反复触发：这一小时是那种情况下的探活间隔下限，同时把正常恢复的等待从一天压到一小时。
+// 那 300 秒抖动是给一家实例的多条 target 用的，别让它们同一秒被领走，所以实际落在 60 到 65 分钟之间
+function Club_Blacklist_Sooner($actor) {
+    global $db; $now = time(); $check = $now + 3600 + mt_rand(0, 300);
+    // 判定用固定的窗口上界，写进去的才是带抖动的那个值。拿 :check 自己当判据的话，同一批入站活动里抽到更小随机数的那条又会满足条件，一轮恢复要写好几次库、记好几行日志
+    // 两个 inbox 用 union 摊成派生表再按 target 等值连接：target 是 blacklist 的主键，这样每行仍是一次主键取锁，取锁顺序跟 Claim、Result 一致。
+    // 写成 `b`.`target` in (`u`.`inbox`, `u`.`shared_inbox`) 用不上主键，每条入站活动都会全表扫一遍 blacklist。两处 actor 各给一个参数名，是为了不依赖 PDO 的语句模拟去复用同名占位符。
+    // 已经排得更早的不动：一家实例回来时入站活动是成批到的，只有第一条该写库。租约里的那行也不动，它正在被探活；restore_pending_at 非空的已经确认活了，正等维护队列清 backlog，催它没有意义
+    $pdo = $db->prepare('update `blacklist` `b` join (select `inbox` as `target` from `users` where `actor` = :actor'.
+        ' union select `shared_inbox` from `users` where `actor` = :owner) `u` on `b`.`target` = `u`.`target` set `b`.`check_at` = :check'.
+        ' where `b`.`restore_pending_at` is null and `b`.`check_at` > :cutoff and `b`.`lease_until` <= :now');
+    $pdo->execute([':actor' => $actor, ':owner' => $actor, ':check' => $check, ':cutoff' => $now + 3900, ':now' => $now]);
+    Club_Stat('scheduler_db_ops');
+    if (!$pdo->rowCount()) return false;
+    Club_Log_Event('info', 'blacklist probe pulled in by inbound activity', ['actor' => $actor, 'rows' => $pdo->rowCount(), 'wait' => $check - $now]);
+    return true;
+}
+
 // 领一条待探活的黑名单行。restore_pending_at 非空的不领：那些已经确认活过来了，正在等维护队列把历史 queue 清完，再探一次只是白白多一次出网
 function Club_Blacklist_Claim($now, $lease = 120) {
     global $db;
@@ -2353,7 +2376,10 @@ function Club_Blacklist_Result($target, $token, $alive) {
         }
         $checks = (int)$row['checks'];
         if (!$alive) {
-            $check = $now + 86400 + mt_rand(0, 21600); $checks++;
+            // 敲了一个月还是没人应的实例不必天天再敲，间隔跟着 checks 拉开，一周封顶。拉长不会推迟恢复：对端只要有一条活动发得进来，Club_Blacklist_Sooner 就把 check_at 拉回一小时内，
+            // 而一条活动都发不进来的实例，本来就只能靠这个周期慢慢试
+            $checks++; $wait = 86400 * min($checks, 7);
+            $check = $now + $wait + mt_rand(0, (int)($wait / 4));
             $pdo = $db->prepare('update `blacklist` set `checks` = :checks, `check_at` = :check, `lease_token` = null, `lease_until` = 0 where `target` = :target and `lease_token` = unhex(:token)');
             $pdo->execute([':target' => $target, ':token' => $token,
                 ':checks' => $checks, ':check' => $check]);
