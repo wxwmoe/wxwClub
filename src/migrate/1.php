@@ -79,20 +79,16 @@ function Club_Migrate_1_Clubs() {
     // 早期版本把中英两个名称标签拆成两列，后来合并成一个标签到值的 JSON 对象
     if (Club_Schema_Column('clubs', 'infoname_cn')) {
         if (!Club_Schema_Column('clubs', 'infoname'))
-            Club_Migrate_Exec('clubs add infoname', 'alter table `clubs`'.
-                ' add `infoname` text character set utf8mb4 collate utf8mb4_general_ci after `nickname`');
+            Club_Migrate_Exec('clubs add infoname', 'alter table `clubs` add `infoname` text character set utf8mb4 collate utf8mb4_general_ci after `nickname`');
         Club_Migrate_Exec('clubs merge infoname', 'update `clubs` set `infoname` ='.
-            ' json_object(\':infoname_cn:\', coalesce(`infoname_cn`, `name`),'.
-            ' \':infoname_en:\', coalesce(`infoname_en`, `name`))');
-        Club_Migrate_Exec('clubs drop infoname_cn/en',
-            'alter table `clubs` drop column `infoname_cn`, drop column `infoname_en`');
+            ' json_object(\':infoname_cn:\', coalesce(`infoname_cn`, `name`), \':infoname_en:\', coalesce(`infoname_en`, `name`))');
+        Club_Migrate_Exec('clubs drop infoname_cn/en', 'alter table `clubs` drop column `infoname_cn`, drop column `infoname_en`');
     }
     Club_Migrate_Datetime('clubs', 'create_time', 'timestamp');
     // 头像和横幅是外链，100 字节放不下带签名参数的对象存储 URL
     foreach (['avatar', 'banner'] as $column)
         if (($info = Club_Schema_Column('clubs', $column)) && $info['type'] !== 'varchar(255)')
-            Club_Migrate_Exec('clubs widen '.$column, 'alter table `clubs` modify `'.$column.
-                '` varchar(255) character set ascii collate ascii_general_ci default null');
+            Club_Migrate_Exec('clubs widen '.$column, 'alter table `clubs` modify `'.$column.'` varchar(255) character set ascii collate ascii_general_ci default null');
     Club_Migrate_AddKeys('clubs', ['name' => 'unique `name`', 'timestamp' => '`timestamp`']);
 }
 
@@ -100,11 +96,9 @@ function Club_Migrate_1_Users() {
     Club_Migrate_Datetime('users', 'create_time', 'timestamp');
     foreach (['actor', 'inbox', 'shared_inbox'] as $column)
         if (($info = Club_Schema_Column('users', $column)) && $info['type'] !== 'varchar(255)')
-            Club_Migrate_Exec('users widen '.$column, 'alter table `users` modify `'.$column.
-                '` varchar(255) character set ascii collate ascii_general_ci not null');
+            Club_Migrate_Exec('users widen '.$column, 'alter table `users` modify `'.$column.'` varchar(255) character set ascii collate ascii_general_ci not null');
     if (!Club_Schema_Column('users', 'refresh'))
-        Club_Migrate_Exec('users add refresh',
-            'alter table `users` add `refresh` int not null default 0');
+        Club_Migrate_Exec('users add refresh', 'alter table `users` add `refresh` int not null default 0');
     // 唯一性从 name 挪到 actor：同一个 actor 只该有一行，而 name 是从 actor 推出来的展示名，不同实例的同名用户完全可能撞上。
     // 这里不自动去重：删一行 user 会顺着外键连它的关注、转发、提醒一起删掉，撞上了宁可让合并停在这里，先把冲突打印出来给人看
     if (!(($index = Club_Schema_Index('users', 'actor')) && $index['unique']))
@@ -119,33 +113,23 @@ function Club_Migrate_1_Activities() {
     // 一条投稿可以同时进多个群组，单个 cid 表达不了。改存群组名的 JSON 列表，值能从原来的外键直接还原出来
     if (Club_Schema_Column('activities', 'cid')) {
         if (!Club_Schema_Column('activities', 'clubs'))
-            Club_Migrate_Exec('activities add clubs', 'alter table `activities`'.
-                ' add `clubs` varchar(255) character set ascii collate ascii_general_ci'.
-                ' not null default \'\' after `type`');
-        Club_Migrate_Exec('activities backfill clubs', 'update `activities` `a`'.
-            ' join `clubs` `c` on `a`.`cid` = `c`.`cid` set `a`.`clubs` = json_array(`c`.`name`)');
+            Club_Migrate_Exec('activities add clubs', 'alter table `activities` add `clubs` varchar(255) character set ascii collate ascii_general_ci not null default \'\' after `type`');
+        Club_Migrate_Exec('activities backfill clubs', 'update `activities` `a` join `clubs` `c` on `a`.`cid` = `c`.`cid` set `a`.`clubs` = json_array(`c`.`name`)');
         foreach (Club_Schema_Foreign('activities', 'cid') as $name)
-            Club_Migrate_Exec('activities drop foreign key',
-                'alter table `activities` drop foreign key `'.$name.'`');
+            Club_Migrate_Exec('activities drop foreign key', 'alter table `activities` drop foreign key `'.$name.'`');
         Club_Migrate_DropKeys('activities', ['cid']);
-        Club_Migrate_Exec('activities drop cid', 'alter table `activities`'.
-            ' drop column `cid`, modify `clubs` varchar(255) character set ascii'.
-            ' collate ascii_general_ci not null');
+        Club_Migrate_Exec('activities drop cid', 'alter table `activities` drop column `cid`, modify `clubs` varchar(255) character set ascii collate ascii_general_ci not null');
     }
     // activity_id 当年是本地编号，现在一律用远端 object 的 URI 做唯一键
     if (Club_Schema_Column('activities', 'activity_id'))
-        Club_Migrate_Exec('activities drop activity_id',
-            'alter table `activities` drop column `activity_id`');
+        Club_Migrate_Exec('activities drop activity_id', 'alter table `activities` drop column `activity_id`');
     Club_Migrate_Datetime('activities', 'create_time', 'timestamp');
     if (($info = Club_Schema_Column('activities', 'object')) && $info['type'] !== 'varchar(255)')
-        Club_Migrate_Exec('activities widen object', 'alter table `activities`'.
-            ' modify `object` varchar(255) collate utf8mb4_general_ci not null');
+        Club_Migrate_Exec('activities widen object', 'alter table `activities` modify `object` varchar(255) collate utf8mb4_general_ci not null');
     if (($info = Club_Schema_Column('activities', 'clubs')) && $info['type'] !== 'varchar(255)')
-        Club_Migrate_Exec('activities widen clubs', 'alter table `activities`'.
-            ' modify `clubs` varchar(255) character set ascii collate ascii_general_ci not null');
+        Club_Migrate_Exec('activities widen clubs', 'alter table `activities` modify `clubs` varchar(255) character set ascii collate ascii_general_ci not null');
     if (!Club_Schema_Column('activities', 'updated'))
-        Club_Migrate_Exec('activities add updated', 'alter table `activities`'.
-            ' add `updated` int not null default 0 after `object`');
+        Club_Migrate_Exec('activities add updated', 'alter table `activities` add `updated` int not null default 0 after `object`');
     // 只有不存在下游引用的早期结构才能自动去重；否则必须由人决定保留哪一行
     if (!(($index = Club_Schema_Index('activities', 'object')) && $index['unique'])) {
         $conflicts = Club_Migrate_1_Conflicts('activities', 'object');
@@ -175,8 +159,7 @@ function Club_Migrate_1_Dedupe($table, $column) {
 // 只报不删。撞上唯一键的合并会在下一句 ALTER 上失败，那条报错只说「Duplicate entry」，不说是哪几行；先把它们打出来，人才知道要去修什么
 function Club_Migrate_1_Conflicts($table, $column) {
     global $db;
-    $rows = $db->query('select `'.$column.'`, count(*) as `rows` from `'.$table.
-        '` group by `'.$column.'` having `rows` > 1 limit 50')->fetchAll(PDO::FETCH_ASSOC);
+    $rows = $db->query('select `'.$column.'`, count(*) as `rows` from `'.$table.'` group by `'.$column.'` having `rows` > 1 limit 50')->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rows as $row)
         Club_Log_Console('error', 'duplicate value blocks a unique key',
             ['table' => $table, 'column' => $column, 'value' => $row[$column], 'rows' => $row['rows']]);
@@ -209,13 +192,11 @@ function Club_Migrate_1_Announces() {
         ' on delete cascade on update cascade'.
         ') engine=InnoDB default charset=utf8mb4 collate=utf8mb4_general_ci');
     if (!Club_Schema_Column('announces', 'summary'))
-        Club_Migrate_Exec('announces add summary', 'alter table `announces`'.
-            ' add `summary` mediumtext collate utf8mb4_general_ci after `activity`');
+        Club_Migrate_Exec('announces add summary', 'alter table `announces` add `summary` mediumtext collate utf8mb4_general_ci after `activity`');
     // text 上限 64KB，一条两万字的中文投稿加上 HTML 就能顶到
     foreach (['summary' => '', 'content' => ' not null'] as $column => $null)
         if (($info = Club_Schema_Column('announces', $column)) && $info['type'] !== 'mediumtext')
-            Club_Migrate_Exec('announces widen '.$column, 'alter table `announces` modify `'.
-                $column.'` mediumtext collate utf8mb4_general_ci'.$null);
+            Club_Migrate_Exec('announces widen '.$column, 'alter table `announces` modify `'.$column.'` mediumtext collate utf8mb4_general_ci'.$null);
     Club_Migrate_AddKeys('announces', ['cid_activity' => 'unique `cid`,`activity`',
         'activity' => '`activity`', 'cid_timestamp' => '`cid`,`timestamp`',
         'uid_timestamp' => '`uid`,`timestamp`', 'timestamp_cid' => '`timestamp`,`cid`']);
@@ -235,8 +216,7 @@ function Club_Migrate_1_Tasks() {
         ' on delete cascade on update cascade'.
         ') engine=InnoDB default charset=utf8mb4 collate=utf8mb4_general_ci');
     if (($info = Club_Schema_Column('tasks', 'jsonld')) && $info['type'] !== 'mediumtext')
-        Club_Migrate_Exec('tasks widen jsonld', 'alter table `tasks`'.
-            ' modify `jsonld` mediumtext character set utf8mb4 collate utf8mb4_general_ci not null');
+        Club_Migrate_Exec('tasks widen jsonld', 'alter table `tasks` modify `jsonld` mediumtext character set utf8mb4 collate utf8mb4_general_ci not null');
     // queues 是早先的在途计数，代码里已经没人读写，但它带着的复合索引让过期清理的 timestamp 过滤用不上索引，每次都要扫全表
     Club_Migrate_DropKeys('tasks', ['type', 'time', 'queues', 'queues_timestamp']);
     if (Club_Schema_Column('tasks', 'queues'))
@@ -256,11 +236,9 @@ function Club_Migrate_1_Queues() {
         ' on delete cascade on update cascade'.
         ') engine=InnoDB default charset=utf8mb4 collate=utf8mb4_general_ci');
     if (($info = Club_Schema_Column('queues', 'target')) && $info['type'] !== 'varchar(255)')
-        Club_Migrate_Exec('queues widen target', 'alter table `queues`'.
-            ' modify `target` varchar(255) character set ascii collate ascii_general_ci not null');
+        Club_Migrate_Exec('queues widen target', 'alter table `queues` modify `target` varchar(255) character set ascii collate ascii_general_ci not null');
     if (!Club_Schema_Column('queues', 'retry'))
-        Club_Migrate_Exec('queues add retry',
-            'alter table `queues` add `retry` tinyint not null default 0');
+        Club_Migrate_Exec('queues add retry', 'alter table `queues` add `retry` tinyint not null default 0');
     // 历史索引集各版本都不一样，先收敛到一套，第 2 版才知道该拆掉什么
     Club_Migrate_DropKeys('queues', ['timestamp', 'inuse', 'retry']);
     Club_Migrate_AddKeys('queues', ['tid' => '`tid`', 'pending' => '`inuse`,`timestamp`']);
@@ -283,8 +261,7 @@ function Club_Migrate_1_Blacklist() {
         $alter[] = 'add primary key (`id`)';
         if (!Club_Schema_Index('blacklist', 'target'))
             $alter[] = 'add unique key `target` (`target`)';
-        Club_Migrate_Exec('blacklist add row id',
-            'alter table `blacklist` '.implode(', ', $alter));
+        Club_Migrate_Exec('blacklist add row id', 'alter table `blacklist` '.implode(', ', $alter));
     }
     $primary = Club_Schema_Index('blacklist', 'PRIMARY');
     if (!$primary || $primary['columns'] !== ['id']) {
@@ -294,40 +271,30 @@ function Club_Migrate_1_Blacklist() {
         $alter[] = 'add primary key (`id`)';
         if (!Club_Schema_Index('blacklist', 'target'))
             $alter[] = 'add unique key `target` (`target`)';
-        Club_Migrate_Exec('blacklist use row id primary key',
-            'alter table `blacklist` '.implode(', ', $alter));
+        Club_Migrate_Exec('blacklist use row id primary key', 'alter table `blacklist` '.implode(', ', $alter));
     }
     $id = Club_Schema_Column('blacklist', 'id');
     if ($id['type'] !== 'int' || strpos($id['extra'], 'auto_increment') === false)
-        Club_Migrate_Exec('blacklist fix row id', 'alter table `blacklist`'.
-            ' modify `id` int not null auto_increment');
+        Club_Migrate_Exec('blacklist fix row id', 'alter table `blacklist` modify `id` int not null auto_increment');
     if (!Club_Schema_Column('blacklist', 'create'))
-        Club_Migrate_Exec('blacklist add create',
-            'alter table `blacklist` add `create` int default null after `target`');
+        Club_Migrate_Exec('blacklist add create', 'alter table `blacklist` add `create` int default null after `target`');
     if (!Club_Schema_Column('blacklist', 'timestamp'))
-        Club_Migrate_Exec('blacklist add timestamp', 'alter table `blacklist`'.
-            ' add `timestamp` int not null default 0 after `create`');
+        Club_Migrate_Exec('blacklist add timestamp', 'alter table `blacklist` add `timestamp` int not null default 0 after `create`');
     $timestamp = Club_Schema_Column('blacklist', 'timestamp');
     if ($timestamp['nullable'])
-        Club_Migrate_Exec('blacklist fill timestamp',
-            'update `blacklist` set `timestamp` = 0 where `timestamp` is null');
+        Club_Migrate_Exec('blacklist fill timestamp', 'update `blacklist` set `timestamp` = 0 where `timestamp` is null');
     if ($timestamp['type'] !== 'int' || $timestamp['nullable'] ||
         (string)$timestamp['default'] !== '0')
-        Club_Migrate_Exec('blacklist fix timestamp', 'alter table `blacklist`'.
-            ' modify `timestamp` int not null default 0');
+        Club_Migrate_Exec('blacklist fix timestamp', 'alter table `blacklist` modify `timestamp` int not null default 0');
     if (!Club_Schema_Column('blacklist', 'inuse'))
-        Club_Migrate_Exec('blacklist add inuse', 'alter table `blacklist`'.
-            ' add `inuse` tinyint not null default 0 after `timestamp`');
+        Club_Migrate_Exec('blacklist add inuse', 'alter table `blacklist` add `inuse` tinyint not null default 0 after `timestamp`');
     if (!Club_Schema_Column('blacklist', 'retry'))
-        Club_Migrate_Exec('blacklist add retry', 'alter table `blacklist`'.
-            ' add `retry` smallint not null default 0 after `inuse`');
+        Club_Migrate_Exec('blacklist add retry', 'alter table `blacklist` add `retry` smallint not null default 0 after `inuse`');
     foreach (['inuse' => 'tinyint', 'retry' => 'smallint'] as $column => $type) {
         $info = Club_Schema_Column('blacklist', $column);
-        if ($info['nullable']) Club_Migrate_Exec('blacklist fill '.$column,
-            'update `blacklist` set `'.$column.'` = 0 where `'.$column.'` is null');
+        if ($info['nullable']) Club_Migrate_Exec('blacklist fill '.$column, 'update `blacklist` set `'.$column.'` = 0 where `'.$column.'` is null');
         if ($info['type'] !== $type || $info['nullable'] || (string)$info['default'] !== '0')
-            Club_Migrate_Exec('blacklist fix '.$column, 'alter table `blacklist`'.
-                ' modify `'.$column.'` '.$type.' not null default 0');
+            Club_Migrate_Exec('blacklist fix '.$column, 'alter table `blacklist` modify `'.$column.'` '.$type.' not null default 0');
     }
     Club_Migrate_DropKeys('blacklist', ['timestamp', 'inuse']);
     Club_Migrate_AddKeys('blacklist',
@@ -352,8 +319,7 @@ function Club_Migrate_1_Notices() {
     foreach (['uid', 'timestamp'] as $column) {
         $info = Club_Schema_Column('notices', $column);
         if ($info['type'] !== 'int' || $info['nullable'])
-            Club_Migrate_Exec('notices align '.$column, 'alter table `notices`'.
-                ' modify `'.$column.'` int not null');
+            Club_Migrate_Exec('notices align '.$column, 'alter table `notices` modify `'.$column.'` int not null');
     }
     foreach (['type' => ['varchar(20)', false], 'note' => ['varchar(255)', true],
         'object' => ['varchar(255)', true]] as $column => $target) {
@@ -361,8 +327,7 @@ function Club_Migrate_1_Notices() {
         if ($info['type'] !== $target[0] || $info['collation'] !== 'ascii_general_ci' ||
             $info['nullable'] !== $target[1])
             Club_Migrate_Exec('notices align '.$column, 'alter table `notices` modify `'.$column.'` '.
-                $target[0].' character set ascii collate ascii_general_ci'.
-                ($target[1] ? ' default null' : ' not null'));
+                $target[0].' character set ascii collate ascii_general_ci'.($target[1] ? ' default null' : ' not null'));
     }
     Club_Migrate_AddKeys('notices', ['uid_type_timestamp' => '`uid`,`type`,`timestamp`',
         'object' => '`object`', 'timestamp' => '`timestamp`']);

@@ -304,8 +304,7 @@ function Club_DB_Connect() {
 function Club_DB_Version($set = null) {
     global $db;
     if (isset($set)) {
-        $pdo = $db->prepare('insert into `meta`(`name`,`value`) values (\'schema\', :value)'.
-            ' on duplicate key update `value` = :value');
+        $pdo = $db->prepare('insert into `meta`(`name`,`value`) values (\'schema\', :value) on duplicate key update `value` = :value');
         $pdo->execute([':value' => (int)$set]);
         return (int)$set;
     }
@@ -735,8 +734,7 @@ function Club_Fetch_Actor($club, $actor) {
     $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     if ($pdo->fetch(PDO::FETCH_COLUMN, 0))
-        $pdo = $db->prepare('update `users` set `name` = :name, `inbox` = :inbox, `public_key` = :public_key,'.
-            ' `shared_inbox` = :shared_inbox, `refresh` = :timestamp where `actor` = :actor');
+        $pdo = $db->prepare('update `users` set `name` = :name, `inbox` = :inbox, `public_key` = :public_key, `shared_inbox` = :shared_inbox, `refresh` = :timestamp where `actor` = :actor');
     else
         $pdo = $db->prepare('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`)'.
             ' values (:name, :actor, :inbox, :public_key, :shared_inbox, :timestamp, :timestamp)');
@@ -839,14 +837,10 @@ function Club_Endpoint_Upsert($task) {
     // 分组列不能直接在 on duplicate key update 里引用，套一层 derived table 才行；order by 让批量 upsert 按主键的二进制序取锁，减少和别的入队互相咬住的机会。
     // greatest(retry_at, ...) 是硬边界：新活动不能把退避中的 endpoint 提前唤醒；next_at 为空的分支保证空 endpoint 收到新 queue 之后重新可调度。
     // 算出来的 next_at 必然非空（incoming 是 min(due_at)，而 blacklist target 根本入不了 queue），所以 idle_since 无条件清零：这一行重新排上了，不再是待回收的空行
-    $pdo = $db->prepare('insert into `endpoints` (`url`, `next_at`)'.
-        ' select `incoming`.`url`, `incoming`.`next_at` from ('.
-        ' select `q`.`target` collate ascii_bin as `url`, min(`q`.`due_at`) as `next_at`'.
-        ' from `queues` as `q` where `q`.`tid` = :tid group by `q`.`target` collate ascii_bin'.
-        ') as `incoming` order by `incoming`.`url` collate ascii_bin'.
-        ' on duplicate key update `next_at` = greatest(`endpoints`.`retry_at`,'.
-        ' if(`endpoints`.`next_at` is null, `incoming`.`next_at`,'.
-        ' least(`endpoints`.`next_at`, `incoming`.`next_at`))), `idle_since` = 0');
+    $pdo = $db->prepare('insert into `endpoints` (`url`, `next_at`) select `incoming`.`url`, `incoming`.`next_at` from ('.
+        ' select `q`.`target` collate ascii_bin as `url`, min(`q`.`due_at`) as `next_at` from `queues` as `q` where `q`.`tid` = :tid group by `q`.`target` collate ascii_bin'.
+        ') as `incoming` order by `incoming`.`url` collate ascii_bin on duplicate key update `next_at` = greatest(`endpoints`.`retry_at`,'.
+        ' if(`endpoints`.`next_at` is null, `incoming`.`next_at`, least(`endpoints`.`next_at`, `incoming`.`next_at`))), `idle_since` = 0');
     return $pdo->execute([':tid' => $task]);
 }
 
@@ -877,9 +871,7 @@ function Club_Task_Create($type, $club, $jsonld) {
 
 function Club_Queue_Insert($task, $target) {
     global $db;
-    $pdo = $db->prepare('insert into `queues`(`tid`,`target`,`due_at`,`retries`)'.
-        ' select :tid, :target, :now, 0 from dual'.
-        ' where :check not in (select `target` from `blacklist`)');
+    $pdo = $db->prepare('insert into `queues`(`tid`,`target`,`due_at`,`retries`) select :tid, :target, :now, 0 from dual where :check not in (select `target` from `blacklist`)');
     $result = $pdo->execute([':tid' => $task, ':target' => $target,
         ':check' => $target, ':now' => time()]);
     if (!$result) return false;
@@ -899,9 +891,7 @@ function Club_Queue_Insert_Followers($task, $club, $inbox = false) {
         $after = isset($cursor)
             ? ' and u.shared_inbox collate ascii_bin > convert(:f_cursor using ascii) collate ascii_bin'
             : '';
-        $source = 'select distinct u.shared_inbox collate ascii_bin as `target` from `followers` `f`'.
-            ' join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid'.
-            ' where c.name = :club'.$after;
+        $source = 'select distinct u.shared_inbox collate ascii_bin as `target` from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid where c.name = :club'.$after;
         $params = [':club' => $club];
         if (isset($cursor)) $params[':f_cursor'] = $cursor;
         if ($inbox !== false) {
@@ -915,8 +905,7 @@ function Club_Queue_Insert_Followers($task, $club, $inbox = false) {
                 $params[':a_cursor'] = $cursor;
             }
         }
-        $pdo = $db->prepare('select `target` from ('.$source.') `targets`'.
-            ' order by `target` collate ascii_bin limit '.$page);
+        $pdo = $db->prepare('select `target` from ('.$source.') `targets` order by `target` collate ascii_bin limit '.$page);
         $pdo->execute($params);
         $targets = $pdo->fetchAll(PDO::FETCH_COLUMN, 0); $count = count($targets);
         if (!$count) break;
@@ -937,10 +926,8 @@ function Club_Queue_Insert_Followers($task, $club, $inbox = false) {
                 $key = ':target'.$i; $insert[$key] = $target;
                 $select[] = 'select convert('.$key.' using ascii) collate ascii_bin as `target`';
             }
-            $pdo = $db->prepare('insert into `queues`(`tid`,`target`,`due_at`,`retries`)'.
-                ' select :tid, `t`.`target`, :now, 0 from ('.implode(' union all ', $select).') `t`'.
-                ' where not exists (select 1 from `blacklist` where `target` = `t`.`target`)'.
-                ' order by `t`.`target` collate ascii_bin');
+            $pdo = $db->prepare('insert into `queues`(`tid`,`target`,`due_at`,`retries`) select :tid, `t`.`target`, :now, 0 from ('.implode(' union all ', $select).') `t`'.
+                ' where not exists (select 1 from `blacklist` where `target` = `t`.`target`) order by `t`.`target` collate ascii_bin');
             $pdo->execute($insert);
         }
     } while ($count >= $page);
@@ -972,8 +959,7 @@ function Club_Push_Enqueue($club, $activity, $direct, $inbox, &$error, &$reason)
         : Club_Queue_Insert_Followers($task, $club, $inbox);
     if ($queued === null) {
         // anti-blacklist 没产生 queue，刚建的 task 没有消费者；同一事务里收掉，调用方保留可重试的本地状态（例如待撤回 notice），等 endpoint 恢复后再尝试。
-        $pdo = $db->prepare('delete from `tasks` where `tid` = :tid'.
-            ' and not exists (select 1 from `queues` where `tid` = :tid_check)');
+        $pdo = $db->prepare('delete from `tasks` where `tid` = :tid and not exists (select 1 from `queues` where `tid` = :tid_check)');
         $pdo->execute([':tid' => $task, ':tid_check' => $task]);
         $reason = 'blacklisted'; $error = 'target is blacklisted: '.$inbox;
         return false;
@@ -1055,8 +1041,7 @@ function Club_Limit_Check($club, $user, $content) {
             default: $type = 'user'; $where = ' and a.uid = :uid';
                 $params[':uid'] = $user['uid'];
         }
-        $pdo = $db->prepare('select count(a.id) from `announces` `a` join `clubs` `c` on a.cid = c.cid'.
-            ' join `users` `u` on a.uid = u.uid where c.name = :club and a.timestamp >= :timestamp'.$where);
+        $pdo = $db->prepare('select count(a.id) from `announces` `a` join `clubs` `c` on a.cid = c.cid join `users` `u` on a.uid = u.uid where c.name = :club and a.timestamp >= :timestamp'.$where);
         $pdo->execute($params);
         if ($pdo->fetch(PDO::FETCH_COLUMN, 0) >= $limit) return ['limit-'.$type, $vars];
     }
@@ -1093,8 +1078,7 @@ function Club_Notice_Send($actor, $type, $vars = [], $lang = null, $reply = null
     $content = '<p><a href="'.$actor.'" class="u-url mention">@'.$user['name'].'</a> '.Club_I18n($type, $locale, $vars).'</p>';
     return Club_DB_Transaction('notice enqueue', function () use ($db, $base, $club, $user, $actor,
         $type, $reply, $locale, $content) {
-        $pdo = $db->prepare('insert into `notices`(`uid`,`type`,`object`,`timestamp`)' .
-            ' values (:uid, :type, :object, :timestamp)');
+        $pdo = $db->prepare('insert into `notices`(`uid`,`type`,`object`,`timestamp`) values (:uid, :type, :object, :timestamp)');
         $pdo->execute([':uid' => $user['uid'], ':type' => $type, ':object' => $reply,
             ':timestamp' => ($time = time())]);
         if (!($id = $db->lastInsertId())) return false;
@@ -1170,8 +1154,7 @@ function Club_Notice_Expire($days = 30, $limit = 20, $interval = 600) {
     $limit = max(1, (int)$limit); $expire = $now - $days * 86400;
     if (!$cleanup) {
         $pdo = $db->prepare('select n.id, n.note, u.actor, u.inbox, u.shared_inbox from `notices` `n`'.
-            ' join `users` `u` on n.uid = u.uid where n.timestamp <= :timestamp'.
-            ' and n.note is not null and n.id > :cursor order by n.id limit '.$limit);
+            ' join `users` `u` on n.uid = u.uid where n.timestamp <= :timestamp and n.note is not null and n.id > :cursor order by n.id limit '.$limit);
         $pdo->execute([':timestamp' => $expire, ':cursor' => $cursor]);
         $notices = $pdo->fetchAll(PDO::FETCH_ASSOC);
         // DB 异常时不能先推进 cursor；外层立即重试还要看见同一批。
@@ -1182,8 +1165,7 @@ function Club_Notice_Expire($days = 30, $limit = 20, $interval = 600) {
         $cursor = 0; $cleanup = true;
     }
     // note 为空的行没发出去过，不用通知对端；删满一批时保持 cleanup phase 立即续跑。
-    $pdo = $db->prepare('delete from `notices` where `timestamp` <= :timestamp'.
-        ' and `note` is null order by `id` limit '.$limit);
+    $pdo = $db->prepare('delete from `notices` where `timestamp` <= :timestamp and `note` is null order by `id` limit '.$limit);
     $pdo->execute([':timestamp' => $expire]);
     $deleted = $pdo->rowCount(); Club_Stat('scheduler_db_ops');
     if ($deleted) Club_Monitor_Count('notices_deleted', $deleted);
@@ -1244,8 +1226,7 @@ function Club_Notice_Revoke($notices) {
 
 function Club_Task_Cleanup($age = 30, $limit = 200) {
     global $db; $limit = max(1, (int)$limit);
-    $pdo = $db->prepare('delete from `tasks` where `timestamp` <= :timestamp'.
-        ' and not exists (select 1 from `queues` where queues.tid = tasks.tid) limit '.$limit);
+    $pdo = $db->prepare('delete from `tasks` where `timestamp` <= :timestamp and not exists (select 1 from `queues` where queues.tid = tasks.tid) limit '.$limit);
     $pdo->execute([':timestamp' => time() - max(0, (int)$age)]);
     Club_Stat('scheduler_db_ops'); $rows = $pdo->rowCount();
     if ($rows) Club_Monitor_Count('tasks_deleted', $rows);
@@ -1365,8 +1346,7 @@ function Club_Inbox_Dispatch($input, $club = null) {
             // 投稿去过哪些群组只能在删之前问：users 一删，activities 跟着级联没了。
             // 每条投稿的群组集合各不相同，distinct 出来多少行由对端决定，整份拉进内存等于把销号请求的内存占用交给对方；按主键翻页归并，名单本身封顶在本站群组数
             $relay_clubs = []; $cursor = 0;
-            $pdo = $db->prepare('select `id`, `clubs` from `activities`'.
-                ' where `uid` = :uid and `id` > :cursor order by `id` limit 500');
+            $pdo = $db->prepare('select `id`, `clubs` from `activities` where `uid` = :uid and `id` > :cursor order by `id` limit 500');
             do {
                 $pdo->execute([':uid' => $uid, ':cursor' => $cursor]);
                 $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
@@ -1548,9 +1528,7 @@ function Club_Update_Process($jsonld, $input) {
     // 「这条帖子本站真的 Announce 过」加「发送者就是原作者」，两条合起来就是准入闸门：入站验签已经证明 HTTP 签名属于 $jsonld['actor']，这里再确认那个 actor 正是这条帖子的作者。
     // 少了它，任何人往 inbox 推一包活动都能改本站的记录、并被扇到全部关注者。注意这已经足够「我们自己」相信作者，所以本地落库照做；
     // LD 签名是给第三方验的，只决定能不能转发出去，不该拦住本地那一半——否则 GtS 一类不签名的实现连列表页都跟不上
-    $pdo = $db->prepare('select a.id, a.updated, a.clubs from `activities` `a`'.
-        ' join `users` `u` on a.uid = u.uid'.
-        ' where a.object = :object and a.type = :type and u.actor = :actor');
+    $pdo = $db->prepare('select a.id, a.updated, a.clubs from `activities` `a` join `users` `u` on a.uid = u.uid where a.object = :object and a.type = :type and u.actor = :actor');
     $pdo->execute([':object' => $id, ':type' => 'Create', ':actor' => $jsonld['actor']]);
     // 本站没转发过这条帖子，或者发送者不是原作者。后者在正常联邦里不该出现，值得看见
     if (!($activity = $pdo->fetch(PDO::FETCH_ASSOC)))
@@ -1577,8 +1555,7 @@ function Club_Update_Process($jsonld, $input) {
     return Club_DB_Transaction($what.' inbox', function () use ($db, $activity, $revision, $content,
         $summary, $clubs, $vars, $jsonld, $input, $id, $poll, $edit, $edited, $what, $column) {
         // 判重、本地副本和全部转发队列必须一起提交；回滚后同一包才能重新通过版本闸门。上面那次比较用的是事务外读到的 updated，中间可能已经有新版本落库：这条 CAS 在库里重比一次，输的那包连正文都写不到
-        $pdo = $db->prepare('update `activities` set `'.$column.'` = :revision'.
-            ' where `id` = :id and `'.$column.'` < :revision');
+        $pdo = $db->prepare('update `activities` set `'.$column.'` = :revision where `id` = :id and `'.$column.'` < :revision');
         $pdo->execute([':id' => $activity['id'], ':revision' => $revision]);
         if (!$pdo->rowCount())
             return Club_Inbox_Skip($what.' is a duplicate or older than what we relayed',
@@ -1586,15 +1563,13 @@ function Club_Update_Process($jsonld, $input) {
         // 计票包补正文得自己再 CAS 一次 updated：$edit 是事务外读的，中间可能已经有更新的编辑落库，无条件写就是拿旧正文盖掉新的，而 updated 还停在新版本，之后再没有包会来修这份不一致。
         // 推进 updated 不会让晚到的编辑包漏转发：这一包携带并转出去的就是同一份完整对象
         if ($poll && $edit) {
-            $pdo = $db->prepare('update `activities` set `updated` = :edited'.
-                ' where `id` = :id and `updated` < :edited');
+            $pdo = $db->prepare('update `activities` set `updated` = :edited where `id` = :id and `updated` < :edited');
             $pdo->execute([':id' => $activity['id'], ':edited' => $edited]);
             $edit = (bool)$pdo->rowCount();
         }
         // 只有票数变了的那种，本站根本不存票数，没有要写进本地副本的东西
         if ($edit) {
-            $pdo = $db->prepare('update `announces` set `summary` = :summary, `content` = :content'.
-                ' where `activity` = :activity');
+            $pdo = $db->prepare('update `announces` set `summary` = :summary, `content` = :content where `activity` = :activity');
             $pdo->execute([':activity' => $activity['id'], ':summary' => $summary, ':content' => $content]);
         }
         // 转不出去的原因 Club_Relay_Allow 已经记过一行，编辑还得说明本地副本仍然更新了
@@ -1673,8 +1648,7 @@ function Club_Tombstone_Process($jsonld, $input = null) {
         Club_Inbox_Skip('delete already processed', ['object' => $object, 'key' => $id]);
     else {
         // join users 是为了限定只有原作者能撤自己的帖，否则谁都能替别人删
-        $pdo = $db->prepare('select a.id, a.uid, a.clubs, a.object, a.timestamp from `activities` `a`'.
-            ' join `users` `u` on a.uid = u.uid where a.object = :object and u.actor = :actor');
+        $pdo = $db->prepare('select a.id, a.uid, a.clubs, a.object, a.timestamp from `activities` `a` join `users` `u` on a.uid = u.uid where a.object = :object and u.actor = :actor');
         $pdo->execute([':object' => $object, ':actor' => $jsonld['actor']]);
         if ($activity = $pdo->fetch(PDO::FETCH_ASSOC)) {
             return Club_DB_Transaction('delete inbox', function () use ($db, $base, $public_streams,
@@ -1952,13 +1926,11 @@ function Club_Resolver_Read($host) {
 // 锁和缓存分成两组列：抢到就先推 checked_at 的话，这次解析要是失败了，旧 IP 的 stale 窗口会跟着一起续命，那道 1 小时的安全边界就守不住了
 function Club_Resolver_Claim($host, $now, $token, $window = 30) {
     global $db;
-    $pdo = $db->prepare('update `dns` set `lock_token` = unhex(:token), `lock_until` = :until'.
-        ' where `host` = :host and `lock_until` <= :now');
+    $pdo = $db->prepare('update `dns` set `lock_token` = unhex(:token), `lock_until` = :until where `host` = :host and `lock_until` <= :now');
     $pdo->execute([':token' => $token, ':until' => $now + $window, ':host' => $host, ':now' => $now]);
     Club_Stat('scheduler_db_ops');
     if ($pdo->rowCount()) return true;
-    $pdo = $db->prepare('insert ignore into `dns`(`host`, `lock_until`, `lock_token`)'.
-        ' values (:host, :until, unhex(:token))');
+    $pdo = $db->prepare('insert ignore into `dns`(`host`, `lock_until`, `lock_token`) values (:host, :until, unhex(:token))');
     $pdo->execute([':host' => $host, ':until' => $now + $window, ':token' => $token]);
     Club_Stat('scheduler_db_ops');
     return (bool)$pdo->rowCount();
@@ -1967,9 +1939,7 @@ function Club_Resolver_Claim($host, $now, $token, $window = 30) {
 // 凭 token 提交解析结果。查询超过 30 秒锁就会被别人接走，那之后这份结果已经是旧的：条件不匹配时一行都不写，让调用方去读赢家提交的地址
 function Club_Resolver_Store($host, $token, $ips, $now) {
     global $db;
-    $pdo = $db->prepare('update `dns` set `ips` = :ips, `checked_at` = :now,'.
-        ' `lock_until` = 0, `lock_token` = null'.
-        ' where `host` = :host and `lock_token` = unhex(:token)');
+    $pdo = $db->prepare('update `dns` set `ips` = :ips, `checked_at` = :now, `lock_until` = 0, `lock_token` = null where `host` = :host and `lock_token` = unhex(:token)');
     $pdo->execute([':host' => $host, ':token' => $token, ':ips' => $ips, ':now' => $now]);
     Club_Stat('scheduler_db_ops');
     return (bool)$pdo->rowCount();
@@ -1978,8 +1948,7 @@ function Club_Resolver_Store($host, $token, $ips, $now) {
 // 查失败又不该写负缓存时放手。同样只按 token 放：锁已经易主的话，清掉的就是新 owner 的租约，两个进程会同时对一个 host 发起真实查询
 function Club_Resolver_Release($host, $token) {
     global $db;
-    $pdo = $db->prepare('update `dns` set `lock_until` = 0, `lock_token` = null'.
-        ' where `host` = :host and `lock_token` = unhex(:token)');
+    $pdo = $db->prepare('update `dns` set `lock_until` = 0, `lock_token` = null where `host` = :host and `lock_token` = unhex(:token)');
     $pdo->execute([':host' => $host, ':token' => $token]);
     Club_Stat('scheduler_db_ops');
     return (bool)$pdo->rowCount();
@@ -2008,8 +1977,7 @@ function Club_Resolver_Cleanup($ttl = 86400, $limit = 200) {
     global $db; $now = time(); $expire = $now - $ttl;
     // 候选只读不锁、删除按主键，理由见 Club_Lease_Pick：沿 checked_at 扫描的 DELETE 会跟 Store 先按 host 主键锁行、再回头改 checked_at 咬成一个环。
     // DELETE 没有半一致读，不匹配的行也要先锁上再判，光靠 lock_until 这个条件躲不开。而 Store 在投递路径上不走 Club_DB_Retry，被选成牺牲者就是一个 worker 停一秒
-    $pdo = $db->prepare('select `host` from `dns` where `lock_until` <= :now'.
-        ' and `checked_at` <= :expire limit '.(int)$limit);
+    $pdo = $db->prepare('select `host` from `dns` where `lock_until` <= :now and `checked_at` <= :expire limit '.(int)$limit);
     $pdo->execute([':now' => $now, ':expire' => $expire]);
     $hosts = $pdo->fetchAll(PDO::FETCH_COLUMN, 0);
     Club_Stat('scheduler_db_ops');
@@ -2020,8 +1988,7 @@ function Club_Resolver_Cleanup($ttl = 86400, $limit = 200) {
     // 一条一条按主键删。候选读到手就可能被重新锁上或刷新，两个条件在 delete 里原样重判一遍。
     // 不用 in 列表：那样虽然给的也是主键，但走不走 PRIMARY 仍由优化器的代价估算说了算，而这里要的恰恰是「一定不沿 checked_at 扫」这个保证，单值等值条件才给得起。
     // 顺带每条各自 autocommit，锁不会攒到整批结束
-    $pdo = $db->prepare('delete from `dns` where `host` = :host'.
-        ' and `lock_until` <= :now and `checked_at` <= :expire');
+    $pdo = $db->prepare('delete from `dns` where `host` = :host and `lock_until` <= :now and `checked_at` <= :expire');
     $rows = 0;
     foreach ($hosts as $host) {
         $pdo->execute([':host' => $host, ':now' => $now, ':expire' => $expire]);
@@ -2043,9 +2010,7 @@ function Club_Endpoint_Claim($now, $lease = 120) {
     global $db; $start = microtime(true);
     // 候选只读不锁，领取按主键 CAS，取锁顺序才跟 completion 一致，理由见 Club_Lease_Pick。
     // 只按 next_at 排序：lease_until 不是等值条件，再往 order by 里加列会跳过 schedule 索引的中间列，退化成 filesort，几万行 endpoint 时每轮都要排一遍
-    $pdo = $db->prepare('select `url` from `endpoints` where `next_at` is not null'.
-        ' and `next_at` <= :now and `retry_at` <= :now and `lease_until` <= :now'.
-        ' order by `next_at` limit 32');
+    $pdo = $db->prepare('select `url` from `endpoints` where `next_at` is not null and `next_at` <= :now and `retry_at` <= :now and `lease_until` <= :now order by `next_at` limit 32');
     $pdo->execute([':now' => $now]);
     $candidates = $pdo->fetchAll(PDO::FETCH_COLUMN, 0);
     Club_Stat('endpoint_claim_attempts'); Club_Stat('scheduler_db_ops');
@@ -2058,8 +2023,7 @@ function Club_Endpoint_Claim($now, $lease = 120) {
     // 候选是读到手就可能过期的，领取条件在 UPDATE 里原样重判一遍，由影响行数说了算
     $token = Club_Token();
     $claim = $db->prepare('update `endpoints` set `lease_token` = unhex(:token), `lease_until` = :until'.
-        ' where `url` = :url and `next_at` is not null and `next_at` <= :now'.
-        ' and `retry_at` <= :now and `lease_until` <= :now');
+        ' where `url` = :url and `next_at` is not null and `next_at` <= :now and `retry_at` <= :now and `lease_until` <= :now');
     $url = Club_Lease_Pick($candidates, $token, function ($url) use ($claim, $token, $now, $lease) {
         $claim->execute([':token' => $token, ':until' => $now + $lease, ':url' => $url, ':now' => $now]);
         Club_Stat('scheduler_db_ops');
@@ -2073,8 +2037,7 @@ function Club_Endpoint_Claim($now, $lease = 120) {
             ['candidates' => count($candidates)]);
         return null;
     }
-    $pdo = $db->prepare('select `url`, `next_at`, `retry_at`, `fails` from `endpoints`'.
-        ' where `lease_token` = unhex(:token)');
+    $pdo = $db->prepare('select `url`, `next_at`, `retry_at`, `fails` from `endpoints` where `lease_token` = unhex(:token)');
     $pdo->execute([':token' => $token]); Club_Stat('scheduler_db_ops');
     if (!($row = $pdo->fetch(PDO::FETCH_ASSOC))) {
         // 唯一索引里查不回自己刚写的 token，只可能是时钟或租约被人越过了
@@ -2092,14 +2055,9 @@ function Club_Endpoint_Claim($now, $lease = 120) {
 // 这条 endpoint 当前到期最早的一条投递
 function Club_Endpoint_Queue($url, $token, $now) {
     global $db;
-    $pdo = $db->prepare('select `q`.`id`, `q`.`tid`, `q`.`target`, `q`.`due_at`, `q`.`retries`,'.
-        ' `t`.`type`, `t`.`jsonld`, `c`.`name` as `club` from `endpoints` as `e`'.
-        ' join `queues` as `q` on q.target = e.url'.
-        ' left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid'.
-        ' where `e`.`url` = :url and `e`.`lease_token` = unhex(:token)'.
-        ' and `e`.`lease_until` > :now and `e`.`retry_at` <= :now and `q`.`due_at` <= :now'.
-        ' and not exists (select 1 from `blacklist` where `target` = :url)'.
-        ' order by `q`.`due_at`, `q`.`id` limit 1');
+    $pdo = $db->prepare('select `q`.`id`, `q`.`tid`, `q`.`target`, `q`.`due_at`, `q`.`retries`, `t`.`type`, `t`.`jsonld`, `c`.`name` as `club` from `endpoints` as `e`'.
+        ' join `queues` as `q` on q.target = e.url left join `tasks` as `t` on q.tid = t.tid left join `clubs` as `c` on t.cid = c.cid where `e`.`url` = :url and `e`.`lease_token` = unhex(:token)'.
+        ' and `e`.`lease_until` > :now and `e`.`retry_at` <= :now and `q`.`due_at` <= :now and not exists (select 1 from `blacklist` where `target` = :url) order by `q`.`due_at`, `q`.`id` limit 1');
     $pdo->execute([':url' => $url, ':token' => $token, ':now' => $now]); Club_Stat('scheduler_db_ops');
     if (!($row = $pdo->fetch(PDO::FETCH_ASSOC))) return null;
     Club_Stat_Max('queue_due_lag_s', max(0, $now - (int)$row['due_at']));
@@ -2110,20 +2068,15 @@ function Club_Endpoint_Queue($url, $token, $now) {
 // 顺带把出网前提一次查清 —— 退避、queue 还在不在、有没有进黑名单，任何一条不成立都不能发
 function Club_Endpoint_Authorize($url, $token, $next, $queue, $lease = 120) {
     global $db; $now = time();
-    $pdo = $db->prepare('update `endpoints` set `lease_token` = unhex(:next), `lease_until` = :until'.
-        ' where `url` = :url and `lease_token` = unhex(:token) and `retry_at` <= :now'.
-        ' and exists (select 1 from `queues` where `id` = :queue and `target` = :url and `due_at` <= :now)'.
-        ' and not exists (select 1 from `blacklist` where `target` = :url)');
+    $pdo = $db->prepare('update `endpoints` set `lease_token` = unhex(:next), `lease_until` = :until where `url` = :url and `lease_token` = unhex(:token) and `retry_at` <= :now'.
+        ' and exists (select 1 from `queues` where `id` = :queue and `target` = :url and `due_at` <= :now) and not exists (select 1 from `blacklist` where `target` = :url)');
     $pdo->execute([':url' => $url, ':token' => $token, ':next' => $next,
         ':queue' => $queue, ':now' => $now, ':until' => $now + $lease]);
     Club_Stat('scheduler_db_ops');
     if ($pdo->rowCount()) return true;
     // 拦下来的原因决定了后面该不该重排这条 endpoint，多查一次值得
-    $pdo = $db->prepare('select (select count(*) from `endpoints` where `url` = :url'.
-        ' and `lease_token` = unhex(:token)) as `owned`,'.
-        ' (select count(*) from `blacklist` where `target` = :url) as `blocked`,'.
-        ' (select count(*) from `queues` where `id` = :queue and `target` = :url'.
-        ' and `due_at` <= :now) as `queued`');
+    $pdo = $db->prepare('select (select count(*) from `endpoints` where `url` = :url and `lease_token` = unhex(:token)) as `owned`,'.
+        ' (select count(*) from `blacklist` where `target` = :url) as `blocked`, (select count(*) from `queues` where `id` = :queue and `target` = :url and `due_at` <= :now) as `queued`');
     $pdo->execute([':url' => $url, ':token' => $token, ':queue' => $queue, ':now' => $now]);
     $why = $pdo->fetch(PDO::FETCH_ASSOC) ?: [];
     Club_Stat('renew_failed'); Club_Stat('scheduler_db_ops');
@@ -2152,10 +2105,8 @@ function Club_Endpoint_Reschedule($url, $token, $retry_at) {
     global $db; $now = time();
     $next = Club_Endpoint_Desired($url, $retry_at);
     // idle_since 只在「变空」的那一次落时刻，已经空着的保持原值：每次重排都刷新的话空置时长永远回到零，回收的宽限期就再也到不了
-    $pdo = $db->prepare('update `endpoints` set `next_at` = :next, `lease_token` = null,'.
-        ' `lease_until` = 0, `idle_since` = if(:next is null,'.
-        ' if(`idle_since` > 0, `idle_since`, :now), 0)'.
-        ' where `url` = :url and `lease_token` = unhex(:token)');
+    $pdo = $db->prepare('update `endpoints` set `next_at` = :next, `lease_token` = null, `lease_until` = 0, `idle_since` = if(:next is null,'.
+        ' if(`idle_since` > 0, `idle_since`, :now), 0) where `url` = :url and `lease_token` = unhex(:token)');
     $pdo->execute([':url' => $url, ':token' => $token, ':next' => $next, ':now' => $now]);
     Club_Stat('scheduler_db_ops');
     return (bool)$pdo->rowCount();
@@ -2166,8 +2117,7 @@ function Club_Endpoint_Release($url, $token) {
     global $db; $released = false;
     try {
         $db->beginTransaction();
-        $pdo = $db->prepare('select `retry_at` from `endpoints` where `url` = :url'.
-            ' and `lease_token` = unhex(:token) for update');
+        $pdo = $db->prepare('select `retry_at` from `endpoints` where `url` = :url and `lease_token` = unhex(:token) for update');
         $pdo->execute([':url' => $url, ':token' => $token]);
         if ($row = $pdo->fetch(PDO::FETCH_ASSOC))
             $released = Club_Endpoint_Reschedule($url, $token, (int)$row['retry_at']);
@@ -2200,8 +2150,7 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
     global $db, $curl; $now = time(); $state = ''; $retry_at = 0; $fails = 0; $age = 0;
     try {
         $db->beginTransaction();
-        $pdo = $db->prepare('select `fails`, `fail_since`, `retry_at` from `endpoints`'.
-            ' where `url` = :url and `lease_token` = unhex(:token) for update');
+        $pdo = $db->prepare('select `fails`, `fail_since`, `retry_at` from `endpoints` where `url` = :url and `lease_token` = unhex(:token) for update');
         $pdo->execute([':url' => $url, ':token' => $token]); Club_Stat('scheduler_db_ops');
         if (!($row = $pdo->fetch(PDO::FETCH_ASSOC))) {
             $db->rollback(); Club_Stat('stale_tokens');
@@ -2215,8 +2164,7 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
         $pdo = $db->prepare('select `target` from `blacklist` where `target` = :url for update');
         $pdo->execute([':url' => $url]); Club_Stat('scheduler_db_ops');
         // queue 也属于 completion 的授权边界。选中之后它可能被维护路径删除；只凭 worker 手上的旧数组继续记失败，会把另一个 endpoint 的当前状态一起推进。
-        $pdo = $db->prepare('select `tid`, `retries` from `queues`'.
-            ' where `id` = :id and `target` = :url for update');
+        $pdo = $db->prepare('select `tid`, `retries` from `queues` where `id` = :id and `target` = :url for update');
         $pdo->execute([':id' => $task['id'], ':url' => $url]); Club_Stat('scheduler_db_ops');
         if (!($queue = $pdo->fetch(PDO::FETCH_ASSOC))) {
             Club_Endpoint_Reschedule($url, $token, $retry_at);
@@ -2233,8 +2181,7 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
             case 'rejected':
                 Club_Queue_Delete($task['id'], $task['tid']);
                 if ($fails || $since || $retry_at) {
-                    $pdo = $db->prepare('update `endpoints` set `fails` = 0, `fail_since` = 0,'.
-                        ' `retry_at` = 0 where `url` = :url and `lease_token` = unhex(:token)');
+                    $pdo = $db->prepare('update `endpoints` set `fails` = 0, `fail_since` = 0, `retry_at` = 0 where `url` = :url and `lease_token` = unhex(:token)');
                     $pdo->execute([':url' => $url, ':token' => $token]);
                     $age = $since ? $now - $since : 0; $retry_at = 0; $state = 'recovered';
                 } break;
@@ -2247,8 +2194,7 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
                 // 同 target 的其他 queue 立刻重判也是同一个结论，整条 endpoint 一起推
                 if ($retry_at < $now + 300) {
                     $retry_at = $now + 300;
-                    $pdo = $db->prepare('update `endpoints` set `retry_at` = :retry_at'.
-                        ' where `url` = :url and `lease_token` = unhex(:token)');
+                    $pdo = $db->prepare('update `endpoints` set `retry_at` = :retry_at where `url` = :url and `lease_token` = unhex(:token)');
                     $pdo->execute([':url' => $url, ':token' => $token, ':retry_at' => $retry_at]);
                 } $state = 'deferred'; break;
             default:
@@ -2257,8 +2203,7 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
                 list($wait, $drop) = Club_Endpoint_Backoff($result, $age, $fails);
                 // 不抖的话一家恢复的那一秒几十个进程会一起扑上去，对端更容易限流，然后所有行齐步走向放弃
                 $retry_at = $now + $wait + mt_rand(0, (int)($wait / 4));
-                $pdo = $db->prepare('update `endpoints` set `fails` = :fails, `fail_since` = :since,'.
-                    ' `retry_at` = :retry_at where `url` = :url and `lease_token` = unhex(:token)');
+                $pdo = $db->prepare('update `endpoints` set `fails` = :fails, `fail_since` = :since, `retry_at` = :retry_at where `url` = :url and `lease_token` = unhex(:token)');
                 $pdo->execute([':url' => $url, ':token' => $token, ':fails' => $fails,
                     ':since' => $since, ':retry_at' => $retry_at]);
                 // 单条 retries 每个故障段只加一次：连续宕机由 endpoint 的时长阶梯管，期间任何一条投成功都会清掉故障段，下一次失败才再算这条一笔
@@ -2323,8 +2268,7 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
 function Club_Blacklist_Add($url, $now) {
     global $db;
     $check = $now + mt_rand(0, 86400);
-    $pdo = $db->prepare('insert ignore into `blacklist`(`target`,`created_at`,`check_at`,`checks`)'.
-        ' values (:target, :now, :check, 0)');
+    $pdo = $db->prepare('insert ignore into `blacklist`(`target`,`created_at`,`check_at`,`checks`) values (:target, :now, :check, 0)');
     $pdo->execute([':target' => $url, ':now' => $now, ':check' => $check]);
     Club_Stat('scheduler_db_ops');
     return (bool)$pdo->rowCount();
@@ -2334,16 +2278,14 @@ function Club_Blacklist_Add($url, $now) {
 function Club_Blacklist_Claim($now, $lease = 120) {
     global $db;
     // 跟 endpoint 领取同一套取锁顺序：候选只读不锁，领取按主键 CAS。沿 schedule 扫描会跟 Result、Cleanup 那些先按主键锁行的路径咬成 1213，理由见 Club_Lease_Pick
-    $pdo = $db->prepare('select `target` from `blacklist` where `restore_pending_at` is null'.
-        ' and `check_at` <= :now and `lease_until` <= :now order by `check_at` limit 32');
+    $pdo = $db->prepare('select `target` from `blacklist` where `restore_pending_at` is null and `check_at` <= :now and `lease_until` <= :now order by `check_at` limit 32');
     $pdo->execute([':now' => $now]);
     $candidates = $pdo->fetchAll(PDO::FETCH_COLUMN, 0);
     Club_Stat('scheduler_db_ops');
     if (!$candidates) return null;
     $token = Club_Token();
     $claim = $db->prepare('update `blacklist` set `lease_token` = unhex(:token), `lease_until` = :until'.
-        ' where `target` = :target and `restore_pending_at` is null'.
-        ' and `check_at` <= :now and `lease_until` <= :now');
+        ' where `target` = :target and `restore_pending_at` is null and `check_at` <= :now and `lease_until` <= :now');
     $target = Club_Lease_Pick($candidates, $token, function ($target) use ($claim, $token, $now, $lease) {
         $claim->execute([':target' => $target, ':token' => $token,
             ':until' => $now + $lease, ':now' => $now]);
@@ -2355,8 +2297,7 @@ function Club_Blacklist_Claim($now, $lease = 120) {
             ['candidates' => count($candidates)]);
         return null;
     }
-    $pdo = $db->prepare('select `target`, `checks`, `check_at` from `blacklist`'.
-        ' where `lease_token` = unhex(:token)');
+    $pdo = $db->prepare('select `target`, `checks`, `check_at` from `blacklist` where `lease_token` = unhex(:token)');
     $pdo->execute([':token' => $token]); Club_Stat('scheduler_db_ops');
     if (!($row = $pdo->fetch(PDO::FETCH_ASSOC))) {
         Club_Log_Event('warning', 'blacklist claim lost before read', ['token' => $token]);
@@ -2371,9 +2312,7 @@ function Club_Blacklist_Claim($now, $lease = 120) {
 // 探活出网前的最后一道闸，跟投递用同一套：租约到期后仍以 token CAS 判定所有权，未被接管可原子续租，已被接管则 token 不同。顺带确认这一行还没被别人恢复掉。
 function Club_Blacklist_Authorize($target, $token, $next, $lease = 120) {
     global $db; $now = time();
-    $pdo = $db->prepare('update `blacklist` set `lease_token` = unhex(:next), `lease_until` = :until'.
-        ' where `target` = :target and `lease_token` = unhex(:token)'.
-        ' and `restore_pending_at` is null');
+    $pdo = $db->prepare('update `blacklist` set `lease_token` = unhex(:next), `lease_until` = :until where `target` = :target and `lease_token` = unhex(:token) and `restore_pending_at` is null');
     $pdo->execute([':target' => $target, ':token' => $token, ':next' => $next, ':until' => $now + $lease]);
     Club_Stat('scheduler_db_ops');
     if ($pdo->rowCount()) return true;
@@ -2386,9 +2325,7 @@ function Club_Blacklist_Authorize($target, $token, $next, $lease = 120) {
 // resolver 没给出结果就退回来。这一轮既没问过 DNS 也没问过对端，checks 不能加，check_at 也只短推一会儿：本站 DNS 抖一下不该把恢复推迟一整天
 function Club_Blacklist_Defer($target, $token, $reason) {
     global $db; $check = time() + 300 + mt_rand(0, 75);
-    $pdo = $db->prepare('update `blacklist` set `check_at` = :check,'.
-        ' `lease_token` = null, `lease_until` = 0'.
-        ' where `target` = :target and `lease_token` = unhex(:token)');
+    $pdo = $db->prepare('update `blacklist` set `check_at` = :check, `lease_token` = null, `lease_until` = 0 where `target` = :target and `lease_token` = unhex(:token)');
     $pdo->execute([':target' => $target, ':token' => $token, ':check' => $check]);
     Club_Stat('scheduler_db_ops');
     if (!$pdo->rowCount()) Club_Stat('stale_tokens');
@@ -2406,8 +2343,7 @@ function Club_Blacklist_Result($target, $token, $alive) {
         $pdo = $db->prepare('select `url` from `endpoints` where `url` = :target for update');
         $pdo->execute([':target' => $target]);
         $endpoint = (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
-        $pdo = $db->prepare('select `checks` from `blacklist` where `target` = :target'.
-            ' and `lease_token` = unhex(:token) for update');
+        $pdo = $db->prepare('select `checks` from `blacklist` where `target` = :target and `lease_token` = unhex(:token) for update');
         $pdo->execute([':target' => $target, ':token' => $token]);
         if (!($row = $pdo->fetch(PDO::FETCH_ASSOC))) {
             $db->rollback(); Club_Stat('stale_tokens');
@@ -2418,9 +2354,7 @@ function Club_Blacklist_Result($target, $token, $alive) {
         $checks = (int)$row['checks'];
         if (!$alive) {
             $check = $now + 86400 + mt_rand(0, 21600); $checks++;
-            $pdo = $db->prepare('update `blacklist` set `checks` = :checks, `check_at` = :check,'.
-                ' `lease_token` = null, `lease_until` = 0'.
-                ' where `target` = :target and `lease_token` = unhex(:token)');
+            $pdo = $db->prepare('update `blacklist` set `checks` = :checks, `check_at` = :check, `lease_token` = null, `lease_until` = 0 where `target` = :target and `lease_token` = unhex(:token)');
             $pdo->execute([':target' => $target, ':token' => $token,
                 ':checks' => $checks, ':check' => $check]);
             $state = 'dead';
@@ -2429,16 +2363,13 @@ function Club_Blacklist_Result($target, $token, $alive) {
             $pdo->execute([':target' => $target]);
             if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) {
                 // 活过来了但历史 backlog 还在。先只记状态：blacklist 行留着继续挡住入队和出网，等维护队列分批清干净再真正解禁，不然几千条陈年活动会一起复活
-                $pdo = $db->prepare('update `blacklist` set `restore_pending_at` = :now,'.
-                    ' `lease_token` = null, `lease_until` = 0'.
-                    ' where `target` = :target and `lease_token` = unhex(:token)');
+                $pdo = $db->prepare('update `blacklist` set `restore_pending_at` = :now, `lease_token` = null, `lease_until` = 0 where `target` = :target and `lease_token` = unhex(:token)');
                 $pdo->execute([':target' => $target, ':token' => $token, ':now' => $now]);
                 $state = 'pending';
             } else {
                 $pdo = $db->prepare('delete from `endpoints` where `url` = :target');
                 $pdo->execute([':target' => $target]);
-                $pdo = $db->prepare('delete from `blacklist` where `target` = :target'.
-                    ' and `lease_token` = unhex(:token)');
+                $pdo = $db->prepare('delete from `blacklist` where `target` = :target and `lease_token` = unhex(:token)');
                 $pdo->execute([':target' => $target, ':token' => $token]);
                 $state = 'restored';
             }
@@ -2465,10 +2396,8 @@ function Club_Blacklist_Result($target, $token, $alive) {
 function Club_Blacklist_Cleanup($limit = 500) {
     global $db; $now = time(); $rows = 0; $state = '';
     // 已确认恢复的排在前面，而且哪怕它的 queues 早就清光了也要选中：最后一步删 blacklist 行只在这条路径上，漏掉它这个 target 就永远解禁不了
-    $pdo = $db->query('select `target`, `restore_pending_at` from `blacklist`'.
-        ' where `restore_pending_at` is not null'.
-        ' or exists (select 1 from `queues` where `queues`.`target` = `blacklist`.`target`)'.
-        ' order by `restore_pending_at` is null, `created_at` limit 1');
+    $pdo = $db->query('select `target`, `restore_pending_at` from `blacklist` where `restore_pending_at` is not null'.
+        ' or exists (select 1 from `queues` where `queues`.`target` = `blacklist`.`target`) order by `restore_pending_at` is null, `created_at` limit 1');
     Club_Stat('scheduler_db_ops');
     if (!($row = $pdo->fetch(PDO::FETCH_ASSOC))) return 0;
     $target = $row['target'];
@@ -2534,10 +2463,8 @@ function Club_Reconcile_Step($limit = 200) {
     $now = time(); $seen = 0; $repairs = 0; $pruned = 0;
     if ($phase === 0) {
         // 等着被清理的黑名单 queue 不能算数，否则刚拉黑的 endpoint 会被重新排上
-        $pdo = $db->prepare('select `q`.`target` from `queues` `q`'.
-            ' left join `blacklist` `b` on `q`.`target` = `b`.`target`'.
-            ' where `b`.`target` is null and `q`.`target` > :cursor'.
-            ' group by `q`.`target` order by `q`.`target` limit '.(int)$limit);
+        $pdo = $db->prepare('select `q`.`target` from `queues` `q` left join `blacklist` `b` on `q`.`target` = `b`.`target`'.
+            ' where `b`.`target` is null and `q`.`target` > :cursor group by `q`.`target` order by `q`.`target` limit '.(int)$limit);
         $pdo->execute([':cursor' => $cursor]);
         foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $target) {
             $cursor = $target; $seen++;
@@ -2545,8 +2472,7 @@ function Club_Reconcile_Step($limit = 200) {
         }
     } elseif ($phase === 1) {
         // 每条 blacklist 都必须有一行 next_at 为空的控制行，探活和最终解禁都依赖它
-        $pdo = $db->prepare('select `target` from `blacklist` where `target` > :cursor'.
-            ' order by `target` limit '.(int)$limit);
+        $pdo = $db->prepare('select `target` from `blacklist` where `target` > :cursor order by `target` limit '.(int)$limit);
         $pdo->execute([':cursor' => $cursor]);
         foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $target) {
             $cursor = $target; $seen++;
@@ -2554,8 +2480,7 @@ function Club_Reconcile_Step($limit = 200) {
         }
     } else {
         // next_at 本身可能损坏成非空，不能只扫 NULL；锁行后以 queue/blacklist 重判。
-        $pdo = $db->prepare('select `url` from `endpoints` where `url` > :cursor'.
-            ' and `lease_until` <= :now order by `url` limit '.(int)$limit);
+        $pdo = $db->prepare('select `url` from `endpoints` where `url` > :cursor and `lease_until` <= :now order by `url` limit '.(int)$limit);
         $pdo->execute([':cursor' => $cursor, ':now' => $now]);
         foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $url) {
             $cursor = $url; $seen++;
@@ -2579,8 +2504,7 @@ function Club_Reconcile_Endpoint($url, $now) {
     global $db; $repaired = false; $next = null;
     // 先无锁看一眼。直接 for update 的话，每一轮对账都要在每一条 endpoint 上排到正在投递的那个完成事务后面去等锁，等到了却发现租约还在、什么都不用做；
     // 稳态下绝大多数行本来就是对的，脏读只用来跳过，进了事务照样从头重判
-    $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until` from `endpoints`'.
-        ' where `url` = :url');
+    $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until` from `endpoints` where `url` = :url');
     $pdo->execute([':url' => $url]); Club_Stat('scheduler_db_ops');
     if (($peek = $pdo->fetch(PDO::FETCH_ASSOC)) !== false) {
         if ((int)$peek['lease_until'] > $now) return false;
@@ -2591,20 +2515,17 @@ function Club_Reconcile_Endpoint($url, $now) {
     }
     try {
         $db->beginTransaction();
-        $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until`'.
-            ' from `endpoints` where `url` = :url for update');
+        $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until` from `endpoints` where `url` = :url for update');
         $pdo->execute([':url' => $url]);
         // 缺行才补，而且补在事务里：并发入队已经建好这一行时 insert ignore 不写，重新 select 会等它提交后拿到它的版本，不会把它的故障状态盖掉
         if (($row = $pdo->fetch(PDO::FETCH_ASSOC)) === false) {
-            $pdo = $db->prepare('insert ignore into `endpoints`(`url`, `next_at`, `idle_since`)'.
-                ' values (:url, null, :now)');
+            $pdo = $db->prepare('insert ignore into `endpoints`(`url`, `next_at`, `idle_since`) values (:url, null, :now)');
             $pdo->execute([':url' => $url, ':now' => $now]);
             // 健康历史是 endpoint 自己的状态，queues 里恢复不出来，补出来的是有损的
             if ($pdo->rowCount())
                 Club_Log_Event('warning', 'endpoint control row rebuilt with healthy defaults',
                     ['endpoint' => $url]);
-            $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until`'.
-                ' from `endpoints` where `url` = :url for update');
+            $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until` from `endpoints` where `url` = :url for update');
             $pdo->execute([':url' => $url]);
             $row = $pdo->fetch(PDO::FETCH_ASSOC);
         }
@@ -2614,8 +2535,7 @@ function Club_Reconcile_Endpoint($url, $now) {
             $current = isset($row['next_at']) ? (int)$row['next_at'] : null;
             if ($next !== $current || ((int)$row['idle_since'] > 0) !== !isset($next)) {
                 $pdo = $db->prepare('update `endpoints` set `next_at` = :next,'.
-                    ' `idle_since` = if(:next is null, if(`idle_since` > 0, `idle_since`, :now), 0)'.
-                    ' where `url` = :url and `lease_until` <= :now');
+                    ' `idle_since` = if(:next is null, if(`idle_since` > 0, `idle_since`, :now), 0) where `url` = :url and `lease_until` <= :now');
                 $pdo->execute([':url' => $url, ':next' => $next, ':now' => $now]);
                 $repaired = (bool)$pdo->rowCount();
             }
@@ -2641,11 +2561,8 @@ function Club_Reconcile_Endpoint($url, $now) {
 function Club_Endpoint_Prune($url, $now, $idle = 604800) {
     global $db; $pruned = false; $idled = false; $before = $now - $idle;
     // 跟对账同一个道理：能删的是少数，不先筛一遍就是每一行都开一次写锁事务，把维护 slot 一条条押在投递的完成事务后面
-    $pdo = $db->prepare('select `e`.`lease_until` as `lease`, `e`.`idle_since` as `idle`,'.
-        ' `e`.`retry_at` as `retry`,'.
-        ' (select count(*) from `queues` where `target` = :url) as `queued`,'.
-        ' (select count(*) from `blacklist` where `target` = :url) as `blocked`'.
-        ' from `endpoints` as `e` where `e`.`url` = :url');
+    $pdo = $db->prepare('select `e`.`lease_until` as `lease`, `e`.`idle_since` as `idle`, `e`.`retry_at` as `retry`, (select count(*) from `queues` where `target` = :url) as `queued`,'.
+        ' (select count(*) from `blacklist` where `target` = :url) as `blocked` from `endpoints` as `e` where `e`.`url` = :url');
     $pdo->execute([':url' => $url]); Club_Stat('scheduler_db_ops');
     $peek = $pdo->fetch(PDO::FETCH_ASSOC) ?: [];
     if (!isset($peek['lease']) || (int)$peek['lease'] > $now
@@ -2654,25 +2571,20 @@ function Club_Endpoint_Prune($url, $now, $idle = 604800) {
     if ((int)$peek['idle'] && ((int)$peek['idle'] > $before || (int)$peek['retry'] > $now)) return false;
     try {
         $db->beginTransaction();
-        $pdo = $db->prepare('select `idle_since`, `retry_at`, `lease_until` from `endpoints`'.
-            ' where `url` = :url for update');
+        $pdo = $db->prepare('select `idle_since`, `retry_at`, `lease_until` from `endpoints` where `url` = :url for update');
         $pdo->execute([':url' => $url]);
         $row = $pdo->fetch(PDO::FETCH_ASSOC);
         if ($row !== false && (int)$row['lease_until'] <= $now) {
-            $pdo = $db->prepare('select (select count(*) from `queues` where `target` = :url) as `queued`,'.
-                ' (select count(*) from `blacklist` where `target` = :url) as `blocked`');
+            $pdo = $db->prepare('select (select count(*) from `queues` where `target` = :url) as `queued`, (select count(*) from `blacklist` where `target` = :url) as `blocked`');
             $pdo->execute([':url' => $url]);
             $keep = $pdo->fetch(PDO::FETCH_ASSOC);
             if (!(int)$keep['queued'] && !(int)$keep['blocked']) {
                 if (!(int)$row['idle_since']) {
-                    $pdo = $db->prepare('update `endpoints` set `next_at` = null, `idle_since` = :now'.
-                        ' where `url` = :url and `lease_until` <= :now and `idle_since` = 0');
+                    $pdo = $db->prepare('update `endpoints` set `next_at` = null, `idle_since` = :now where `url` = :url and `lease_until` <= :now and `idle_since` = 0');
                     $pdo->execute([':url' => $url, ':now' => $now]);
                     $idled = (bool)$pdo->rowCount();
                 } elseif ((int)$row['idle_since'] <= $before && (int)$row['retry_at'] <= $now) {
-                    $pdo = $db->prepare('delete from `endpoints` where `url` = :url'.
-                        ' and `lease_until` <= :now and `retry_at` <= :now'.
-                        ' and `idle_since` > 0 and `idle_since` <= :before');
+                    $pdo = $db->prepare('delete from `endpoints` where `url` = :url and `lease_until` <= :now and `retry_at` <= :now and `idle_since` > 0 and `idle_since` <= :before');
                     $pdo->execute([':url' => $url, ':now' => $now, ':before' => $before]);
                     $pruned = (bool)$pdo->rowCount();
                 }
@@ -2710,26 +2622,18 @@ function Club_Monitor_Snapshot($interval = 300) {
     $window = $now - $last;
     // total 含着待回收的空行，单看它读不出「有多少 endpoint 在排队投递」。idle 减去同一行日志里的 blacklist 就是等着被回收的那部分，卡住了它只会单调涨；
     // due/leased/oldest 都带 next_at 非空或租约条件，空行本来就进不去
-    $pdo = $db->prepare('select count(*) as `total`,'.
-        ' sum(`next_at` is not null and `next_at` <= :now and `retry_at` <= :now'.
-        ' and `lease_until` <= :now) as `due`, sum(`lease_until` > :now) as `leased`,'.
-        ' sum(`idle_since` > 0) as `idle`,'.
-        ' min(if(`next_at` is not null and `lease_until` <= :now, `next_at`, null)) as `oldest`'.
-        ' from `endpoints`');
+    $pdo = $db->prepare('select count(*) as `total`, sum(`next_at` is not null and `next_at` <= :now and `retry_at` <= :now'.
+        ' and `lease_until` <= :now) as `due`, sum(`lease_until` > :now) as `leased`, sum(`idle_since` > 0) as `idle`,'.
+        ' min(if(`next_at` is not null and `lease_until` <= :now, `next_at`, null)) as `oldest` from `endpoints`');
     $pdo->execute([':now' => $now]);
     $endpoints = $pdo->fetch(PDO::FETCH_ASSOC) ?: [];
-    $pdo = $db->prepare('select count(*) as `total`,'.
-        ' sum(`restore_pending_at` is null and `check_at` <= :now) as `due`,'.
-        ' sum(`restore_pending_at` is null and `check_at` <= :overdue) as `overdue`,'.
-        ' sum(`restore_pending_at` is not null) as `pending`,'.
-        ' min(if(`restore_pending_at` is null, `check_at`, null)) as `oldest` from `blacklist`');
+    $pdo = $db->prepare('select count(*) as `total`, sum(`restore_pending_at` is null and `check_at` <= :now) as `due`, sum(`restore_pending_at` is null and `check_at` <= :overdue) as `overdue`,'.
+        ' sum(`restore_pending_at` is not null) as `pending`, min(if(`restore_pending_at` is null, `check_at`, null)) as `oldest` from `blacklist`');
     $pdo->execute([':now' => $now, ':overdue' => $now - 3600]);
     $blacklist = $pdo->fetch(PDO::FETCH_ASSOC) ?: [];
-    $pdo = $db->query('select count(*) from `queues` `q`'.
-        ' join `blacklist` `b` on `q`.`target` = `b`.`target`');
+    $pdo = $db->query('select count(*) from `queues` `q` join `blacklist` `b` on `q`.`target` = `b`.`target`');
     $backlog = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
-    $pdo = $db->prepare('select count(*) as `total`, sum(length(`ips`) > 0) as `positive`,'.
-        ' sum(`lock_until` > :now) as `locked` from `dns`');
+    $pdo = $db->prepare('select count(*) as `total`, sum(length(`ips`) > 0) as `positive`, sum(`lock_until` > :now) as `locked` from `dns`');
     $pdo->execute([':now' => $now]);
     $dns = $pdo->fetch(PDO::FETCH_ASSOC) ?: [];
     Club_Stat('scheduler_db_ops', 4);

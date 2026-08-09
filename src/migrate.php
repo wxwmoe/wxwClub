@@ -87,8 +87,7 @@ function Club_Migrate_Ensure_Meta() {
 function Club_Migrate_State($name, $set = null) {
     global $db;
     if (isset($set)) {
-        $pdo = $db->prepare('insert into `meta`(`name`,`value`) values (:name, :value)'.
-            ' on duplicate key update `value` = :value');
+        $pdo = $db->prepare('insert into `meta`(`name`,`value`) values (:name, :value) on duplicate key update `value` = :value');
         $pdo->execute([':name' => $name, ':value' => $set]);
         return $set;
     }
@@ -99,8 +98,7 @@ function Club_Migrate_State($name, $set = null) {
 
 function Club_Schema_Table($table) {
     global $db;
-    $pdo = $db->prepare('select 1 from `information_schema`.`tables`'.
-        ' where `table_schema` = database() and `table_name` = :table');
+    $pdo = $db->prepare('select 1 from `information_schema`.`tables` where `table_schema` = database() and `table_name` = :table');
     $pdo->execute([':table' => $table]);
     return (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
 }
@@ -108,8 +106,7 @@ function Club_Schema_Table($table) {
 // 列存不存在，以及它现在是什么类型和排序规则。URL 那几列改没改 collation 就是「规范化做过没有」的判据，旧库的 varchar(100) 也要靠 type 认出来
 function Club_Schema_Column($table, $column) {
     global $db;
-    $pdo = $db->prepare('select `column_type`, `collation_name`, `is_nullable`,'.
-        ' `column_default`, `extra` from `information_schema`.`columns`'.
+    $pdo = $db->prepare('select `column_type`, `collation_name`, `is_nullable`, `column_default`, `extra` from `information_schema`.`columns`'.
         ' where `table_schema` = database() and `table_name` = :table and `column_name` = :column');
     $pdo->execute([':table' => $table, ':column' => $column]);
     $row = $pdo->fetch(PDO::FETCH_NUM);
@@ -125,8 +122,7 @@ function Club_Schema_Column($table, $column) {
 function Club_Schema_Index($table, $index) {
     global $db;
     $pdo = $db->prepare('select `non_unique`, `column_name` from `information_schema`.`statistics`'.
-        ' where `table_schema` = database() and `table_name` = :table and `index_name` = :index'.
-        ' order by `seq_in_index`');
+        ' where `table_schema` = database() and `table_name` = :table and `index_name` = :index order by `seq_in_index`');
     $pdo->execute([':table' => $table, ':index' => $index]);
     $rows = $pdo->fetchAll(PDO::FETCH_NUM);
     if (!$rows) return false;
@@ -145,15 +141,10 @@ function Club_Schema_Foreign($table, $column) {
 
 function Club_Schema_Foreign_Info($table, $column) {
     global $db;
-    $pdo = $db->prepare('select `k`.`constraint_name`, `k`.`referenced_table_name`,'.
-        ' `k`.`referenced_column_name`, `r`.`update_rule`, `r`.`delete_rule`'.
-        ' from `information_schema`.`key_column_usage` `k`'.
-        ' join `information_schema`.`referential_constraints` `r`'.
-        ' on `r`.`constraint_schema` = `k`.`constraint_schema`'.
-        ' and `r`.`table_name` = `k`.`table_name`'.
-        ' and `r`.`constraint_name` = `k`.`constraint_name`'.
-        ' where `k`.`table_schema` = database() and `k`.`table_name` = :table'.
-        ' and `k`.`column_name` = :column and `k`.`referenced_table_name` is not null');
+    $pdo = $db->prepare('select `k`.`constraint_name`, `k`.`referenced_table_name`, `k`.`referenced_column_name`, `r`.`update_rule`, `r`.`delete_rule`'.
+        ' from `information_schema`.`key_column_usage` `k` join `information_schema`.`referential_constraints` `r`'.
+        ' on `r`.`constraint_schema` = `k`.`constraint_schema` and `r`.`table_name` = `k`.`table_name` and `r`.`constraint_name` = `k`.`constraint_name`'.
+        ' where `k`.`table_schema` = database() and `k`.`table_name` = :table and `k`.`column_name` = :column and `k`.`referenced_table_name` is not null');
     $pdo->execute([':table' => $table, ':column' => $column]);
     $rows = [];
     while ($row = $pdo->fetch(PDO::FETCH_NUM)) $rows[] = [
@@ -165,10 +156,8 @@ function Club_Schema_Foreign_Info($table, $column) {
 
 function Club_Schema_Referenced_By($table, $column) {
     global $db;
-    $pdo = $db->prepare('select `table_name`, `column_name`, `constraint_name`'.
-        ' from `information_schema`.`key_column_usage`'.
-        ' where `referenced_table_schema` = database() and `referenced_table_name` = :table'.
-        ' and `referenced_column_name` = :column');
+    $pdo = $db->prepare('select `table_name`, `column_name`, `constraint_name` from `information_schema`.`key_column_usage`'.
+        ' where `referenced_table_schema` = database() and `referenced_table_name` = :table and `referenced_column_name` = :column');
     $pdo->execute([':table' => $table, ':column' => $column]);
     $rows = [];
     while ($row = $pdo->fetch(PDO::FETCH_NUM))
@@ -272,10 +261,8 @@ function Club_Migrate_Ensure_Foreign($table, $column, $name, $referencedTable,
     if (count($actual) === 1 && $actual[0]['table'] === $referencedTable &&
         $actual[0]['column'] === $referencedColumn && $actual[0]['update'] === strtoupper($update) &&
         $actual[0]['delete'] === strtoupper($delete)) return false;
-    foreach ($actual as $foreign) Club_Migrate_Exec($table.' drop foreign key '.$foreign['name'],
-        'alter table `'.$table.'` drop foreign key `'.$foreign['name'].'`');
-    Club_Migrate_Exec($table.' add foreign key '.$name, 'alter table `'.$table.'`'.
-        ' add constraint `'.$name.'` foreign key (`'.$column.'`) references `'.
+    foreach ($actual as $foreign) Club_Migrate_Exec($table.' drop foreign key '.$foreign['name'], 'alter table `'.$table.'` drop foreign key `'.$foreign['name'].'`');
+    Club_Migrate_Exec($table.' add foreign key '.$name, 'alter table `'.$table.'` add constraint `'.$name.'` foreign key (`'.$column.'`) references `'.
         $referencedTable.'` (`'.$referencedColumn.'`) on delete '.$delete.' on update '.$update);
     return true;
 }
@@ -296,11 +283,8 @@ function Club_Migrate_Negative($table, $columns) {
 function Club_Migrate_Datetime($table, $from, $to) {
     if (!Club_Schema_Column($table, $from)) return false;
     if (!Club_Schema_Column($table, $to))
-        Club_Migrate_Exec($table.' add '.$to,
-            'alter table `'.$table.'` add `'.$to.'` int not null default 0 after `'.$from.'`');
-    Club_Migrate_Exec($table.' convert '.$from,
-        'update `'.$table.'` set `'.$to.'` = coalesce(unix_timestamp(`'.$from.'`), 0)');
-    Club_Migrate_Exec($table.' drop '.$from,
-        'alter table `'.$table.'` drop column `'.$from.'`, modify `'.$to.'` int not null');
+        Club_Migrate_Exec($table.' add '.$to, 'alter table `'.$table.'` add `'.$to.'` int not null default 0 after `'.$from.'`');
+    Club_Migrate_Exec($table.' convert '.$from, 'update `'.$table.'` set `'.$to.'` = coalesce(unix_timestamp(`'.$from.'`), 0)');
+    Club_Migrate_Exec($table.' drop '.$from, 'alter table `'.$table.'` drop column `'.$from.'`, modify `'.$to.'` int not null');
     return true;
 }

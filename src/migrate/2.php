@@ -48,8 +48,7 @@ function Club_Migrate_2() {
     Club_Migrate_DropKeys('queues', ['pending', 'tid']);
     foreach (['timestamp', 'inuse', 'retry'] as $column)
         if (Club_Schema_Column('queues', $column))
-            Club_Migrate_Exec('queues drop '.$column,
-                'alter table `queues` drop column `'.$column.'`');
+            Club_Migrate_Exec('queues drop '.$column, 'alter table `queues` drop column `'.$column.'`');
     // 主键从 id 切到 target 必须跟删 id 在同一句里：单独删主键的话，AUTO_INCREMENT 的 id 立刻就没有索引可依附，MySQL 直接拒绝
     if (Club_Schema_Column('blacklist', 'id')) {
         Club_Migrate_DropKeys('blacklist', ['pending']);
@@ -64,51 +63,42 @@ function Club_Migrate_2() {
         foreach (['create', 'timestamp', 'inuse', 'retry'] as $column)
             if (Club_Schema_Column('blacklist', $column))
                 $alter[] = 'drop column `'.$column.'`';
-        Club_Migrate_Exec('blacklist switch primary key',
-            'alter table `blacklist` '.implode(', ', $alter));
+        Club_Migrate_Exec('blacklist switch primary key', 'alter table `blacklist` '.implode(', ', $alter));
     }
     Club_Migrate_DropKeys('blacklist', ['pending', 'target']);
     foreach (['create', 'timestamp', 'inuse', 'retry'] as $column)
         if (Club_Schema_Column('blacklist', $column))
-            Club_Migrate_Exec('blacklist drop '.$column,
-                'alter table `blacklist` drop column `'.$column.'`');
+            Club_Migrate_Exec('blacklist drop '.$column, 'alter table `blacklist` drop column `'.$column.'`');
 }
 
 function Club_Migrate_2_Queues() {
     global $db;
     $added = false;
     if (!Club_Schema_Column('queues', 'due_at')) {
-        Club_Migrate_Exec('queues add due_at', 'alter table `queues`'.
-            ' add `due_at` int unsigned null after `target`');
+        Club_Migrate_Exec('queues add due_at', 'alter table `queues` add `due_at` int unsigned null after `target`');
         $added = true;
     }
     if (!Club_Schema_Column('queues', 'retries')) {
-        Club_Migrate_Exec('queues add retries', 'alter table `queues`'.
-            ' add `retries` tinyint unsigned null after `due_at`');
+        Club_Migrate_Exec('queues add retries', 'alter table `queues` add `retries` tinyint unsigned null after `due_at`');
         $added = true;
     }
 
     if (Club_Migrate_State('migration.2.queues') !== 'ready' || $added) {
         if (Club_Schema_Column('queues', 'timestamp') && Club_Schema_Column('queues', 'retry')) {
             Club_Migrate_Negative('queues', ['timestamp', 'retry']);
-            Club_Migrate_Exec('queues backfill due_at/retries', 'update `queues`'.
-                ' set `due_at` = greatest(`timestamp`, 0),'.
-                ' `retries` = least(greatest(`retry`, 0), 255)');
+            Club_Migrate_Exec('queues backfill due_at/retries', 'update `queues` set `due_at` = greatest(`timestamp`, 0), `retries` = least(greatest(`retry`, 0), 255)');
         }
     }
-    $pdo = $db->query('select count(*) from `queues`'.
-        ' where `due_at` is null or `retries` is null');
+    $pdo = $db->query('select count(*) from `queues` where `due_at` is null or `retries` is null');
     Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0),
         'queues scheduling columns are backfilled');
     $due = Club_Schema_Column('queues', 'due_at');
     if ($due['type'] !== 'int unsigned' || $due['nullable'])
-        Club_Migrate_Exec('queues tighten due_at', 'alter table `queues`'.
-            ' modify `due_at` int unsigned not null');
+        Club_Migrate_Exec('queues tighten due_at', 'alter table `queues` modify `due_at` int unsigned not null');
     $retries = Club_Schema_Column('queues', 'retries');
     if ($retries['type'] !== 'tinyint unsigned' || $retries['nullable'] ||
         (string)$retries['default'] !== '0')
-        Club_Migrate_Exec('queues tighten retries', 'alter table `queues`'.
-            ' modify `retries` tinyint unsigned not null default 0');
+        Club_Migrate_Exec('queues tighten retries', 'alter table `queues` modify `retries` tinyint unsigned not null default 0');
     Club_Migrate_State('migration.2.queues', 'ready');
 }
 
@@ -124,8 +114,7 @@ function Club_Migrate_2_Blacklist() {
         'lease_token' => 'binary(16) default null after `lease_until`',
     ];
     foreach ($columns as $column => $definition) if (!Club_Schema_Column('blacklist', $column)) {
-        Club_Migrate_Exec('blacklist add '.$column, 'alter table `blacklist`'.
-            ' add `'.$column.'` '.$definition);
+        Club_Migrate_Exec('blacklist add '.$column, 'alter table `blacklist` add `'.$column.'` '.$definition);
         if (in_array($column, ['created_at', 'check_at', 'checks'], true)) $added = true;
     }
 
@@ -138,15 +127,12 @@ function Club_Migrate_2_Blacklist() {
                 if ($rows = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0))
                     Club_Log_Console('warning', 'blacklist rows without a create time, using check time',
                         ['rows' => $rows]);
-                Club_Migrate_Exec('blacklist backfill', 'update `blacklist`'.
-                    ' set `created_at` = greatest(coalesce(`create`, `timestamp`, 0), 0),'.
-                    ' `check_at` = greatest(`timestamp`, 0),'.
-                    ' `checks` = least(greatest(`retry`, 0), 65535)');
+                Club_Migrate_Exec('blacklist backfill', 'update `blacklist` set `created_at` = greatest(coalesce(`create`, `timestamp`, 0), 0),'.
+                    ' `check_at` = greatest(`timestamp`, 0), `checks` = least(greatest(`retry`, 0), 65535)');
             }
         }
     }
-    $pdo = $db->query('select count(*) from `blacklist` where `created_at` is null'.
-        ' or `check_at` is null or `checks` is null');
+    $pdo = $db->query('select count(*) from `blacklist` where `created_at` is null or `check_at` is null or `checks` is null');
     Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0),
         'blacklist scheduling columns are backfilled');
     foreach (['created_at' => 'int unsigned', 'check_at' => 'int unsigned',
@@ -154,9 +140,7 @@ function Club_Migrate_2_Blacklist() {
         $info = Club_Schema_Column('blacklist', $column);
         if ($info['type'] !== $type || $info['nullable'] ||
             ($column === 'checks' && (string)$info['default'] !== '0'))
-            Club_Migrate_Exec('blacklist tighten '.$column, 'alter table `blacklist`'.
-                ' modify `'.$column.'` '.$type.' not null'.
-                ($column === 'checks' ? ' default 0' : ''));
+            Club_Migrate_Exec('blacklist tighten '.$column, 'alter table `blacklist` modify `'.$column.'` '.$type.' not null'.($column === 'checks' ? ' default 0' : ''));
     }
     Club_Migrate_State('migration.2.blacklist', 'ready');
 }
@@ -231,13 +215,10 @@ function Club_Migrate_2_Validate() {
         Club_Migrate_2_URL_Assert_Canonical($column[0], $column[1],
             $column[0].'.'.$column[1].' URL is canonical');
     }
-    $pdo = $db->query('select count(*) from (select `target` from `queues` union'.
-        ' select `target` from `blacklist`) `t` left join `endpoints` `e`'.
-        ' on `t`.`target` = `e`.`url` where `e`.`url` is null');
+    $pdo = $db->query('select count(*) from (select `target` from `queues` union select `target` from `blacklist`) `t` left join `endpoints` `e` on `t`.`target` = `e`.`url` where `e`.`url` is null');
     Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0),
         'all delivery targets have endpoint rows');
-    $pdo = $db->query('select count(*) from `blacklist` `b` join `endpoints` `e`'.
-        ' on `b`.`target` = `e`.`url` where `e`.`next_at` is not null');
+    $pdo = $db->query('select count(*) from `blacklist` `b` join `endpoints` `e` on `b`.`target` = `e`.`url` where `e`.`next_at` is not null');
     Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0),
         'blacklisted endpoints are unscheduled');
     Club_Migrate_Assert(!Club_Schema_Table('hosts'), 'hosts table was removed');
@@ -257,44 +238,29 @@ function Club_Migrate_2_Endpoints() {
     global $db;
     if (Club_Schema_Table('hosts')) {
         // ips 原样搬过来，resolved 就是最近一次查询成功写缓存的时刻
-        Club_Migrate_Exec('dns backfill', 'insert ignore into `dns`(`host`,`ips`,`checked_at`)'.
-            ' select `host`, `ips`, greatest(`resolved`, 0) from `hosts`');
+        Club_Migrate_Exec('dns backfill', 'insert ignore into `dns`(`host`,`ips`,`checked_at`) select `host`, `ips`, greatest(`resolved`, 0) from `hosts`');
         // 一个 hostname 下的多条 endpoint 共享同一份旧故障状态：它是按 host 记的，拆不出来，宁可让它们各自从同一个退避点重新开始
         Club_Migrate_Exec('endpoints backfill',
-            'insert ignore into `endpoints`(`url`,`fails`,`fail_since`,`retry_at`,`next_at`)'.
-            ' select `t`.`target`, greatest(coalesce(`h`.`fails`, 0), 0),'.
-            ' greatest(coalesce(`h`.`since`, 0), 0), greatest(coalesce(`h`.`until`, 0), 0),'.
-            ' if(`b`.`target` is not null, null, greatest(greatest(coalesce(`h`.`until`, 0), 0),'.
-            ' coalesce((select min(`q`.`due_at`) from `queues` `q` where `q`.`target` = `t`.`target`), 0)))'.
-            ' from (select `target` from `queues` union select `target` from `blacklist`) as `t`'.
-            ' left join `blacklist` `b` on `b`.`target` = `t`.`target`'.
-            ' left join `hosts` `h` on `h`.`host` = if('.
-            ' substring_index(substring_index(`t`.`target`, \'/\', 3), \'/\', -1) like \'[%\','.
+            'insert ignore into `endpoints`(`url`,`fails`,`fail_since`,`retry_at`,`next_at`) select `t`.`target`, greatest(coalesce(`h`.`fails`, 0), 0),'.
+            ' greatest(coalesce(`h`.`since`, 0), 0), greatest(coalesce(`h`.`until`, 0), 0), if(`b`.`target` is not null, null, greatest(greatest(coalesce(`h`.`until`, 0), 0),'.
+            ' coalesce((select min(`q`.`due_at`) from `queues` `q` where `q`.`target` = `t`.`target`), 0))) from (select `target` from `queues` union select `target` from `blacklist`) as `t`'.
+            ' left join `blacklist` `b` on `b`.`target` = `t`.`target` left join `hosts` `h` on `h`.`host` = if( substring_index(substring_index(`t`.`target`, \'/\', 3), \'/\', -1) like \'[%\','.
             ' substring_index(substring_index(substring_index(substring_index(`t`.`target`, \'/\', 3), \'/\', -1), \']\', 1), \'[\', -1),'.
-            ' substring_index(substring_index(substring_index(`t`.`target`, \'/\', 3), \'/\', -1), \':\', 1)'.
-            ') collate ascii_general_ci');
+            ' substring_index(substring_index(substring_index(`t`.`target`, \'/\', 3), \'/\', -1), \':\', 1)) collate ascii_general_ci');
         Club_Migrate_Exec('drop hosts', 'drop table `hosts`');
     }
     // 从来没有 hosts 的老库，以及上一次合并卡在中间的情况：控制行照样要补齐
-    $pdo = $db->query('select count(*) from `queues` `q`'.
-        ' left join `endpoints` `e` on `q`.`target` = `e`.`url` where `e`.`url` is null');
+    $pdo = $db->query('select count(*) from `queues` `q` left join `endpoints` `e` on `q`.`target` = `e`.`url` where `e`.`url` is null');
     if ((int)$pdo->fetch(PDO::FETCH_COLUMN, 0))
         Club_Migrate_Exec('endpoints from queues',
-            'insert ignore into `endpoints`(`url`,`next_at`)'.
-            ' select `q`.`target`, min(`q`.`due_at`) from `queues` `q`'.
-            ' left join `blacklist` `b` on `q`.`target` = `b`.`target`'.
-            ' where `b`.`target` is null group by `q`.`target`');
-    $pdo = $db->query('select count(*) from `blacklist` `b`'.
-        ' left join `endpoints` `e` on `b`.`target` = `e`.`url` where `e`.`url` is null');
+            'insert ignore into `endpoints`(`url`,`next_at`) select `q`.`target`, min(`q`.`due_at`) from `queues` `q`'.
+            ' left join `blacklist` `b` on `q`.`target` = `b`.`target` where `b`.`target` is null group by `q`.`target`');
+    $pdo = $db->query('select count(*) from `blacklist` `b` left join `endpoints` `e` on `b`.`target` = `e`.`url` where `e`.`url` is null');
     if ((int)$pdo->fetch(PDO::FETCH_COLUMN, 0))
-        Club_Migrate_Exec('endpoints from blacklist',
-            'insert ignore into `endpoints`(`url`,`next_at`)'.
-            ' select `target`, null from `blacklist`');
-    $pdo = $db->query('select count(*) from `blacklist` `b` join `endpoints` `e`'.
-        ' on `b`.`target` = `e`.`url` where `e`.`next_at` is not null');
+        Club_Migrate_Exec('endpoints from blacklist', 'insert ignore into `endpoints`(`url`,`next_at`) select `target`, null from `blacklist`');
+    $pdo = $db->query('select count(*) from `blacklist` `b` join `endpoints` `e` on `b`.`target` = `e`.`url` where `e`.`next_at` is not null');
     if ((int)$pdo->fetch(PDO::FETCH_COLUMN, 0))
-        Club_Migrate_Exec('unschedule blacklisted endpoints', 'update `endpoints` `e`'.
-            ' join `blacklist` `b` on `e`.`url` = `b`.`target` set `e`.`next_at` = null');
+        Club_Migrate_Exec('unschedule blacklisted endpoints', 'update `endpoints` `e` join `blacklist` `b` on `e`.`url` = `b`.`target` set `e`.`next_at` = null');
     return true;
 }
 
@@ -344,9 +310,7 @@ function Club_Migrate_2_Normalize() {
         foreach ($columns as $column) {
             $info = Club_Migrate_Assert_Column($column[0], $column[1]);
             if ($info['collation'] !== 'ascii_bin')
-                Club_Migrate_Exec('collate '.$column[0].'.'.$column[1],
-                    'alter table `'.$column[0].'` modify `'.$column[1].
-                    '` varchar(255) character set ascii collate ascii_bin not null');
+                Club_Migrate_Exec('collate '.$column[0].'.'.$column[1], 'alter table `'.$column[0].'` modify `'.$column[1].'` varchar(255) character set ascii collate ascii_bin not null');
         }
         foreach (['migrate_urls', 'migrate_queues', 'migrate_blacklist', 'migrate_variants'] as $table)
             if (Club_Schema_Table($table))
@@ -378,19 +342,13 @@ function Club_Migrate_2_Normalize() {
     foreach ($columns as $column) {
         $info = Club_Migrate_Assert_Column($column[0], $column[1]);
         if ($info['collation'] !== 'ascii_bin')
-            Club_Migrate_Exec('collate '.$column[0].'.'.$column[1],
-                'alter table `'.$column[0].'` modify `'.$column[1].
-                '` varchar(255) character set ascii collate ascii_bin not null');
+            Club_Migrate_Exec('collate '.$column[0].'.'.$column[1], 'alter table `'.$column[0].'` modify `'.$column[1].'` varchar(255) character set ascii collate ascii_bin not null');
     }
     Club_Migrate_2_URL_Map_Complete($columns);
     Club_Migrate_2_URL_Map_Identity();
     Club_Migrate_2_Dedupe();
-    Club_Migrate_Exec('users normalize inbox', 'update `users` `u`'.
-        ' join `migrate_urls` `m` on `u`.`inbox` = `m`.`old_url`'.
-        ' set `u`.`inbox` = `m`.`new_url`');
-    Club_Migrate_Exec('users normalize shared_inbox', 'update `users` `u`'.
-        ' join `migrate_urls` `m` on `u`.`shared_inbox` = `m`.`old_url`'.
-        ' set `u`.`shared_inbox` = `m`.`new_url`');
+    Club_Migrate_Exec('users normalize inbox', 'update `users` `u` join `migrate_urls` `m` on `u`.`inbox` = `m`.`old_url` set `u`.`inbox` = `m`.`new_url`');
+    Club_Migrate_Exec('users normalize shared_inbox', 'update `users` `u` join `migrate_urls` `m` on `u`.`shared_inbox` = `m`.`old_url` set `u`.`shared_inbox` = `m`.`new_url`');
     Club_Migrate_2_Variants();
     foreach ($columns as $column) Club_Migrate_2_URL_Assert_Canonical(
         $column[0], $column[1], $column[0].'.'.$column[1].' URL normalization completed');
@@ -418,8 +376,7 @@ function Club_Migrate_2_URL_Map_Build($columns) {
                 $invalid += $result['invalid'];
             });
     });
-    $pdo = $db->query('select count(*) from (select `new_url` from `migrate_urls`'.
-        ' group by `new_url` having count(*) > 1) as `c`');
+    $pdo = $db->query('select count(*) from (select `new_url` from `migrate_urls` group by `new_url` having count(*) > 1) as `c`');
     $collisions = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
     $urls = (int)$db->query('select count(*) from `migrate_urls`')->fetch(PDO::FETCH_COLUMN, 0);
     Club_Log_Console('info', 'url map built', ['urls' => $urls,
@@ -466,8 +423,7 @@ function Club_Migrate_2_URL_Map_Insert($urls, $column, $warn) {
     }
     $inserted = 0;
     if ($values) {
-        $pdo = $db->prepare('insert ignore into `migrate_urls`(`old_url`,`new_url`) values '.
-            implode(',', $values));
+        $pdo = $db->prepare('insert ignore into `migrate_urls`(`old_url`,`new_url`) values '.implode(',', $values));
         $pdo->execute($params); $inserted = $pdo->rowCount();
     }
     return ['rows' => count($urls), 'invalid' => $invalid, 'inserted' => $inserted];
@@ -510,22 +466,15 @@ function Club_Migrate_2_Dedupe() {
         'primary key (`tid`,`new_url`), unique key `keep_id` (`keep_id`)'.
         ') engine=InnoDB default charset=utf8mb4 collate=utf8mb4_general_ci');
     Club_Migrate_Exec('build migrate_queues',
-        'insert into `migrate_queues`(`tid`,`new_url`,`keep_id`,`due_at`,`retries`)'.
-        ' select `q`.`tid`, `m`.`new_url`, min(`q`.`id`), min(`q`.`due_at`), max(`q`.`retries`)'.
-        ' from `queues` `q` join `migrate_urls` `m` on `q`.`target` = `m`.`old_url`'.
-        ' group by `q`.`tid`, `m`.`new_url`');
+        'insert into `migrate_queues`(`tid`,`new_url`,`keep_id`,`due_at`,`retries`) select `q`.`tid`, `m`.`new_url`, min(`q`.`id`), min(`q`.`due_at`), max(`q`.`retries`)'.
+        ' from `queues` `q` join `migrate_urls` `m` on `q`.`target` = `m`.`old_url` group by `q`.`tid`, `m`.`new_url`');
     $pdo = $db->query('select (select count(*) from `queues`) - (select count(*) from `migrate_queues`)');
     Club_Log_Console('info', 'queues merged by canonical target',
         ['deleted' => (int)$pdo->fetch(PDO::FETCH_COLUMN, 0)]);
     // 聚合值先写进 survivor；这样删重复行后强杀也不会丢掉最早 due_at 或最大 retries
-    Club_Migrate_Exec('queues merge scheduling state', 'update `queues` `q`'.
-        ' join `migrate_queues` `k` on `q`.`id` = `k`.`keep_id`'.
-        ' set `q`.`due_at` = `k`.`due_at`, `q`.`retries` = `k`.`retries`');
-    Club_Migrate_Exec('queues drop duplicates', 'delete `q` from `queues` `q`'.
-        ' left join `migrate_queues` `k` on `q`.`id` = `k`.`keep_id` where `k`.`keep_id` is null');
-    Club_Migrate_Exec('queues normalize target', 'update `queues` `q`'.
-        ' join `migrate_queues` `k` on `q`.`id` = `k`.`keep_id`'.
-        ' set `q`.`target` = `k`.`new_url`');
+    Club_Migrate_Exec('queues merge scheduling state', 'update `queues` `q` join `migrate_queues` `k` on `q`.`id` = `k`.`keep_id` set `q`.`due_at` = `k`.`due_at`, `q`.`retries` = `k`.`retries`');
+    Club_Migrate_Exec('queues drop duplicates', 'delete `q` from `queues` `q` left join `migrate_queues` `k` on `q`.`id` = `k`.`keep_id` where `k`.`keep_id` is null');
+    Club_Migrate_Exec('queues normalize target', 'update `queues` `q` join `migrate_queues` `k` on `q`.`id` = `k`.`keep_id` set `q`.`target` = `k`.`new_url`');
     Club_Migrate_Exec('drop migrate_queues', 'drop table `migrate_queues`');
 
     if (Club_Schema_Table('migrate_blacklist'))
@@ -537,22 +486,15 @@ function Club_Migrate_2_Dedupe() {
         'primary key (`new_url`), unique key `keep_id` (`keep_id`)'.
         ') engine=InnoDB default charset=utf8mb4 collate=utf8mb4_general_ci');
     Club_Migrate_Exec('build migrate_blacklist',
-        'insert into `migrate_blacklist`(`new_url`,`keep_id`,`created_at`,`check_at`,`checks`)'.
-        ' select `m`.`new_url`, min(`b`.`id`), min(`b`.`created_at`), max(`b`.`check_at`), max(`b`.`checks`)'.
-        ' from `blacklist` `b` join `migrate_urls` `m` on `b`.`target` = `m`.`old_url`'.
-        ' group by `m`.`new_url`');
+        'insert into `migrate_blacklist`(`new_url`,`keep_id`,`created_at`,`check_at`,`checks`) select `m`.`new_url`, min(`b`.`id`), min(`b`.`created_at`), max(`b`.`check_at`), max(`b`.`checks`)'.
+        ' from `blacklist` `b` join `migrate_urls` `m` on `b`.`target` = `m`.`old_url` group by `m`.`new_url`');
     $pdo = $db->query('select (select count(*) from `blacklist`) - (select count(*) from `migrate_blacklist`)');
     Club_Log_Console('info', 'blacklist merged by canonical target',
         ['deleted' => (int)$pdo->fetch(PDO::FETCH_COLUMN, 0)]);
-    Club_Migrate_Exec('blacklist merge scheduling state', 'update `blacklist` `b`'.
-        ' join `migrate_blacklist` `k` on `b`.`id` = `k`.`keep_id`'.
-        ' set `b`.`created_at` = `k`.`created_at`, `b`.`check_at` = `k`.`check_at`,'.
-        ' `b`.`checks` = `k`.`checks`');
-    Club_Migrate_Exec('blacklist drop duplicates', 'delete `b` from `blacklist` `b`'.
-        ' left join `migrate_blacklist` `k` on `b`.`id` = `k`.`keep_id` where `k`.`keep_id` is null');
-    Club_Migrate_Exec('blacklist normalize target', 'update `blacklist` `b`'.
-        ' join `migrate_blacklist` `k` on `b`.`id` = `k`.`keep_id`'.
-        ' set `b`.`target` = `k`.`new_url`');
+    Club_Migrate_Exec('blacklist merge scheduling state', 'update `blacklist` `b` join `migrate_blacklist` `k` on `b`.`id` = `k`.`keep_id`'.
+        ' set `b`.`created_at` = `k`.`created_at`, `b`.`check_at` = `k`.`check_at`, `b`.`checks` = `k`.`checks`');
+    Club_Migrate_Exec('blacklist drop duplicates', 'delete `b` from `blacklist` `b` left join `migrate_blacklist` `k` on `b`.`id` = `k`.`keep_id` where `k`.`keep_id` is null');
+    Club_Migrate_Exec('blacklist normalize target', 'update `blacklist` `b` join `migrate_blacklist` `k` on `b`.`id` = `k`.`keep_id` set `b`.`target` = `k`.`new_url`');
     Club_Migrate_Exec('drop migrate_blacklist', 'drop table `migrate_blacklist`');
     return true;
 }
@@ -571,15 +513,9 @@ function Club_Migrate_2_Variants() {
     Club_Migrate_Step('build migrate_variants', function () use ($db) {
         Club_Migrate_2_URL_Pages('migrate_urls', 'new_url', function($urls) use ($db) {
             $marks = implode(',', array_fill(0, count($urls), '?'));
-            $pdo = $db->prepare('insert ignore into `migrate_variants`'.
-                '(`target`,`created_at`,`check_at`,`checks`)'.
-                ' select `m`.`new_url`, min(`b`.`created_at`), max(`b`.`check_at`), max(`b`.`checks`)'.
-                ' from `migrate_urls` `m`'.
-                ' join `blacklist` `b` on lower(`b`.`target`) collate ascii_bin ='.
-                ' lower(`m`.`new_url`) collate ascii_bin'.
-                ' left join `blacklist` `e` on `e`.`target` = `m`.`new_url`'.
-                ' where `m`.`new_url` in ('.$marks.') and `e`.`target` is null'.
-                ' group by `m`.`new_url`');
+            $pdo = $db->prepare('insert ignore into `migrate_variants`(`target`,`created_at`,`check_at`,`checks`) select `m`.`new_url`, min(`b`.`created_at`), max(`b`.`check_at`), max(`b`.`checks`)'.
+                ' from `migrate_urls` `m` join `blacklist` `b` on lower(`b`.`target`) collate ascii_bin = lower(`m`.`new_url`) collate ascii_bin'.
+                ' left join `blacklist` `e` on `e`.`target` = `m`.`new_url` where `m`.`new_url` in ('.$marks.') and `e`.`target` is null group by `m`.`new_url`');
             $pdo->execute($urls);
         });
     });
@@ -591,10 +527,8 @@ function Club_Migrate_2_Variants() {
                 foreach ($urls as $url) Club_Log_Console('warning',
                     'blacklist variant kept blocked', ['variant' => $url]);
                 $marks = implode(',', array_fill(0, count($urls), '?'));
-                $pdo = $db->prepare('insert ignore into `blacklist`'.
-                    '(`target`,`created_at`,`check_at`,`checks`)'.
-                    ' select `target`,`created_at`,`check_at`,`checks` from `migrate_variants`'.
-                    ' where `target` in ('.$marks.')');
+                $pdo = $db->prepare('insert ignore into `blacklist`(`target`,`created_at`,`check_at`,`checks`)'.
+                    ' select `target`,`created_at`,`check_at`,`checks` from `migrate_variants` where `target` in ('.$marks.')');
                 $pdo->execute($urls);
             });
         });

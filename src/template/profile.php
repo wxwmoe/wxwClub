@@ -27,8 +27,7 @@ if ($max) {
 // 多取一条，用来判断这个方向还有没有内容
 $pdo = $db->prepare('select a.id, a.timestamp, u.name, act.object, a.summary, a.content from `announces` as `a`'.
     ' left join `users` as `u` on a.uid = u.uid left join `activities` as `act` on a.activity = act.id'.
-    ' where a.cid = :cid'.$where.' order by a.timestamp '.($asc ? 'asc' : 'desc').
-    ', a.id '.($asc ? 'asc' : 'desc').' limit 21');
+    ' where a.cid = :cid'.$where.' order by a.timestamp '.($asc ? 'asc' : 'desc').', a.id '.($asc ? 'asc' : 'desc').' limit 21');
 $pdo->execute($params);
 $activities = $pdo->fetchAll(PDO::FETCH_ASSOC);
 $more = count($activities) > 20;

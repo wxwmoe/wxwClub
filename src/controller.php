@@ -46,10 +46,8 @@ function controller() {
                             }
                             // 排序键取自 announces 才能吃到 (cid,timestamp) 索引，换成 b.timestamp 会 filesort
                             $pdo = $db->prepare('select a.id, a.timestamp, a.activity, u.actor, b.object, b.timestamp as `announced`'.
-                            ' from `announces` `a` join `clubs` `c` on a.cid = c.cid'.
-                            ' left join `users` `u` on a.uid = u.uid left join `activities` `b` on a.activity = b.id'.
-                            ' where c.name = :club'.$where.' order by a.timestamp '.($asc ? 'asc' : 'desc').
-                            ', a.id '.($asc ? 'asc' : 'desc').' limit 20');
+                            ' from `announces` `a` join `clubs` `c` on a.cid = c.cid left join `users` `u` on a.uid = u.uid left join `activities` `b` on a.activity = b.id'.
+                            ' where c.name = :club'.$where.' order by a.timestamp '.($asc ? 'asc' : 'desc').', a.id '.($asc ? 'asc' : 'desc').' limit 20');
                             $pdo->execute($params);
                             $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
                             if ($asc) $rows = array_reverse($rows);
