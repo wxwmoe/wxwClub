@@ -35,6 +35,7 @@ CREATE TABLE `activities` (
   `clubs` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `object` varchar(255) COLLATE utf8mb4_general_ci NOT NULL,
   `updated` int NOT NULL DEFAULT '0',
+  `polled` int NOT NULL DEFAULT '0',
   `timestamp` int NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `object` (`object`),
@@ -155,4 +156,4 @@ CREATE TABLE `meta` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- 结构版本。与代码里的 DB_VERSION 不相等时 web 全挡；只允许 worker 向前合并
-INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '3');
+INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '4');

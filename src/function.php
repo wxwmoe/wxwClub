@@ -3,7 +3,7 @@
 // 这份代码要求的数据库结构版本，对应 src/migrate/ 下最大的那个步骤文件。
 // 库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，
 // 入站活动会写进本地状态再报错，对端重放就是半处理
-define('DB_VERSION', 3);
+define('DB_VERSION', 4);
 
 // 跳转自己跟：交给 curl 的话每一跳既过不了内网检查，签名也对不上新 host。跳数与 Mastodon 一致
 function ActivityPub_GET($url, $club, $hops = 3) {
@@ -1585,53 +1585,101 @@ function Club_Relay_Allow($jsonld, $input, $object, $type) {
     return true;
 }
 
+// 计票包的版本号在活动 id 的 #updates/<poll.updated_at> 后缀里（UpdatePollSerializer），随每一
+// 轮计票递增，是这类包唯一能用来判重的量：object 里没有对应字段，NoteSerializer 的 updated 只在
+// edited_at 有值时才输出，有人投票并不算编辑。
+// 编辑包（UpdateNoteSerializer）的 id 是同一个形状，重放时也会落到这里，转出去就是重复扇出。
+// 它顶层有 published，值就是 edited_at；计票包的顶层只有 id、type、actor、to 四项。
+//
+// 类型和选项两项都要，跟 Mastodon 的 PollParser#valid? 对齐；type 可以是数组
+function Club_Poll_Revision($jsonld, $object) {
+    if (isset($jsonld['published'])) return 0;
+    if (!in_array('Question', to_array($object['type'] ?? []), true)) return 0;
+    if (!is_array($object['oneOf'] ?? null) && !is_array($object['anyOf'] ?? null)) return 0;
+    if (!preg_match('#\#updates/([0-9]{1,10})$#', Club_Object_Id($jsonld['id'] ?? ''), $matches))
+        return 0;
+    // 这个数字是对端随手写的。放一个远期值进去，等于把这条帖子后面的计票全挡在门外
+    return ($revision = (int)$matches[1]) > time() + 86400 ? 0 : $revision;
+}
+
 // 原作者编辑帖子后，Mastodon 只把 Update 发给自己的关注者。A 和 B 不在同一实例、之间也没有关注
 // 关系时，B 只是通过群组的 Announce 拿到的原帖，收不到这条 Update，本地那份就永远停在旧版本。
+// 投票的计票更新同理，群组的关注者看到的票数会一直停在他们收到 Announce 的那一刻。
 // Update 自带 RsaSignature2017，对端验得出原作者，所以整包原样转出去即可
 function Club_Update_Process($jsonld, $input) {
     global $db;
     if (!is_array($object = $jsonld['object'] ?? null) || !($id = Club_Object_Id($object['id'] ?? '')))
         return Club_Inbox_Skip('update without object id', ['actor' => $jsonld['actor']]);
-    // updated 是唯一的单调量，没有它就没法判重，同一包被重放几次就会往外扇几次
-    if (!($updated = strtotime(is_string($u = $object['updated'] ?? '') ? $u : '')))
-        return Club_Inbox_Skip('update without a usable updated field', ['object' => $id]);
+    $edited = strtotime(is_string($u = $object['updated'] ?? '') ? $u : '') ?: 0;
     // 「这条帖子本站真的 Announce 过」加「发送者就是原作者」，两条合起来就是准入闸门：
     // 入站验签已经证明 HTTP 签名属于 $jsonld['actor']，这里再确认那个 actor 正是这条帖子的作者。
     // 少了它，任何人往 inbox 推一包活动都能改本站的记录、并被扇到全部关注者。
     // 注意这已经足够「我们自己」相信作者，所以本地落库照做；LD 签名是给第三方验的，
     // 只决定能不能转发出去，不该拦住本地那一半——否则 GtS 一类不签名的实现连列表页都跟不上
-    $pdo = $db->prepare('select a.id, a.clubs from `activities` `a` join `users` `u` on a.uid = u.uid'.
+    $pdo = $db->prepare('select a.id, a.updated, a.clubs from `activities` `a`'.
+        ' join `users` `u` on a.uid = u.uid'.
         ' where a.object = :object and a.type = :type and u.actor = :actor');
     $pdo->execute([':object' => $id, ':type' => 'Create', ':actor' => $jsonld['actor']]);
     // 本站没转发过这条帖子，或者发送者不是原作者。后者在正常联邦里不该出现，值得看见
     if (!($activity = $pdo->fetch(PDO::FETCH_ASSOC)))
         return Club_Inbox_Skip('update for a post we never announced, or not from its author',
             ['actor' => $jsonld['actor'], 'object' => $id]);
+    // 计票包按形状认，不拿库里的 updated 反推：漏收或还没处理编辑包时，后面几个计票包带的是同一个
+    // object.updated，反推会把它们全判成编辑，并发下只有一包过得了 updated 的 CAS，被判重的那包
+    // 若是投票关闭前的最后一次计票，关注者就永远停在旧票数。
+    // 两列各判各的。updated 是正文的版本号，就是 Mastodon 的 statuses.edited_at；计票要判重是因为
+    // 本站把包原样转出去，重放就是重复扇出，Mastodon 不转发、票数重复应用一次没副作用，那边根本不判
+    $poll = (bool)($revision = Club_Poll_Revision($jsonld, $object));
+    // 计票包也带着编辑后的正文，漏收编辑包时顺手把本地副本补上
+    $edit = $edited > (int)$activity['updated'];
+    if (!$poll) {
+        if (!$edit)
+            return Club_Inbox_Skip('update is not newer than what we relayed, and not a poll tally',
+                ['object' => $id, 'updated' => gmdate('Y-m-d\TH:i:s\Z', $edited)]);
+        $revision = $edited;
+    }
     $content = strip_tags(is_string($c = $object['content'] ?? '') ? $c : '');
     $summary = is_string($s = $object['summary'] ?? null) ? $s : null;
     $clubs = json_decode($activity['clubs'], 1) ?: [];
-    $vars = ['object' => $id, 'clubs' => $clubs, 'updated' => gmdate('Y-m-d\TH:i:s\Z', $updated)];
-    return Club_DB_Transaction('update inbox', function () use ($db, $activity, $updated, $content,
-        $summary, $clubs, $vars, $jsonld, $input, $id) {
-        // 判重、本地副本和全部转发队列必须一起提交；回滚后同一包才能重新通过 updated 闸门。
-        $pdo = $db->prepare('update `activities` set `updated` = :updated'.
-            ' where `id` = :id and `updated` < :updated');
-        $pdo->execute([':id' => $activity['id'], ':updated' => $updated]);
+    $what = $poll ? 'poll update' : 'update';
+    $column = $poll ? 'polled' : 'updated';
+    $vars = ['object' => $id, 'clubs' => $clubs, 'revision' => gmdate('Y-m-d\TH:i:s\Z', $revision)];
+    return Club_DB_Transaction($what.' inbox', function () use ($db, $activity, $revision, $content,
+        $summary, $clubs, $vars, $jsonld, $input, $id, $poll, $edit, $edited, $what, $column) {
+        // 判重、本地副本和全部转发队列必须一起提交；回滚后同一包才能重新通过版本闸门。
+        // 上面那次比较用的是事务外读到的 updated，中间可能已经有新版本落库：这条 CAS 在库里
+        // 重比一次，输的那包连正文都写不到
+        $pdo = $db->prepare('update `activities` set `'.$column.'` = :revision'.
+            ' where `id` = :id and `'.$column.'` < :revision');
+        $pdo->execute([':id' => $activity['id'], ':revision' => $revision]);
         if (!$pdo->rowCount())
-            return Club_Inbox_Skip('update is a duplicate or older than what we relayed',
-                ['object' => $id, 'updated' => gmdate('Y-m-d\TH:i:s\Z', $updated)]);
-        $pdo = $db->prepare('update `announces` set `summary` = :summary, `content` = :content'.
-            ' where `activity` = :activity');
-        $pdo->execute([':activity' => $activity['id'], ':summary' => $summary, ':content' => $content]);
-        // 没有 LD 签名时本地更新仍然有效，只是不派生转发队列。
-        if (!Club_Relay_Allow($jsonld, $input, $id, 'Update')) {
-            Club_Log_Event('info', 'update applied locally, not relayed', $vars);
+            return Club_Inbox_Skip($what.' is a duplicate or older than what we relayed',
+                ['object' => $id, 'revision' => gmdate('Y-m-d\TH:i:s\Z', $revision)]);
+        // 计票包补正文得自己再 CAS 一次 updated：$edit 是事务外读的，中间可能已经有更新的编辑落库，
+        // 无条件写就是拿旧正文盖掉新的，而 updated 还停在新版本，之后再没有包会来修这份不一致。
+        // 推进 updated 不会让晚到的编辑包漏转发：这一包携带并转出去的就是同一份完整对象
+        if ($poll && $edit) {
+            $pdo = $db->prepare('update `activities` set `updated` = :edited'.
+                ' where `id` = :id and `updated` < :edited');
+            $pdo->execute([':id' => $activity['id'], ':edited' => $edited]);
+            $edit = (bool)$pdo->rowCount();
+        }
+        // 只有票数变了的那种，本站根本不存票数，没有要写进本地副本的东西
+        if ($edit) {
+            $pdo = $db->prepare('update `announces` set `summary` = :summary, `content` = :content'.
+                ' where `activity` = :activity');
+            $pdo->execute([':activity' => $activity['id'], ':summary' => $summary, ':content' => $content]);
+        }
+        // 转不出去的原因 Club_Relay_Allow 已经记过一行，编辑还得说明本地副本仍然更新了
+        if (!Club_Relay_Allow($jsonld, $input, $id, $what)) {
+            if ($edit) Club_Log_Event('info', 'update applied locally, not relayed', $vars);
             return true;
         }
         $relayed = [];
         foreach ($clubs as $club)
-            if (Club_Push_Activity($club, $input, false, false, 'Update-relay')) $relayed[] = $club;
-        Club_Log_Event(count($relayed) === count($clubs) ? 'info' : 'warning', 'update relayed',
+            if (Club_Push_Activity($club, $input, false, false, $poll ? 'Update-poll' : 'Update-relay'))
+                $relayed[] = $club;
+        Club_Log_Event(count($relayed) === count($clubs) ? 'info' : 'warning', $what.' relayed',
             array_merge($vars, ['relayed' => $relayed]));
         return true;
     });

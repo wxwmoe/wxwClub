@@ -62,7 +62,7 @@ A simple social groups compatible with ActivityPub.
 1. `git pull` 拉取新代码
 2. `docker restart wxwclub_worker`
 
-数据库结构由 worker 自动合并，合并期间前端返回 503，完成后恢复。
+数据库结构由 worker 自动合并，期间前端返回 HTTP 503，完成后恢复。
 
 ## 版权声明
 
