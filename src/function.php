@@ -602,6 +602,9 @@ function Club_Stat_Flush($force = false, $window = 60, $heartbeat = 900) {
             'idle_ms' => (int)($pending['idle_ms'] ?? 0),
             'endpoint_claim_attempts' => (int)($pending['endpoint_claim_attempts'] ?? 0),
             'endpoint_claim_misses' => (int)($pending['endpoint_misses'] ?? 0),
+            // 一直在抢、一直没抢到的槽位跟真空闲的槽位在这里长得一模一样，
+            // 而前者说明并发开过头了，只有这一个数能把两者分开
+            'endpoint_claim_races' => (int)($pending['endpoint_claim_races'] ?? 0),
             'scheduler_db_ops' => (int)($pending['scheduler_db_ops'] ?? 0)]);
         $pending = []; $pending_samples = []; $pending_gauges = [];
         return true;
@@ -610,8 +613,10 @@ function Club_Stat_Flush($force = false, $window = 60, $heartbeat = 900) {
     $attempts = (int)($pending['endpoint_claim_attempts'] ?? 0);
     $summary = ['slot' => $slot, 'pid' => getmypid(), 'window_s' => $elapsed,
         'endpoint_claim_attempts' => $attempts,
-        'endpoint_claim_hit' => $attempts
-            ? round(1 - ($pending['endpoint_misses'] ?? 0) / $attempts, 3) : 0,
+        // 命中率仍然是「拿到租约的比例」，跨版本可比。没拿到的两种原因差别很大，
+        // 所以 races 单列：hit 低而 races 高是并发开过头，hit 低而 races 是 0 才是没活干
+        'endpoint_claim_hit' => $attempts ? round(1 - (($pending['endpoint_misses'] ?? 0)
+            + ($pending['endpoint_claim_races'] ?? 0)) / $attempts, 3) : 0,
         'scheduler_db_ops' => (int)($pending['scheduler_db_ops'] ?? 0)];
     foreach ($pending_samples as $key => $values) $summary[$key] = Club_Stat_Percentile($values);
     foreach ($pending_gauges as $key => $value) $summary[$key] = $value;
@@ -873,6 +878,23 @@ function Club_Endpoint_Require($url, $context = []) {
 // 原始 16 字节里有 NUL，绑进 utf8mb4 的模拟预处理连接就是一串截断的乱码
 function Club_Token() {
     return bin2hex(random_bytes(16));
+}
+
+// endpoint 和 blacklist 领取共用的挑选策略。两处都是先用非锁定读取一小组候选，
+// 再逐条按主键 CAS —— 沿二级索引扫描的 UPDATE 先锁索引记录再回表锁主键，而所有
+// 完成路径都是先按主键锁行、末尾才回头改索引列，两个方向凑成环就是 1213。
+// 起点取 token 的前 8 bit，让并发的 worker 不要每轮都挤在最早的那一条上；抢输就
+// 换下一条，影响 0 行的 UPDATE 在 RC 下不留锁，换一条不会把锁集合摊大。
+// 不用 mt_rand 是因为它只在 fork 之后首次使用才各自播种：master 将来但凡在 fork
+// 之前碰一次 PRNG，几十个 worker 就会静默地同步挑同一条候选。token 是 random_bytes，
+// 按构造就没有这个前提。候选都被抢走返回 null，跟「一条候选都没有」由调用方各自区分
+function Club_Lease_Pick($candidates, $token, $attempt, $tries = 3) {
+    $count = count($candidates); $start = hexdec(substr($token, 0, 2)) % $count;
+    for ($i = 0; $i < min($tries, $count); $i++) {
+        $picked = $candidates[($start + $i) % $count];
+        if ($attempt($picked)) return $picked;
+    }
+    return null;
 }
 
 // 一次入队涉及的所有 target 的控制行。跟 task、queues 同一个事务提交，
@@ -2045,31 +2067,80 @@ function Club_Resolver_Query($host) {
 // dns 只是缓存，没有队列引用这一说：长期没人问就删掉，最多让下次重查一次。
 // 刷新锁还在有效期内的不能删，否则 Store 会插回一行没人认领的缓存
 function Club_Resolver_Cleanup($ttl = 86400, $limit = 200) {
-    global $db; $now = time();
-    $pdo = $db->prepare('delete from `dns` where `lock_until` <= :now and `checked_at` <= :expire'.
-        ' limit '.(int)$limit);
-    $pdo->execute([':now' => $now, ':expire' => $now - $ttl]);
+    global $db; $now = time(); $expire = $now - $ttl;
+    // 候选只读不锁、删除按主键，理由见 Club_Lease_Pick：沿 checked_at 扫描的 DELETE
+    // 会跟 Store 先按 host 主键锁行、再回头改 checked_at 咬成一个环。DELETE 没有
+    // 半一致读，不匹配的行也要先锁上再判，光靠 lock_until 这个条件躲不开。
+    // 而 Store 在投递路径上不走 Club_DB_Retry，被选成牺牲者就是一个 worker 停一秒
+    $pdo = $db->prepare('select `host` from `dns` where `lock_until` <= :now'.
+        ' and `checked_at` <= :expire limit '.(int)$limit);
+    $pdo->execute([':now' => $now, ':expire' => $expire]);
+    $hosts = $pdo->fetchAll(PDO::FETCH_COLUMN, 0);
     Club_Stat('scheduler_db_ops');
-    if ($rows = $pdo->rowCount())
-        Club_Log_Event('debug', 'dns cache entries evicted', ['rows' => $rows, 'age' => $ttl]);
+    if (!$hosts) {
+        Club_Log_Event('debug', 'dns cache has nothing expired to evict', ['age' => $ttl]);
+        return 0;
+    }
+    // 一条一条按主键删。候选读到手就可能被重新锁上或刷新，两个条件在 delete 里原样
+    // 重判一遍。不用 in 列表：那样虽然给的也是主键，但走不走 PRIMARY 仍由优化器的
+    // 代价估算说了算，而这里要的恰恰是「一定不沿 checked_at 扫」这个保证，
+    // 单值等值条件才给得起。顺带每条各自 autocommit，锁不会攒到整批结束
+    $pdo = $db->prepare('delete from `dns` where `host` = :host'.
+        ' and `lock_until` <= :now and `checked_at` <= :expire');
+    $rows = 0;
+    foreach ($hosts as $host) {
+        $pdo->execute([':host' => $host, ':now' => $now, ':expire' => $expire]);
+        $rows += $pdo->rowCount();
+    }
+    Club_Stat('scheduler_db_ops', count($hosts));
+    if (!$rows) {
+        Club_Log_Event('debug', 'dns cache entries were relocked or refreshed before eviction',
+            ['candidates' => count($hosts)]);
+        return 0;
+    }
+    Club_Log_Event('debug', 'dns cache entries evicted', ['rows' => $rows, 'age' => $ttl]);
     return $rows;
 }
 
 // 领一条 endpoint。所有权必须在解析和出网之前就拿到手：只按 queue 行调度的话，
 // 同一个 target 的几千条行会被几十个进程各领一条，一起对同一家发请求。
-// 领取本身是 autocommit 的单条语句，不把行锁带进后面的 DNS 和 HTTP
+// 候选读和领取都是 autocommit 的单条语句，不把行锁带进后面的 DNS 和 HTTP
 function Club_Endpoint_Claim($now, $lease = 120) {
-    global $db; $token = Club_Token(); $start = microtime(true);
-    // 只按 next_at 排序：lease_until 不是等值条件，再往 order by 里加列会跳过
-    // schedule 索引的中间列，退化成 filesort，几万行 endpoint 时每轮都要排一遍
-    $pdo = $db->prepare('update `endpoints` set `lease_token` = unhex(:token), `lease_until` = :until'.
-        ' where `next_at` is not null and `next_at` <= :now and `retry_at` <= :now'.
-        ' and `lease_until` <= :now order by `next_at` limit 1');
-    $pdo->execute([':token' => $token, ':until' => $now + $lease, ':now' => $now]);
+    global $db; $start = microtime(true);
+    // 候选只读不锁，领取按主键 CAS，取锁顺序才跟 completion 一致，理由见 Club_Lease_Pick。
+    // 只按 next_at 排序：lease_until 不是等值条件，再往 order by 里加列会跳过 schedule
+    // 索引的中间列，退化成 filesort，几万行 endpoint 时每轮都要排一遍
+    $pdo = $db->prepare('select `url` from `endpoints` where `next_at` is not null'.
+        ' and `next_at` <= :now and `retry_at` <= :now and `lease_until` <= :now'.
+        ' order by `next_at` limit 32');
+    $pdo->execute([':now' => $now]);
+    $candidates = $pdo->fetchAll(PDO::FETCH_COLUMN, 0);
     Club_Stat('endpoint_claim_attempts'); Club_Stat('scheduler_db_ops');
+    // 一条到期的都没有，这是真空闲。几十个进程每轮都会走到这里，只记数不记日志
+    if (!$candidates) {
+        Club_Stat('endpoint_misses');
+        Club_Stat_Sample('endpoint_claim_sql_ms', (microtime(true) - $start) * 1000);
+        return null;
+    }
+    // 候选是读到手就可能过期的，领取条件在 UPDATE 里原样重判一遍，由影响行数说了算
+    $token = Club_Token();
+    $claim = $db->prepare('update `endpoints` set `lease_token` = unhex(:token), `lease_until` = :until'.
+        ' where `url` = :url and `next_at` is not null and `next_at` <= :now'.
+        ' and `retry_at` <= :now and `lease_until` <= :now');
+    $url = Club_Lease_Pick($candidates, $token, function ($url) use ($claim, $token, $now, $lease) {
+        $claim->execute([':token' => $token, ':until' => $now + $lease, ':url' => $url, ':now' => $now]);
+        Club_Stat('scheduler_db_ops');
+        return (bool)$claim->rowCount();
+    });
     Club_Stat_Sample('endpoint_claim_sql_ms', (microtime(true) - $start) * 1000);
-    // 没领到就不要再查了：32 个空闲进程每轮多一条 select，就是每秒几十条纯浪费
-    if (!$pdo->rowCount()) { Club_Stat('endpoint_misses'); return null; }
+    // 有活可干却一条都没抢到，跟空闲不是一回事：这说明并发已经压过了可调度的
+    // endpoint 数量，加进程只会让抢输更多。混进 miss 里的话命中率再也读不出这个区别
+    if (!isset($url)) {
+        Club_Stat('endpoint_claim_races');
+        Club_Log_Event('debug', 'endpoint claim lost every candidate it tried',
+            ['candidates' => count($candidates)]);
+        return null;
+    }
     $pdo = $db->prepare('select `url`, `next_at`, `retry_at`, `fails` from `endpoints`'.
         ' where `lease_token` = unhex(:token)');
     $pdo->execute([':token' => $token]); Club_Stat('scheduler_db_ops');
@@ -2353,13 +2424,30 @@ function Club_Blacklist_Add($url, $now) {
 // 领一条待探活的黑名单行。restore_pending_at 非空的不领：那些已经确认活过来了，
 // 正在等 0 号把历史 queue 清完，再探一次只是白白多一次出网
 function Club_Blacklist_Claim($now, $lease = 120) {
-    global $db; $token = Club_Token();
-    $pdo = $db->prepare('update `blacklist` set `lease_token` = unhex(:token), `lease_until` = :until'.
-        ' where `restore_pending_at` is null and `check_at` <= :now and `lease_until` <= :now'.
-        ' order by `check_at` limit 1');
-    $pdo->execute([':token' => $token, ':until' => $now + $lease, ':now' => $now]);
+    global $db;
+    // 跟 endpoint 领取同一套取锁顺序：候选只读不锁，领取按主键 CAS。沿 schedule 扫描
+    // 会跟 Result、Cleanup 那些先按主键锁行的路径咬成 1213，理由见 Club_Lease_Pick
+    $pdo = $db->prepare('select `target` from `blacklist` where `restore_pending_at` is null'.
+        ' and `check_at` <= :now and `lease_until` <= :now order by `check_at` limit 32');
+    $pdo->execute([':now' => $now]);
+    $candidates = $pdo->fetchAll(PDO::FETCH_COLUMN, 0);
     Club_Stat('scheduler_db_ops');
-    if (!$pdo->rowCount()) return null;
+    if (!$candidates) return null;
+    $token = Club_Token();
+    $claim = $db->prepare('update `blacklist` set `lease_token` = unhex(:token), `lease_until` = :until'.
+        ' where `target` = :target and `restore_pending_at` is null'.
+        ' and `check_at` <= :now and `lease_until` <= :now');
+    $target = Club_Lease_Pick($candidates, $token, function ($target) use ($claim, $token, $now, $lease) {
+        $claim->execute([':target' => $target, ':token' => $token,
+            ':until' => $now + $lease, ':now' => $now]);
+        Club_Stat('scheduler_db_ops');
+        return (bool)$claim->rowCount();
+    });
+    if (!isset($target)) {
+        Club_Log_Event('debug', 'blacklist claim lost every candidate it tried',
+            ['candidates' => count($candidates)]);
+        return null;
+    }
     $pdo = $db->prepare('select `target`, `checks`, `check_at` from `blacklist`'.
         ' where `lease_token` = unhex(:token)');
     $pdo->execute([':token' => $token]); Club_Stat('scheduler_db_ops');
