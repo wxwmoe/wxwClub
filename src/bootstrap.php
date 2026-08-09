@@ -26,8 +26,7 @@ if (PHP_SAPI != 'cli') register_shutdown_function('Club_Stat_Request');
 try {
     Club_DB_Connect();
 } catch (PDOException $e) {
-    Club_Log_Event('error', 'database connection failed',
-        ['error' => $e->getMessage(), 'sapi' => PHP_SAPI, 'pid' => getmypid()]);
+    Club_Log_Event('error', 'database connection failed', ['error' => $e->getMessage(), 'sapi' => PHP_SAPI, 'pid' => getmypid()]);
     if (PHP_SAPI == 'cli') {
         fwrite(STDERR, 'Error: '.$e->getMessage()."\n");
         exit(1);
@@ -39,14 +38,9 @@ try {
 // 503 + Retry-After 是明确的「稍后再来」，换成 4xx 对端就当终局拒绝，那条活动永远丢了。库比代码新同样不能放行：回滚或滚动部署中的旧代码不认识新结构，继续写会损坏数据
 if (PHP_SAPI != 'cli' && ($schema = Club_DB_Version()) !== DB_VERSION) {
     $state = $schema < DB_VERSION ? 'behind' : 'newer than this code';
-    $action = $schema < DB_VERSION
-        ? 'run the worker to merge it'
-        : 'deploy code matching the database schema';
+    $action = $schema < DB_VERSION ? 'run the worker to merge it' : 'deploy code matching the database schema';
     header('Retry-After: 60');
-    Club_Log_Event('error', 'request blocked, database schema mismatch',
-        ['schema' => $schema, 'expected' => DB_VERSION, 'state' => $state,
-         'uri' => $_SERVER['REQUEST_URI'] ?? '']);
-    Club_Json_Output(['message' => 'Database schema '.$schema.' is '.$state.' (expected '
-        .DB_VERSION.'), '.$action], 0, 503);
+    Club_Log_Event('error', 'request blocked, database schema mismatch', ['schema' => $schema, 'expected' => DB_VERSION, 'state' => $state, 'uri' => $_SERVER['REQUEST_URI'] ?? '']);
+    Club_Json_Output(['message' => 'Database schema '.$schema.' is '.$state.' (expected '.DB_VERSION.'), '.$action], 0, 503);
     exit;
 }

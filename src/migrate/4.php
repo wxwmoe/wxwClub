@@ -15,6 +15,5 @@ function Club_Migrate_4() {
 
 function Club_Migrate_4_Validate() {
     $info = Club_Migrate_Assert_Column('activities', 'polled', 'int', null, false);
-    Club_Migrate_Assert((string)$info['default'] === '0', 'activities.polled defaults to zero',
-        ['actual' => $info['default']]);
+    Club_Migrate_Assert((string)$info['default'] === '0', 'activities.polled defaults to zero', ['actual' => $info['default']]);
 }

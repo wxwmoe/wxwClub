@@ -25,16 +25,12 @@ function Club_Migrate_3() {
 function Club_Migrate_3_Validate() {
     global $db;
     $info = Club_Migrate_Assert_Column('endpoints', 'idle_since', 'int unsigned', null, false);
-    Club_Migrate_Assert((string)$info['default'] === '0', 'endpoints.idle_since defaults to zero',
-        ['actual' => $info['default']]);
+    Club_Migrate_Assert((string)$info['default'] === '0', 'endpoints.idle_since defaults to zero', ['actual' => $info['default']]);
     // next_at 为空和 idle_since 非零必须同进同出：少了前者回收永远等不到宽限期，少了后者 endpoints_idle 会把在排队的行也算进去
     $pdo = $db->query('select count(*) from `endpoints` where `next_at` is null and `idle_since` = 0');
-    Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0),
-        'idle endpoints carry an idle_since');
+    Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0), 'idle endpoints carry an idle_since');
     $pdo = $db->query('select count(*) from `endpoints` where `next_at` is not null and `idle_since` > 0');
-    Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0),
-        'scheduled endpoints carry no idle_since');
+    Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0), 'scheduled endpoints carry no idle_since');
     $pdo = $db->query('select count(*) from `meta` where `name` like \'migration.2.%\'');
-    Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0),
-        'migration 2 checkpoints were removed');
+    Club_Migrate_Assert(!(int)$pdo->fetch(PDO::FETCH_COLUMN, 0), 'migration 2 checkpoints were removed');
 }

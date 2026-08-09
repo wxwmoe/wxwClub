@@ -45,8 +45,7 @@ class Curl {
     private $options = [];
     
     public function __construct($base_url = null) {
-        if (!extension_loaded('curl'))
-            throw new \ErrorException('cURL library is not loaded');
+        if (!extension_loaded('curl')) throw new \ErrorException('cURL library is not loaded');
         $this->curl = curl_init();
         $this->initialize($base_url);
     }
@@ -95,10 +94,7 @@ class Curl {
         $this->headerCallbackData->responseCookies = [];
 
         if ($this->curlError && function_exists('curl_strerror')) {
-            $this->curlErrorMessage =
-                curl_strerror($this->curlErrorCode) . (
-                    empty($this->curlErrorMessage) ? '' : ': ' . $this->curlErrorMessage
-                );
+            $this->curlErrorMessage = curl_strerror($this->curlErrorCode) . (empty($this->curlErrorMessage) ? '' : ': ' . $this->curlErrorMessage);
         }
 
         $this->httpStatusCode = $this->getInfo(CURLINFO_HTTP_CODE);
@@ -106,8 +102,7 @@ class Curl {
         $this->error = $this->curlError || $this->httpError;
         $this->errorCode = $this->error ? ($this->curlError ? $this->curlErrorCode : $this->httpStatusCode) : 0;
 
-        if ($this->getOpt(CURLINFO_HEADER_OUT) === true)
-            $this->requestHeaders = $this->parseRequestHeaders($this->getInfo(CURLINFO_HEADER_OUT));
+        if ($this->getOpt(CURLINFO_HEADER_OUT) === true) $this->requestHeaders = $this->parseRequestHeaders($this->getInfo(CURLINFO_HEADER_OUT));
         $this->responseHeaders = $this->parseResponseHeaders($this->rawResponseHeaders);
         $this->response = $this->rawResponse;
 
@@ -127,15 +122,13 @@ class Curl {
     }
     
     public function execDone() {
-        if ($this->error)
-            $this->call($this->errorCallback);
+        if ($this->error) $this->call($this->errorCallback);
         else $this->call($this->successCallback);
         $this->call($this->completeCallback);
     }
     
     public function close() {
-        if (is_resource($this->curl) || $this->curl instanceof \CurlHandle)
-            curl_close($this->curl);
+        if (is_resource($this->curl) || $this->curl instanceof \CurlHandle) curl_close($this->curl);
         $this->curl = null;
         $this->options = null;
     }
@@ -155,17 +148,14 @@ class Curl {
     
     public function setOpt($option, $value) {
         $required_options = [CURLOPT_RETURNTRANSFER => 'CURLOPT_RETURNTRANSFER'];
-        if (in_array($option, array_keys($required_options), true) && $value !== true)
-            trigger_error($required_options[$option] . ' is a required option', E_USER_WARNING);
-        if ($success = curl_setopt($this->curl, $option, $value))
-            $this->options[$option] = $value;
+        if (in_array($option, array_keys($required_options), true) && $value !== true) trigger_error($required_options[$option] . ' is a required option', E_USER_WARNING);
+        if ($success = curl_setopt($this->curl, $option, $value)) $this->options[$option] = $value;
         return $success;
     }
     
     public function setHeader($key, $value) {
         $this->headers[$key] = $value;
-        foreach ($this->headers as $key => $value)
-            $headers[] = $key . ': ' . $value;
+        foreach ($this->headers as $key => $value) $headers[] = $key . ': ' . $value;
         $this->setOpt(CURLOPT_HTTPHEADER, $headers);
     }
     
@@ -178,12 +168,10 @@ class Curl {
     public function attemptRetry() {
         $attempt_retry = false;
         if ($this->error) {
-            $attempt_retry = ($this->retryDecider === null) ?
-                $this->remainingRetries >= 1 : call_user_func($this->retryDecider, $this);
+            $attempt_retry = ($this->retryDecider === null) ? $this->remainingRetries >= 1 : call_user_func($this->retryDecider, $this);
             if ($attempt_retry) {
                 $this->retries += 1;
-                if ($this->remainingRetries)
-                    $this->remainingRetries -= 1;
+                if ($this->remainingRetries) $this->remainingRetries -= 1;
             }
         } return $attempt_retry;
     }
@@ -227,8 +215,7 @@ class Curl {
         $first_line = $headers = $request_headers = [];
         list($first_line, $headers) = $this->parseHeaders($raw_headers);
         $request_headers['Request-Line'] = $first_line;
-        foreach ($headers as $key => $value)
-            $request_headers[$key] = $value;
+        foreach ($headers as $key => $value) $request_headers[$key] = $value;
         return $request_headers;
     }
     
@@ -244,15 +231,13 @@ class Curl {
         }
         list($first_line, $headers) = $this->parseHeaders($response_header);
         $response_headers['Status-Line'] = $first_line;
-        foreach ($headers as $key => $value)
-            $response_headers[$key] = $value;
+        foreach ($headers as $key => $value) $response_headers[$key] = $value;
         return $response_headers;
     }
     
     private function createHeaderCallback($header_callback_data) {
         return function ($ch, $header) use ($header_callback_data) {
-            if (preg_match('/^Set-Cookie:\s*([^=]+)=([^;]+)/mi', $header, $cookie) === 1)
-                $header_callback_data->responseCookies[$cookie[1]] = trim($cookie[2], " \n\r\t\0\x0B");
+            if (preg_match('/^Set-Cookie:\s*([^=]+)=([^;]+)/mi', $header, $cookie) === 1) $header_callback_data->responseCookies[$cookie[1]] = trim($cookie[2], " \n\r\t\0\x0B");
             $header_callback_data->rawResponseHeaders .= $header;
             return strlen($header);
         };

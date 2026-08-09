@@ -60,8 +60,7 @@ function worker_endpoint($lease, $now) {
     Club_Log_Ref('queue#'.$task['id']);
     if ($task['type'] != 'push') {
         // 认不出来的类型永远处理不掉，留着只会被反复领取。丢掉这一条，但不能当成终局拒绝：那条路会连带清掉 endpoint 的故障段，而这里根本没跟对端说过话
-        Club_Log_Event('warning', 'queue dropped, unknown task type',
-            ['id' => $task['id'], 'type' => $task['type'], 'target' => $url]);
+        Club_Log_Event('warning', 'queue dropped, unknown task type', ['id' => $task['id'], 'type' => $task['type'], 'target' => $url]);
         worker_finish('endpoint completion', function () use ($url, $token, $task) {
             Club_Endpoint_Complete($url, $token, $task, 'dropped');
         });
@@ -90,8 +89,7 @@ function worker_endpoint($lease, $now) {
 function worker_finish($what, $run) {
     try { return Club_DB_Retry($what, $run); }
     catch (PDOException $e) {
-        Club_Log_Event('error', 'result could not be recorded, waiting for lease expiry',
-            ['at' => $what, 'error' => $e->getMessage()]);
+        Club_Log_Event('error', 'result could not be recorded, waiting for lease expiry', ['at' => $what, 'error' => $e->getMessage()]);
         return false;
     }
 }
@@ -164,8 +162,7 @@ function worker_maintain($now, $config) {
             // 取当前时间而不是进本轮时的 $now：锁等待本身可能已经烧掉几十秒，那样 $now + 5 早就是过去时，退避等于没加
             $due[$unit] = time() + 5;
             Club_Monitor_Count($unit.'_errors');
-            Club_Log_Event('error', 'maintenance unit failed',
-                ['unit' => $unit, 'error' => $e->getMessage()]);
+            Club_Log_Event('error', 'maintenance unit failed', ['unit' => $unit, 'error' => $e->getMessage()]);
             throw $e;
         } finally {
             $elapsed = (int)((microtime(true) - $start) * 1000);
@@ -183,8 +180,7 @@ function worker_maintain($now, $config) {
 function worker_expire() {
     static $notice_pending = false;
     global $config;
-    $notices = Club_Notice_Expire($config['notice']['retention'] ?? 30, 20,
-        $notice_pending ? 0 : 600);
+    $notices = Club_Notice_Expire($config['notice']['retention'] ?? 30, 20, $notice_pending ? 0 : 600);
     $notice_pending = $notices;
     // tasks 只认真实 queues 行，详细判据和批次上限收在同一个清理入口
     $tasks = Club_Task_Cleanup();

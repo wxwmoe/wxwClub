@@ -35,8 +35,7 @@ function Club_Migrate_Run() {
             }
             require_once($file);
             if (!function_exists($step)) {
-                Club_Log_Console('error', 'migration step is not callable',
-                    ['version' => $version, 'function' => $step]);
+                Club_Log_Console('error', 'migration step is not callable', ['version' => $version, 'function' => $step]);
                 throw new RuntimeException('Migration step '.$version.' is not callable');
             }
             Club_Log_Console('info', 'migration started', ['to' => $version, 'from' => $version - 1]);
@@ -45,10 +44,8 @@ function Club_Migrate_Run() {
             $validate = $step.'_Validate';
             if (function_exists($validate)) $validate();
             Club_DB_Version($version);
-            Club_Migrate_Assert(Club_DB_Version() === $version,
-                'schema version was not stored', ['expected' => $version]);
-            Club_Log_Console('info', 'migration finished',
-                ['to' => $version, 'seconds' => round(microtime(true) - $start, 1)]);
+            Club_Migrate_Assert(Club_DB_Version() === $version, 'schema version was not stored', ['expected' => $version]);
+            Club_Log_Console('info', 'migration finished', ['to' => $version, 'seconds' => round(microtime(true) - $start, 1)]);
         }
     } finally {
         try { $db->query('select release_lock(\'wxwclub_migrate\')'); }
@@ -63,8 +60,7 @@ function Club_Migrate_Run() {
 
 function Club_Migrate_Reject_Newer($version) {
     if ($version <= DB_VERSION) return false;
-    Club_Log_Console('error', 'database schema is newer than this code',
-        ['schema' => $version, 'expected' => DB_VERSION]);
+    Club_Log_Console('error', 'database schema is newer than this code', ['schema' => $version, 'expected' => DB_VERSION]);
     throw new UnexpectedValueException('Database schema '.$version.' is newer than '.DB_VERSION);
 }
 
@@ -114,9 +110,7 @@ function Club_Schema_Column($table, $column) {
     // MySQL 5.7 仍把整数显示宽度写进 column_type，8.0 则已经省略
     $type = preg_replace('/^(tinyint|smallint|mediumint|int|bigint)\([0-9]+\)/',
         '$1', strtolower($row[0]));
-    return ['type' => $type,
-        'collation' => $row[1] === null ? null : strtolower($row[1]),
-        'nullable' => $row[2] === 'YES', 'default' => $row[3], 'extra' => strtolower($row[4])];
+    return ['type' => $type, 'collation' => $row[1] === null ? null : strtolower($row[1]), 'nullable' => $row[2] === 'YES', 'default' => $row[3], 'extra' => strtolower($row[4])];
 }
 
 function Club_Schema_Index($table, $index) {
@@ -134,8 +128,7 @@ function Club_Schema_Index($table, $index) {
 // 外键名各版本不一样（activitys_ibfk_4 之类），按列反查才靠得住
 function Club_Schema_Foreign($table, $column) {
     $names = [];
-    foreach (Club_Schema_Foreign_Info($table, $column) as $row)
-        $names[] = $row['name'];
+    foreach (Club_Schema_Foreign_Info($table, $column) as $row) $names[] = $row['name'];
     return $names;
 }
 
@@ -147,10 +140,7 @@ function Club_Schema_Foreign_Info($table, $column) {
         ' where `k`.`table_schema` = database() and `k`.`table_name` = :table and `k`.`column_name` = :column and `k`.`referenced_table_name` is not null');
     $pdo->execute([':table' => $table, ':column' => $column]);
     $rows = [];
-    while ($row = $pdo->fetch(PDO::FETCH_NUM)) $rows[] = [
-        'name' => $row[0], 'table' => $row[1], 'column' => $row[2],
-        'update' => strtoupper($row[3]), 'delete' => strtoupper($row[4]),
-    ];
+    while ($row = $pdo->fetch(PDO::FETCH_NUM)) $rows[] = ['name' => $row[0], 'table' => $row[1], 'column' => $row[2], 'update' => strtoupper($row[3]), 'delete' => strtoupper($row[4])];
     return $rows;
 }
 
@@ -160,8 +150,7 @@ function Club_Schema_Referenced_By($table, $column) {
         ' where `referenced_table_schema` = database() and `referenced_table_name` = :table and `referenced_column_name` = :column');
     $pdo->execute([':table' => $table, ':column' => $column]);
     $rows = [];
-    while ($row = $pdo->fetch(PDO::FETCH_NUM))
-        $rows[] = ['table' => $row[0], 'column' => $row[1], 'name' => $row[2]];
+    while ($row = $pdo->fetch(PDO::FETCH_NUM)) $rows[] = ['table' => $row[0], 'column' => $row[1], 'name' => $row[2]];
     return $rows;
 }
 
@@ -170,8 +159,7 @@ function Club_Migrate_Exec($what, $sql) {
     global $db; $start = microtime(true);
     Club_Log_Console('info', 'migration step', ['step' => $what]);
     $db->exec($sql);
-    Club_Log_Console('info', 'migration step done',
-        ['step' => $what, 'seconds' => round(microtime(true) - $start, 1)]);
+    Club_Log_Console('info', 'migration step done', ['step' => $what, 'seconds' => round(microtime(true) - $start, 1)]);
 }
 
 // 一步要跑好几条语句、或者跑的根本不是 DDL 时用它包一层，日志跟 Club_Migrate_Exec 同形
@@ -179,8 +167,7 @@ function Club_Migrate_Step($what, $run) {
     $start = microtime(true);
     Club_Log_Console('info', 'migration step', ['step' => $what]);
     $result = $run();
-    Club_Log_Console('info', 'migration step done',
-        ['step' => $what, 'seconds' => round(microtime(true) - $start, 1)]);
+    Club_Log_Console('info', 'migration step done', ['step' => $what, 'seconds' => round(microtime(true) - $start, 1)]);
     return $result;
 }
 
@@ -213,8 +200,7 @@ function Club_Migrate_AddKeys($table, $keys) {
 
 function Club_Migrate_Assert($condition, $check, $context = []) {
     if ($condition) return true;
-    Club_Log_Console('error', 'migration validation failed',
-        array_merge(['check' => $check], $context));
+    Club_Log_Console('error', 'migration validation failed', array_merge(['check' => $check], $context));
     throw new RuntimeException('Migration validation failed: '.$check);
 }
 
@@ -222,14 +208,9 @@ function Club_Migrate_Assert_Column($table, $column, $type = null, $collation = 
     $nullable = null) {
     $info = Club_Schema_Column($table, $column);
     Club_Migrate_Assert($info !== false, $table.'.'.$column.' exists');
-    if ($type !== null) Club_Migrate_Assert($info['type'] === $type,
-        $table.'.'.$column.' type', ['actual' => $info['type'], 'expected' => $type]);
-    if ($collation !== null) Club_Migrate_Assert($info['collation'] === $collation,
-        $table.'.'.$column.' collation',
-        ['actual' => $info['collation'], 'expected' => $collation]);
-    if ($nullable !== null) Club_Migrate_Assert($info['nullable'] === $nullable,
-        $table.'.'.$column.' nullability',
-        ['actual' => $info['nullable'], 'expected' => $nullable]);
+    if ($type !== null) Club_Migrate_Assert($info['type'] === $type, $table.'.'.$column.' type', ['actual' => $info['type'], 'expected' => $type]);
+    if ($collation !== null) Club_Migrate_Assert($info['collation'] === $collation, $table.'.'.$column.' collation', ['actual' => $info['collation'], 'expected' => $collation]);
+    if ($nullable !== null) Club_Migrate_Assert($info['nullable'] === $nullable, $table.'.'.$column.' nullability', ['actual' => $info['nullable'], 'expected' => $nullable]);
     return $info;
 }
 
@@ -245,13 +226,11 @@ function Club_Migrate_Assert_Index($table, $index, $unique, $columns) {
 function Club_Migrate_Assert_Foreign($table, $column, $referencedTable, $referencedColumn,
     $update = 'CASCADE', $delete = 'CASCADE') {
     $actual = Club_Schema_Foreign_Info($table, $column);
-    $expected = ['table' => $referencedTable, 'column' => $referencedColumn,
-        'update' => strtoupper($update), 'delete' => strtoupper($delete)];
+    $expected = ['table' => $referencedTable, 'column' => $referencedColumn, 'update' => strtoupper($update), 'delete' => strtoupper($delete)];
     $matches = count($actual) === 1 && $actual[0]['table'] === $expected['table'] &&
         $actual[0]['column'] === $expected['column'] && $actual[0]['update'] === $expected['update'] &&
         $actual[0]['delete'] === $expected['delete'];
-    Club_Migrate_Assert($matches, $table.'.'.$column.' foreign key definition',
-        ['actual' => $actual, 'expected' => $expected]);
+    Club_Migrate_Assert($matches, $table.'.'.$column.' foreign key definition', ['actual' => $actual, 'expected' => $expected]);
     return $actual[0];
 }
 
@@ -273,17 +252,14 @@ function Club_Migrate_Negative($table, $columns) {
     $where = [];
     foreach ($columns as $column) $where[] = '`'.$column.'` < 0';
     $pdo = $db->query('select count(*) from `'.$table.'` where '.implode(' or ', $where));
-    if ($rows = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0))
-        Club_Log_Console('warning', 'negative values clamped to zero',
-            ['table' => $table, 'columns' => implode(',', $columns), 'rows' => $rows]);
+    if ($rows = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0)) Club_Log_Console('warning', 'negative values clamped to zero', ['table' => $table, 'columns' => implode(',', $columns), 'rows' => $rows]);
     return $rows;
 }
 
 // datetime 存的是本地时间文本，int 存的是 epoch，直接 MODIFY 会得到 20260805120000 这样的数字。只能新开一列、UNIX_TIMESTAMP() 转过去，再把旧列删掉
 function Club_Migrate_Datetime($table, $from, $to) {
     if (!Club_Schema_Column($table, $from)) return false;
-    if (!Club_Schema_Column($table, $to))
-        Club_Migrate_Exec($table.' add '.$to, 'alter table `'.$table.'` add `'.$to.'` int not null default 0 after `'.$from.'`');
+    if (!Club_Schema_Column($table, $to)) Club_Migrate_Exec($table.' add '.$to, 'alter table `'.$table.'` add `'.$to.'` int not null default 0 after `'.$from.'`');
     Club_Migrate_Exec($table.' convert '.$from, 'update `'.$table.'` set `'.$to.'` = coalesce(unix_timestamp(`'.$from.'`), 0)');
     Club_Migrate_Exec($table.' drop '.$from, 'alter table `'.$table.'` drop column `'.$from.'`, modify `'.$to.'` int not null');
     return true;

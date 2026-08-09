@@ -13,8 +13,7 @@ function controller() {
     ];
     
     $to = ''; $uri = explode('?', $_SERVER['REQUEST_URI'])[0];
-    foreach ($router as $k => $v)
-        if ($k == ($v['strict'] ? $uri : substr($uri, 0, strlen($k)))) $to = $v['to'];
+    foreach ($router as $k => $v) if ($k == ($v['strict'] ? $uri : substr($uri, 0, strlen($k)))) $to = $v['to'];
     
     switch ($to) {
         
@@ -55,13 +54,7 @@ function controller() {
                             $self = $club_url.'/outbox?page='.($tail ? 'last' : 'true');
                             if ($max) $self .= '&max='.$max[0].'.'.$max[1];
                             elseif ($min) $self .= '&min='.$min[0].'.'.$min[1];
-                            $arr = [
-                                '@context' => 'https://www.w3.org/ns/activitystreams',
-                                'id' => $self,
-                                'type' => 'OrderedCollectionPage',
-                                'partOf' => $club_url.'/outbox',
-                                'orderedItems' => []
-                            ];
+                            $arr = ['@context' => 'https://www.w3.org/ns/activitystreams', 'id' => $self, 'type' => 'OrderedCollectionPage', 'partOf' => $club_url.'/outbox', 'orderedItems' => []];
                             if ($rows) {
                                 $head = $rows[0]; $foot = $rows[count($rows) - 1];
                                 // 取满一页才给 next，抓取方据此判断到底了
@@ -85,11 +78,7 @@ function controller() {
                             $pdo = $db->prepare('select count(a.id) from `announces` `a` join `clubs` `c` on a.cid = c.cid where c.name = :club');
                             $pdo->execute([':club' => $club]);
                             $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
-                            Club_Get_OrderedCollection($club_url.'/outbox', [
-                                'totalItems' => $count,
-                                'first' => $club_url.'/outbox?page=true',
-                                'last' => $club_url.'/outbox?page=last',
-                            ]);
+                            Club_Get_OrderedCollection($club_url.'/outbox', ['totalItems' => $count, 'first' => $club_url.'/outbox?page=true', 'last' => $club_url.'/outbox?page=last']);
                         } break;
                     
                     case 'following': Club_Get_OrderedCollection($club_url.'/following'); break;
@@ -97,9 +86,7 @@ function controller() {
                         $pdo = $db->prepare('select count(f.id) from `followers` `f` left join `clubs` `c` on f.cid = c.cid where c.name = :club');
                         $pdo->execute([':club' => $club]);
                         $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
-                        Club_Get_OrderedCollection($club_url.'/followers', [
-                            'totalItems' => $count,
-                        ]); break;
+                        Club_Get_OrderedCollection($club_url.'/followers', ['totalItems' => $count]); break;
                     case 'collections':
                         if (isset($uri[4])) switch ($uri[4]) {
                             case 'featured': Club_Get_OrderedCollection($club_url.'/collections/featured'); break;
@@ -167,7 +154,8 @@ function controller() {
             Club_Json_Output(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;
         
         case 'nodeinfo2':
-            $pdo = $db->prepare('select (select count(cid) from clubs) as clubs, (select count(id) from announces) as announces, (select count(distinct cid) from announces where timestamp >= :month) as activeMonth, (select count(distinct cid) from announces where timestamp >= :halfyear) as activeHalfyear');
+            $pdo = $db->prepare('select (select count(cid) from clubs) as clubs, (select count(id) from announces) as announces,'.
+            ' (select count(distinct cid) from announces where timestamp >= :month) as activeMonth, (select count(distinct cid) from announces where timestamp >= :halfyear) as activeHalfyear');
             $pdo->execute([':month' => time()-86400*30, ':halfyear' => time()-86400*30*6]);
             $usage = $pdo->fetch(PDO::FETCH_ASSOC);
             Club_Json_Output([

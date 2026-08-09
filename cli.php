@@ -24,8 +24,7 @@ function worker_reaped($slot, $pid, $status) {
     } else {
         $level = 'warning'; $result = 'unknown';
     }
-    Club_Log_Console($level, 'worker exited',
-        ['slot' => $slot, 'type' => $slots[$slot] ?? '?', 'pid' => $pid, 'status' => $result]);
+    Club_Log_Console($level, 'worker exited', ['slot' => $slot, 'type' => $slots[$slot] ?? '?', 'pid' => $pid, 'status' => $result]);
 }
 
 // 一个 worker 的主循环。多进程模式下这就是子进程的全部工作，declare(ticks) 是文件作用域的，循环留在这个文件里信号才收得到
@@ -47,8 +46,7 @@ function worker_loop($type) {
                     Club_DB_Connect();
                     Club_Log_Console('info', 'database reconnected', ['pid' => getmypid()]);
                 } catch (PDOException $down) {
-                    Club_Log_Console('error', 'database reconnect failed',
-                        ['error' => $down->getMessage(), 'pid' => getmypid()]);
+                    Club_Log_Console('error', 'database reconnect failed', ['error' => $down->getMessage(), 'pid' => getmypid()]);
                 }
             }
             sleep(1);
@@ -69,8 +67,7 @@ switch ($argv[1]) {
         // 合并完直接退出，让容器按 restart 策略把正常的队列进程带起来
         try { $version = Club_DB_Version(); }
         catch (Throwable $e) {
-            Club_Log_Console('error', 'database schema check failed',
-                ['error' => $e->getMessage(), 'pid' => getmypid()]);
+            Club_Log_Console('error', 'database schema check failed', ['error' => $e->getMessage(), 'pid' => getmypid()]);
             exit(1);
         }
         if ($version !== DB_VERSION) {
@@ -78,13 +75,11 @@ switch ($argv[1]) {
             // 合并中途崩了没有事务能回滚，但每一步都会先问一次 information_schema，重启后接着跑不会把已经合并好的部分改坏。这里只负责把原因记下来
             try { $version = Club_Migrate_Run(); }
             catch (Throwable $e) {
-                Club_Log_Console('error', 'database merge failed',
-                    ['error' => $e->getMessage(), 'pid' => getmypid()]);
+                Club_Log_Console('error', 'database merge failed', ['error' => $e->getMessage(), 'pid' => getmypid()]);
                 exit(1);
             }
             if ($version !== DB_VERSION) {
-                Club_Log_Console('error', 'database schema mismatch, not starting workers',
-                    ['schema' => $version, 'expected' => DB_VERSION]);
+                Club_Log_Console('error', 'database schema mismatch, not starting workers', ['schema' => $version, 'expected' => DB_VERSION]);
                 exit(1);
             }
             Club_Log_Console('info', 'database merged, exiting for restart', ['schema' => $version]);
@@ -92,12 +87,9 @@ switch ($argv[1]) {
         }
         // 维护是全站一份的活，多开只是把同样的事做 N 遍，所以固定一个、不作配置。投递和探活都靠 token 租约互斥，加进程就是加并发，队列逻辑一行都不用改
         $slots = ['maintain.0' => 'maintain'];
-        foreach (['delivery' => 8, 'probe' => 1] as $type => $fallback)
-            for ($i = 0, $n = (int)($config['worker'][$type] ?? $fallback); $i < $n; $i++)
-                $slots[$type.'.'.$i] = $type;
+        foreach (['delivery' => 8, 'probe' => 1] as $type => $fallback) for ($i = 0, $n = (int)($config['worker'][$type] ?? $fallback); $i < $n; $i++) $slots[$type.'.'.$i] = $type;
         if (!in_array('delivery', $slots, true)) {
-            Club_Log_Console('error', 'worker needs at least one delivery process,'.
-                ' nothing would ever be sent', ['worker' => $config['worker'] ?? []]);
+            Club_Log_Console('error', 'worker needs at least one delivery process, nothing would ever be sent', ['worker' => $config['worker'] ?? []]);
             exit(1);
         }
         // 进了黑名单的对端只有探活能把它捞回来，一个都不开就是永久拉黑
@@ -118,8 +110,7 @@ switch ($argv[1]) {
         pcntl_signal(SIGTERM, 'shutdown');
         // master 只管 fork 和收尸，先把 bootstrap 建的连接关掉：带着连接 fork 的话父子共享同一个 socket，谁先断开都会把别人的一起带走
         $db = null;
-        Club_Log_Console('info', 'master started',
-            ['slots' => array_count_values($slots), 'pid' => getmypid()]);
+        Club_Log_Console('info', 'master started', ['slots' => array_count_values($slots), 'pid' => getmypid()]);
         $children = [];     // pid => 槽位，槽位空出来就补一个回去
         while (!$stop) {
             $taken = array_flip($children);
@@ -137,8 +128,7 @@ switch ($argv[1]) {
                     worker_loop($type); exit(0);
                 }
                 $children[$pid] = $slot; $taken[$slot] = $pid;
-                Club_Log_Console('info', 'worker started',
-                    ['slot' => $slot, 'type' => $type, 'pid' => $pid]);
+                Club_Log_Console('info', 'worker started', ['slot' => $slot, 'type' => $type, 'pid' => $pid]);
             }
             // 不用阻塞版的 wait：SIGTERM 在它进去之后才到的话，得等到有子进程退出才醒得过来，而 docker stop 只给 10 秒。sleep 会被信号打断
             if (($pid = pcntl_wait($status, WNOHANG)) > 0) {
@@ -162,13 +152,11 @@ switch ($argv[1]) {
         require_once(APP_ROOT.'/src/migrate.php');
         try { $version = Club_Migrate_Run(); }
         catch (Throwable $e) {
-            Club_Log_Console('error', 'database merge failed',
-                ['error' => $e->getMessage(), 'pid' => getmypid()]);
+            Club_Log_Console('error', 'database merge failed', ['error' => $e->getMessage(), 'pid' => getmypid()]);
             exit(1);
         }
         if ($version !== DB_VERSION) {
-            Club_Log_Console('error', 'database schema mismatch after merge',
-                ['schema' => $version, 'expected' => DB_VERSION]);
+            Club_Log_Console('error', 'database schema mismatch after merge', ['schema' => $version, 'expected' => DB_VERSION]);
             exit(1);
         }
         exit(0);
