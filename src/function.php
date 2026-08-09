@@ -1354,11 +1354,41 @@ function Club_Inbox_Dispatch($input, $club = null) {
         $verify = ActivityPub_Verification($input, false) && ActivityPub_Verify_Actor($actor);
         // 销号会连带级联删掉关注关系，是破坏性最大的一条，成没成都要留痕
         Club_Log_Inbox($name, $input, $verify);
-        if ($verify) {
-            $pdo = $db->prepare('delete from `users` where `actor` = :actor');
+        // 删除和它派生的转发队列必须一起提交：分开提交时中途出错会留下删了一半的名单，而对端重投的那一包在上面 Club_Has_Actor 那里就被挡掉，剩下的群组永远等不到 Delete
+        if ($verify) Club_DB_Transaction('actor delete inbox', function () use ($db, $jsonld, $payload, $actor) {
+            // 先锁住 users 那行再读 activities：并发的投稿插 activities 时要拿这行的外键共享锁，不先锁的话，读完名单到删除之间落库的那个群组会被级联一并删掉 ——
+            // 它的关注者已经收到了转嘟，却不在转发名单里。锁不到行说明并发的重投已经删过，本站没有可匹配的数据，转发也就无从谈起
+            $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor for update');
             $pdo->execute([':actor' => $actor]);
+            if (($uid = $pdo->fetch(PDO::FETCH_COLUMN, 0)) === false)
+                return Club_Inbox_Skip('actor delete claimed by a concurrent delivery', ['actor' => $actor]);
+            // 投稿去过哪些群组只能在删之前问：users 一删，activities 跟着级联没了。
+            // 每条投稿的群组集合各不相同，distinct 出来多少行由对端决定，整份拉进内存等于把销号请求的内存占用交给对方；按主键翻页归并，名单本身封顶在本站群组数
+            $relay_clubs = []; $cursor = 0;
+            $pdo = $db->prepare('select `id`, `clubs` from `activities`'.
+                ' where `uid` = :uid and `id` > :cursor order by `id` limit 500');
+            do {
+                $pdo->execute([':uid' => $uid, ':cursor' => $cursor]);
+                $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($rows as $row) {
+                    $cursor = $row['id'];
+                    foreach (json_decode($row['clubs'], 1) ?: [] as $relay_club) $relay_clubs[$relay_club] = true;
+                }
+            } while (count($rows) >= 500);
+            $pdo = $db->prepare('delete from `users` where `uid` = :uid');
+            $pdo->execute([':uid' => $uid]);
             Club_Log_Event('info', 'actor deleted: '.$actor.', '.$pdo->rowCount().' row(s)');
-        } return;
+            // 本站把他的投稿扇给过这些群组的关注者，那边本地留着他的副本和帖子，作者不在他们那儿，谁也不会再来删。原始 Delete 一并转出去才清得掉
+            if ($relay_clubs && isset($payload) && Club_Relay_Allow($jsonld, $payload, $actor, 'Delete')) {
+                $relayed = [];
+                foreach (array_keys($relay_clubs) as $relay_club)
+                    if (Club_Push_Activity($relay_club, $payload, false, false, 'Delete-relay')) $relayed[] = $relay_club;
+                Club_Log_Event(count($relayed) === count($relay_clubs) ? 'info' : 'warning', 'actor delete relayed',
+                    ['actor' => $actor, 'clubs' => array_keys($relay_clubs), 'relayed' => $relayed]);
+            }
+            return true;
+        });
+        return;
     }
     $verify = ActivityPub_Verification($input) && ActivityPub_Verify_Actor($actor);
     Club_Log_Inbox($name, $input, $verify);
