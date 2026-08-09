@@ -127,6 +127,7 @@ When you are unsure how some piece of ActivityPub is supposed to behave, **read 
 - Comments are written in Chinese; log messages and string literals in English.
 - SQL is all lowercase, identifiers are backquoted, and prepared statements use named parameters.
 - Match the density and idiom of the code around you. Don't introduce a second style.
+- Code and comments run to roughly 200 columns (CJK counts as two). It is a ceiling to drift around, not a fill target: break where the sentence or the expression ends, never mid-clause to hit a number.
 - This file is not hard-wrapped: one paragraph or list item is one line, and wrapping is the editor's job.
 
 ## Commits

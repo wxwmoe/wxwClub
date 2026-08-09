@@ -202,9 +202,9 @@ function controller() {
             if (preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches)) {
                 $resource_identifier = $matches[1];
                 if (($resource_host = $matches[2]) != $config['base']) {
-        		    Club_Json_Output(['message' => 'Resource host does not match'], 0, 404);
-        		    break;
-        		}
+                    Club_Json_Output(['message' => 'Resource host does not match'], 0, 404);
+                    break;
+                }
             } elseif (preg_match('/^acct:([a-zA-Z_][a-zA-Z0-9_]+)$/', $resource, $matches)) {
                 $resource_host = $config['base'];
                 $resource_identifier = $matches[1];
@@ -212,26 +212,25 @@ function controller() {
                 Club_Json_Output(['message' => 'Resource is invalid'], 0, 400);
                 break;
             }
-    		
-    		// 系统群组也要应答，对端验签时会拿 keyId 反查 WebFinger，404 会让私信被回 401；
-    		// 不进目录靠 actor 的 discoverable = false，不靠这里藏
-    		if ($club = Club_Exist($resource_identifier)) {
-    		    $club_url = $base.'/club/'.$club;
-    		    Club_Json_Output([
-        		    'subject' => 'acct:'.$club.'@'.$config['base'],
-        		    'links' => [
-        		        [
-        		            'rel' => 'http://webfinger.net/rel/profile-page',
-        		            'type' => 'text/html',
-        		            'href' => $club_url
-        		        ], 
-        		        [
-        		            'rel' => 'self',
-        		            'type' => 'application/activity+json',
-        		            'href' => $club_url
-        		        ]
-        		]]);
-    		} else Club_Json_Output(['message' => 'User not found'], 0, 404); break;
+
+            // 系统群组也要应答，对端验签时会拿 keyId 反查 WebFinger，404 会让私信被回 401；不进目录靠 actor 的 discoverable = false，不靠这里藏
+            if ($club = Club_Exist($resource_identifier)) {
+                $club_url = $base.'/club/'.$club;
+                Club_Json_Output([
+                    'subject' => 'acct:'.$club.'@'.$config['base'],
+                    'links' => [
+                        [
+                            'rel' => 'http://webfinger.net/rel/profile-page',
+                            'type' => 'text/html',
+                            'href' => $club_url
+                        ],
+                        [
+                            'rel' => 'self',
+                            'type' => 'application/activity+json',
+                            'href' => $club_url
+                        ]
+                ]]);
+            } else Club_Json_Output(['message' => 'User not found'], 0, 404); break;
         
         case 'index': Club_Template('index'); break;
         

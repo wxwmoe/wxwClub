@@ -1,19 +1,14 @@
 <?php require_once(__DIR__.'/function.php');
 
-/* 数据库合并的执行框架。步骤本身在 src/migrate/<版本号>.php 里，一个文件一个版本，
- * 函数名固定为 Club_Migrate_<版本号>()。加一次升级就是加一个文件加 DB_VERSION 加一，
- * 老库照样能从任何一个历史版本一路跑上来。
+/* 数据库合并的执行框架。步骤本身在 src/migrate/<版本号>.php 里，一个文件一个版本，函数名固定为 Club_Migrate_<版本号>()。
+ * 加一次升级就是加一个文件加 DB_VERSION 加一，老库照样能从任何一个历史版本一路跑上来。
  *
- * 只有 worker 会走到这里，而且是在没有任何 web 请求和投递进程的时候：web 见到版本
- * 落后就整个入口挡住，worker 见到落后就先合并、合并完直接退出，由容器重启带起队列进程。
+ * 只有 worker 会走到这里，而且是在没有任何 web 请求和投递进程的时候：web 见到版本落后就整个入口挡住，worker 见到落后就先合并、合并完直接退出，由容器重启带起队列进程。
  *
- * DDL 会 implicit commit，中途崩了没有事务能回滚，所以不追求原子性，只追求可重入：
- * 每一小步都先问一次 information_schema，做过就跳过。库里没有 meta 表的一律当版本 0，
- * 从第一个步骤开始跑，靠这些判断逐个跳过它已经有的东西 —— 版本号只决定从哪里开始试，
- * 真正的依据永远是库当前长什么样 */
+ * DDL 会 implicit commit，中途崩了没有事务能回滚，所以不追求原子性，只追求可重入：每一小步都先问一次 information_schema，做过就跳过。
+ * 库里没有 meta 表的一律当版本 0，从第一个步骤开始跑，靠这些判断逐个跳过它已经有的东西 —— 版本号只决定从哪里开始试，真正的依据永远是库当前长什么样 */
 
-// 合并期间不能有第二个进程同时动结构。命名锁跟连接绑定，进程没了锁自然就掉，
-// 比在表里放一个要自己收拾的标志位可靠
+// 合并期间不能有第二个进程同时动结构。命名锁跟连接绑定，进程没了锁自然就掉，比在表里放一个要自己收拾的标志位可靠
 function Club_Migrate_Run() {
     global $db;
     $from = Club_DB_Version();
@@ -110,8 +105,7 @@ function Club_Schema_Table($table) {
     return (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
 }
 
-// 列存不存在，以及它现在是什么类型和排序规则。URL 那几列改没改 collation
-// 就是「规范化做过没有」的判据，旧库的 varchar(100) 也要靠 type 认出来
+// 列存不存在，以及它现在是什么类型和排序规则。URL 那几列改没改 collation 就是「规范化做过没有」的判据，旧库的 varchar(100) 也要靠 type 认出来
 function Club_Schema_Column($table, $column) {
     global $db;
     $pdo = $db->prepare('select `column_type`, `collation_name`, `is_nullable`,'.
@@ -298,8 +292,7 @@ function Club_Migrate_Negative($table, $columns) {
     return $rows;
 }
 
-// datetime 存的是本地时间文本，int 存的是 epoch，直接 MODIFY 会得到 20260805120000
-// 这样的数字。只能新开一列、UNIX_TIMESTAMP() 转过去，再把旧列删掉
+// datetime 存的是本地时间文本，int 存的是 epoch，直接 MODIFY 会得到 20260805120000 这样的数字。只能新开一列、UNIX_TIMESTAMP() 转过去，再把旧列删掉
 function Club_Migrate_Datetime($table, $from, $to) {
     if (!Club_Schema_Column($table, $from)) return false;
     if (!Club_Schema_Column($table, $to))

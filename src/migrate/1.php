@@ -2,12 +2,9 @@
 
 /* 把任意历史结构补齐到调度重构之前的业务结构。
  *
- * 仓库最早的十几个版本没有任何升级记录，`tools/CHANGELOG.md` 是中途才有的，
- * 所以这一步不按「某次提交到某次提交」写，而是逐列逐索引地对齐目标形态：
- * 有就跳过，缺就补，类型不对就改。任何一个历史版本跑完都落到同一个结果。
+ * 逐列逐索引地对齐完整目标形态：有就跳过，缺就补，类型不对就改；任何历史版本执行后都落到同一结果。
  *
- * `hosts`、`queues.host`、`tasks.queues` 属于调度结构，第 2 版会删，这里不新建；
- * 已经存在的留给第 2 版处理。 */
+ * `hosts`、`queues.host`、`tasks.queues` 属于调度结构，第 2 版会删，这里不新建；已经存在的留给第 2 版处理。 */
 
 function Club_Migrate_1() {
     Club_Migrate_1_Clubs();
@@ -108,10 +105,8 @@ function Club_Migrate_1_Users() {
     if (!Club_Schema_Column('users', 'refresh'))
         Club_Migrate_Exec('users add refresh',
             'alter table `users` add `refresh` int not null default 0');
-    // 唯一性从 name 挪到 actor：同一个 actor 只该有一行，而 name 是从 actor 推出来的
-    // 展示名，不同实例的同名用户完全可能撞上。
-    // 这里不自动去重：删一行 user 会顺着外键连它的关注、转发、提醒一起删掉，
-    // 撞上了宁可让合并停在这里，先把冲突打印出来给人看
+    // 唯一性从 name 挪到 actor：同一个 actor 只该有一行，而 name 是从 actor 推出来的展示名，不同实例的同名用户完全可能撞上。
+    // 这里不自动去重：删一行 user 会顺着外键连它的关注、转发、提醒一起删掉，撞上了宁可让合并停在这里，先把冲突打印出来给人看
     if (!(($index = Club_Schema_Index('users', 'actor')) && $index['unique']))
         Club_Migrate_1_Conflicts('users', 'actor');
     Club_Migrate_AddKeys('users', ['actor' => 'unique `actor`', 'name' => '`name`']);
@@ -121,8 +116,7 @@ function Club_Migrate_1_Activities() {
     if (!Club_Schema_Table('activities') && Club_Schema_Table('activitys'))
         Club_Migrate_Exec('rename activitys', 'rename table `activitys` to `activities`');
     if (!Club_Schema_Table('activities')) return false;
-    // 一条投稿可以同时进多个群组，单个 cid 表达不了。改存群组名的 JSON 列表，
-    // 值能从原来的外键直接还原出来
+    // 一条投稿可以同时进多个群组，单个 cid 表达不了。改存群组名的 JSON 列表，值能从原来的外键直接还原出来
     if (Club_Schema_Column('activities', 'cid')) {
         if (!Club_Schema_Column('activities', 'clubs'))
             Club_Migrate_Exec('activities add clubs', 'alter table `activities`'.
@@ -178,8 +172,7 @@ function Club_Migrate_1_Dedupe($table, $column) {
     return $rows;
 }
 
-// 只报不删。撞上唯一键的合并会在下一句 ALTER 上失败，那条报错只说「Duplicate entry」，
-// 不说是哪几行；先把它们打出来，人才知道要去修什么
+// 只报不删。撞上唯一键的合并会在下一句 ALTER 上失败，那条报错只说「Duplicate entry」，不说是哪几行；先把它们打出来，人才知道要去修什么
 function Club_Migrate_1_Conflicts($table, $column) {
     global $db;
     $rows = $db->query('select `'.$column.'`, count(*) as `rows` from `'.$table.
@@ -244,8 +237,7 @@ function Club_Migrate_1_Tasks() {
     if (($info = Club_Schema_Column('tasks', 'jsonld')) && $info['type'] !== 'mediumtext')
         Club_Migrate_Exec('tasks widen jsonld', 'alter table `tasks`'.
             ' modify `jsonld` mediumtext character set utf8mb4 collate utf8mb4_general_ci not null');
-    // queues 是早先的在途计数，代码里已经没人读写，但它带着的复合索引让过期清理的
-    // timestamp 过滤用不上索引，每次都要扫全表
+    // queues 是早先的在途计数，代码里已经没人读写，但它带着的复合索引让过期清理的 timestamp 过滤用不上索引，每次都要扫全表
     Club_Migrate_DropKeys('tasks', ['type', 'time', 'queues', 'queues_timestamp']);
     if (Club_Schema_Column('tasks', 'queues'))
         Club_Migrate_Exec('tasks drop queues counter', 'alter table `tasks` drop column `queues`');

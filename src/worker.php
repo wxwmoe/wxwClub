@@ -1,15 +1,12 @@
 <?php require_once(__DIR__.'/function.php');
 
-// 三种队列各跑各的。维护要 glob 整个 logs/、还要按游标扫表，是全站一份的活，
-// 每个进程各跑一遍就是把同样的事做 N 遍；而投递和探活都会在系统 resolver 和 curl 上
-// 一卡十几秒，跟维护混在一起的话，持续的 backlog 会让维护永远轮不上。
-// 所以维护队列绝不碰 resolver、curl、endpoint 投递和黑名单探活
+// 三种队列各跑各的。维护要 glob 整个 logs/、还要按游标扫表，是全站一份的活，每个进程各跑一遍就是把同样的事做 N 遍；
+// 而投递和探活都会在系统 resolver 和 curl 上一卡十几秒，跟维护混在一起的话，持续的 backlog 会让维护永远轮不上。所以维护队列绝不碰 resolver、curl、endpoint 投递和黑名单探活
 function worker($type) {
     global $config;
     $now = time(); $worked = false;
     try {
-        // 长期进程要自己换天，rotate 也可能刚把当前这个文件清掉。
-        // ini_set 的作用范围是本进程，这条不能跟着类型一起跳过
+        // 长期进程要自己换天，rotate 也可能刚把当前这个文件清掉。ini_set 的作用范围是本进程，这条不能跟着类型一起跳过
         Club_Log_Error_Path();
         switch ($type) {
             case 'maintain': $worked = worker_maintain($now, $config); break;
@@ -18,9 +15,7 @@ function worker($type) {
         }
         worker_idle($worked, $type);
     } finally {
-        // 这条任务到此为止，后面的汇总和下一轮都不算它的。
-        // 汇总放这里是因为维护单元抛出的那一轮恰恰最该看见窗口计数，
-        // 跟着异常一起丢掉的话，出事的那一分钟正好没有记录；
+        // 这条任务到此为止，后面的汇总和下一轮都不算它的。汇总放这里是因为维护单元抛出的那一轮恰恰最该看见窗口计数，跟着异常一起丢掉的话，出事的那一分钟正好没有记录；
         // 异常路径的节流由 worker_loop 负责，这里不再退避一次
         Club_Log_Ref('');
         Club_Stat_Flush();
@@ -33,8 +28,7 @@ function worker($type) {
     }
 }
 
-// 领不到活时的退避。几十个进程各自每秒查一遍数据库，光空转就是每秒上百条语句；
-// 抖动是为了它们别齐步走。投递退到 2 秒封顶，新活动最多等这么久；
+// 领不到活时的退避。几十个进程各自每秒查一遍数据库，光空转就是每秒上百条语句；抖动是为了它们别齐步走。投递退到 2 秒封顶，新活动最多等这么久；
 // 探活的 check_at 本来就是按天摊开的，慢半分钟没有任何影响，可以退得更狠
 function worker_idle($worked, $type) {
     static $step = 0, $wait = [50, 100, 200, 500, 1000, 2000, 5000, 15000, 30000];
@@ -50,8 +44,7 @@ function worker_delivery($now) {
     return ($lease = Club_Endpoint_Claim($now)) ? worker_endpoint($lease, $now) : false;
 }
 
-// 一条 endpoint 的完整投递。所有权在 DNS 之前就拿到了，出网之前还要再换一次 token：
-// 系统 resolver 没有硬期限，一次解析卡过 120 秒租约之后这条 endpoint 已经易主
+// 一条 endpoint 的完整投递。所有权在 DNS 之前就拿到了，出网之前还要再换一次 token：系统 resolver 没有硬期限，一次解析卡过 120 秒租约之后这条 endpoint 已经易主
 function worker_endpoint($lease, $now) {
     $url = $lease['url']; $token = $lease['token']; $start = microtime(true);
     if (!($task = Club_Endpoint_Queue($url, $token, $now))) {
@@ -63,12 +56,10 @@ function worker_endpoint($lease, $now) {
         Club_Stat('endpoint_ms', (int)((microtime(true) - $start) * 1000));
         return true;
     }
-    // worker 是长期进程，关联标记不像 web 那样每请求自动归零，每条任务都要重设。
-    // 用队列行号，同一条投递的入队、重试、成功几行就能串起来
+    // worker 是长期进程，关联标记不像 web 那样每请求自动归零，每条任务都要重设。用队列行号，同一条投递的入队、重试、成功几行就能串起来
     Club_Log_Ref('queue#'.$task['id']);
     if ($task['type'] != 'push') {
-        // 认不出来的类型永远处理不掉，留着只会被反复领取。丢掉这一条，但不能当成
-        // 终局拒绝：那条路会连带清掉 endpoint 的故障段，而这里根本没跟对端说过话
+        // 认不出来的类型永远处理不掉，留着只会被反复领取。丢掉这一条，但不能当成终局拒绝：那条路会连带清掉 endpoint 的故障段，而这里根本没跟对端说过话
         Club_Log_Event('warning', 'queue dropped, unknown task type',
             ['id' => $task['id'], 'type' => $task['type'], 'target' => $url]);
         worker_finish('endpoint completion', function () use ($url, $token, $task) {
@@ -94,9 +85,8 @@ function worker_endpoint($lease, $now) {
     return true;
 }
 
-// HTTP 之后那段短事务的收尾。死锁重来一次就好，但重来的只有数据库这一段 ——
-// 已经发出去的请求收不回来，绝不能跟着再发一次。重试到头也不能硬来：
-// 保留 queue 和租约，等它自然过期，由 at-least-once 重投兜底
+// HTTP 之后那段短事务的收尾。死锁重来一次就好，但重来的只有数据库这一段 —— 已经发出去的请求收不回来，绝不能跟着再发一次。
+// 重试到头也不能硬来：保留 queue 和租约，等它自然过期，由 at-least-once 重投兜底
 function worker_finish($what, $run) {
     try { return Club_DB_Retry($what, $run); }
     catch (PDOException $e) {
@@ -106,8 +96,7 @@ function worker_finish($what, $run) {
     }
 }
 
-// 黑名单探活。跟投递同一套 token 协议：解析之后、出网之前换 token 并续租，
-// 失去所有权的旧 probe 不能再发请求
+// 黑名单探活。跟投递同一套 token 协议：解析之后、出网之前换 token 并续租，失去所有权的旧 probe 不能再发请求
 function worker_probe($now) {
     if (!($lease = Club_Blacklist_Claim($now))) return false;
     $target = $lease['target']; $token = $lease['token'];
@@ -127,14 +116,12 @@ function worker_probe($now) {
         return true;
     });
     worker_finish('probe completion', function () use ($target, $token, $active, $result) {
-        // 本站 DNS 的事，对端一个字都没说过：checks 不动，只短推 check_at，
-        // 也不能把租约留到自然过期 —— 那 120 秒里这一行谁都探不了
+        // 本站 DNS 的事，对端一个字都没说过：checks 不动，只短推 check_at，也不能把租约留到自然过期 —— 那 120 秒里这一行谁都探不了
         if ($result == 'local-dns' || $result == 'lease-lost')
             Club_Blacklist_Defer($target, $token, $result);
         else Club_Blacklist_Result($target, $active, $result == 'alive');
     });
-    // 只有总时长的话，看不出这批探活是真在问对端还是一直卡在本站 DNS 上，
-    // 而这两种「慢」要加的是完全不同的东西
+    // 只有总时长的话，看不出这批探活是真在问对端还是一直卡在本站 DNS 上，而这两种「慢」要加的是完全不同的东西
     Club_Stat('probe_'.$result);
     Club_Stat('probe_ms', (int)((microtime(true) - $start) * 1000));
     return true;
@@ -173,10 +160,8 @@ function worker_maintain($now, $config) {
                 }
             });
         } catch (PDOException $e) {
-            // Club_DB_Retry 已经重试过了，还失败就不是瞬时争用。立刻重排的话，
-            // 配上 worker_loop 的 1 秒退避就是同一行 ERROR 每秒刷一条。
-            // 取当前时间而不是进本轮时的 $now：锁等待本身可能已经烧掉几十秒，
-            // 那样 $now + 5 早就是过去时，退避等于没加
+            // Club_DB_Retry 已经重试过了，还失败就不是瞬时争用。立刻重排的话，配上 worker_loop 的 1 秒退避就是同一行 ERROR 每秒刷一条。
+            // 取当前时间而不是进本轮时的 $now：锁等待本身可能已经烧掉几十秒，那样 $now + 5 早就是过去时，退避等于没加
             $due[$unit] = time() + 5;
             Club_Monitor_Count($unit.'_errors');
             Club_Log_Event('error', 'maintenance unit failed',

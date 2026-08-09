@@ -1,8 +1,6 @@
 <?php require_once(__DIR__.'/class/curl.php');
 
-// 这份代码要求的数据库结构版本，对应 src/migrate/ 下最大的那个步骤文件。
-// 库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，
-// 入站活动会写进本地状态再报错，对端重放就是半处理
+// 这份代码要求的数据库结构版本，对应 src/migrate/ 下最大的那个步骤文件。库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，入站活动会写进本地状态再报错，对端重放就是半处理
 define('DB_VERSION', 4);
 
 // 跳转自己跟：交给 curl 的话每一跳既过不了内网检查，签名也对不上新 host。跳数与 Mastodon 一致
@@ -31,8 +29,7 @@ function ActivityPub_GET($url, $club, $hops = 3) {
     } return false;
 }
 
-// 返回原因码，调用方要分开处置：这几种失败的自愈概率差好几个数量级，
-// 共用一套退避阶梯的话，注销了域名的对端会被按「临时挂掉」每分钟重试：
+// 返回原因码，调用方要分开处置：这几种失败的自愈概率差好几个数量级，共用一套退避阶梯的话，注销了域名的对端会被按「临时挂掉」每分钟重试：
 //   ok         成功
 //   rejected   对端给的终局答复：它是好的，只是这一条它永远不会收，跟整家的健康无关
 //   failed     连不上、超时，或对端答得不对但还有救
@@ -40,9 +37,8 @@ function ActivityPub_GET($url, $club, $hops = 3) {
 //   blocked    目标指向内网或协议不对，该拦
 //   local-dns  本站自己解析不动、或刷新锁在别人手上，什么都没证明，不能算在对端头上
 //   lease-lost $authorize 没放行，这次请求根本没发出去
-// $authorize 在解析之后、真正出网之前调用。系统 resolver 没有应用层硬期限，
-// 一次解析卡过租约之后这条 endpoint 已经易主，旧 worker 醒过来再发一次，
-// 就是同一秒两个进程打同一家 —— 只在落库时验 token 拦不住已经出网的请求
+// $authorize 在解析之后、真正出网之前调用。
+// 系统 resolver 没有应用层硬期限，一次解析卡过租约之后这条 endpoint 已经易主，旧 worker 醒过来再发一次，就是同一秒两个进程打同一家 —— 只在落库时验 token 拦不住已经出网的请求
 function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
     global $curl;
     // 队列里的 target 是很久以前拉取的，域名可能已经解析到内网，每次投递都要重判
@@ -66,9 +62,8 @@ function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
         Club_Log_Event('warning', 'push deferred, local dns looks broken', ['url' => $url, 'club' => $club]);
         return 'local-dns';
     }
-    // 签名要查一次 clubs 取私钥。放在闸门后面的话，出网许可和 curl 之间还夹着
-    // 一次数据库往返 —— 它要是卡过了租约，endpoint 已经易主而这边照发不误，
-    // 等于把好不容易前移的所有权又漏掉一截。闸门之后不再碰数据库
+    // 签名要查一次 clubs 取私钥。放在闸门后面的话，出网许可和 curl 之间还夹着一次数据库往返 —— 它要是卡过了租约，endpoint 已经易主而这边照发不误，等于把好不容易前移的所有权又漏掉一截。
+    // 闸门之后不再碰数据库
     $date = gmdate('D, d M Y H:i:s T');
     $digest = base64_encode(hash('sha256', $jsonld, 1));
     $head = ['Signature' => ActivityPub_Signature($url, $club, $date, $digest),
@@ -76,32 +71,25 @@ function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
     if (isset($authorize) && !$authorize()) return 'lease-lost';
     Club_Stat('http_requests');
     ActivityPub_CURL($url, $date, $head, $jsonld, $public);
-    // 收下了只认 2xx，跟 Mastodon 的 response_successful? 一样。不能照 Curl 的返回值判：
-    // 它只把 4xx / 5xx 算错误，而 POST 是不跟跳转的，对端回一个 301 就会被当成投递成功、
-    // 这一行当场删掉，那条活动其实谁都没收到。3xx 归 failed，照常重试
+    // 收下了只认 2xx，跟 Mastodon 的 response_successful? 一样。
+    // 不能照 Curl 的返回值判：它只把 4xx / 5xx 算错误，而 POST 是不跟跳转的，对端回一个 301 就会被当成投递成功、这一行当场删掉，那条活动其实谁都没收到。3xx 归 failed，照常重试
     $code = isset($curl) ? $curl->httpStatusCode : 0;
     if ($code >= 200 && $code < 300) return 'ok';
-    // 划线跟 Mastodon 的 response_error_unsalvageable? 一致：501 和 4xx（401、408、429 除外）
-    // 是对端应用层给的终局答复，DNS、TCP、TLS 到应用层全通，它只是永远不会收这一条。
-    // 它自己碰到这些也不重试、也不计对端的失败，我们更不能拿它去推整家的熔断和放弃阶梯，
-    // 否则一条谁都不收的活动就能把好端端一家实例算成挂了。
+    // 划线跟 Mastodon 的 response_error_unsalvageable? 一致：501 和 4xx（401、408、429 除外）是对端应用层给的终局答复，DNS、TCP、TLS 到应用层全通，它只是永远不会收这一条。
+    // 它自己碰到这些也不重试、也不计对端的失败，我们更不能拿它去推整家的熔断和放弃阶梯，否则一条谁都不收的活动就能把好端端一家实例算成挂了。
     // 留下的 401 多半是密钥轮换那类会自愈的，408 和 429 是对端在喊慢一点，都该整家一起退
     if ($code == 501 || ($code >= 400 && $code < 500 && !in_array($code, [401, 408, 429])))
         return 'rejected';
     return 'failed';
 }
 
-// 黑名单探活只问一件事：对端还在不在。空 body 打 inbox 本来就会被 400/401 挡回来，
-// 而 Curl 把 4xx 也算进 $error，照投递成功与否来判的话，进了黑名单的实例永远出不来。
-// 这里只看有没有拿到状态码：拿到了就说明 DNS、TCP、TLS 到应用层全通。
-// 5xx 不算，CDN 回源失败也是有状态码的，那种情况对端其实还是死的。
-// HTTP 后返回 alive/dead；出网授权前的 blocked/unresolved/local-dns/lease-lost 原样返回，
-// 让调用方知道仍应使用第一阶段 token，本站 DNS 问题也不会被记成对端探活失败。
+// 黑名单探活只问一件事：对端还在不在。空 body 打 inbox 本来就会被 400/401 挡回来，而 Curl 把 4xx 也算进 $error，照投递成功与否来判的话，进了黑名单的实例永远出不来。
+// 这里只看有没有拿到状态码：拿到了就说明 DNS、TCP、TLS 到应用层全通；5xx 不算，CDN 回源失败也是有状态码的，那种情况对端其实还是死的。
+// HTTP 之后返回 alive/dead；出网授权前的 blocked/unresolved/local-dns/lease-lost 原样返回，让调用方继续用第一阶段 token，本站 DNS 的问题也不会被记成对端探活失败
 function ActivityPub_Probe($url, $club, $authorize = null) {
     global $curl;
     $result = ActivityPub_POST($url, $club, '{}', $authorize);
-    // 这些结果都发生在授权 callback 之前，调用方必须继续使用第一阶段 token。
-    // 折叠成 dead 会让 completion 误拿尚未安装的新 token，结果永远被 fencing 丢掉。
+    // 这些结果都发生在授权 callback 之前，调用方必须继续使用第一阶段 token。折叠成 dead 会让 completion 误拿尚未安装的新 token，结果永远被 fencing 丢掉。
     if (in_array($result, ['blocked', 'unresolved', 'local-dns', 'lease-lost'], true)) return $result;
     return isset($curl) && !$curl->curlError
         && $curl->httpStatusCode > 0 && $curl->httpStatusCode < 500 ? 'alive' : 'dead';
@@ -112,15 +100,11 @@ function ActivityPub_CURL($url, $date, $head, $data = null, $ips = null) {
     if (!isset($curl)) $curl = new Curl();
     $curl->setTimeout(10);
     $curl->setConnectTimeout(3);
-    // 内网检查的另一半：Club_Url_Public 只交上来公网地址，私网那些是靠
-    // 「curl 拿不到就连不上」拦住的。不钉的话 curl 会拿 URL 自己再解析一遍，
-    // 既把剔掉的地址捡回来，也留下 DNS rebinding 的空子。
-    // 钉进去的条目在 curl 自己的 DNS 缓存里是永久的，所以每次先撤掉上一条，
-    // 否则长期进程会越积越多，还会拿旧地址去连
+    // 内网检查的另一半：Club_Url_Public 只交上来公网地址，私网那些是靠「curl 拿不到就连不上」拦住的。不钉的话 curl 会拿 URL 自己再解析一遍，既把剔掉的地址捡回来，也留下 DNS rebinding 的空子。
+    // 钉进去的条目在 curl 自己的 DNS 缓存里是永久的，所以每次先撤掉上一条，否则长期进程会越积越多，还会拿旧地址去连
     $resolve = [];
     if (isset($pinned)) { $resolve[] = '-'.$pinned; $pinned = null; }
-    // URL 里直接写 IP 的不钉：本来就没有解析这一步，没有可乘之机，
-    // 而且 host:port:addr 这个格式塞进一个 IPv6 字面量就分不出哪个冒号是分隔符了
+    // URL 里直接写 IP 的不钉：本来就没有解析这一步，没有可乘之机，而且 host:port:addr 这个格式塞进一个 IPv6 字面量就分不出哪个冒号是分隔符了
     if ($ips && !empty(($parts = parse_url($url))['host'])
         && !filter_var($host = trim($parts['host'], '[]'), FILTER_VALIDATE_IP)) {
         $port = $parts['port'] ?? (strtolower($parts['scheme'] ?? '') == 'http' ? 80 : 443);
@@ -150,8 +134,7 @@ function ActivityPub_CURL($url, $date, $head, $data = null, $ips = null) {
     return $curl->error ? false : ($curl->response ?: true);
 }
 
-// HTTP Signature 真正覆盖的 authority 和 request-target。直接看原始 URL 里的 ?/#，
-// 避免不同 PHP 版本的 parse_url 对空 query 返回不同形状。
+// HTTP Signature 真正覆盖的 authority 和 request-target。直接看原始 URL 里的 ?/#，避免不同 PHP 版本的 parse_url 对空 query 返回不同形状。
 function ActivityPub_Signature_Fields($url) {
     $raw = (string)$url;
     if (($fragment = strpos($raw, '#')) !== false) $raw = substr($raw, 0, $fragment);
@@ -228,8 +211,7 @@ function ActivityPub_Verification($input = null, $pull = true) {
         }
     } $verify_signed = implode("\n", $lines);
 
-    // keyId 一般是 actor 后面挂个片段，去掉片段就是 actor；片段名不一定叫 main-key，
-    // 少数实现写成路径，所以末尾的 /main-key 也一并去掉
+    // keyId 一般是 actor 后面挂个片段，去掉片段就是 actor；片段名不一定叫 main-key，少数实现写成路径，所以末尾的 /main-key 也一并去掉
     $actor = explode('#', $signature['keyId'])[0];
     if (substr($actor, -9) === '/main-key') $actor = substr($actor, 0, -9);
     $pdo = $db->prepare('select `public_key` from `users` where `actor` = :actor');
@@ -249,8 +231,7 @@ function ActivityPub_Verification($input = null, $pull = true) {
     return false;
 }
 
-// 签名只能证明「这个 keyId 的主人发的」。不比对 activity 的 actor 的话，
-// 任何一个公钥入过库的远端用户都能冒充别人删号、退关、撤帖
+// 签名只能证明「这个 keyId 的主人发的」。不比对 activity 的 actor 的话，任何一个公钥入过库的远端用户都能冒充别人删号、退关、撤帖
 function ActivityPub_Verify_Actor($actor) {
     global $verify_actor;
     if (empty($verify_actor) || $verify_actor !== $actor)
@@ -263,8 +244,7 @@ function ActivityPub_Verify_Fail($reason) {
 }
 
 // 把对端给的语言标记归一到 src/i18n/ 下支持的语言，认不出返回 false。
-// 文件名直接用 Mastodon 那套地区写法（它的 config/locales 和前端 locales 也是 zh-CN / zh-TW / zh-HK），
-// 这样内部 locale 就是对外发的标记，不用再转一道；script 写法留在下面当输入别名
+// 文件名直接用 Mastodon 那套地区写法（它的 config/locales 和前端 locales 也是 zh-CN / zh-TW / zh-HK），这样内部 locale 就是对外发的标记，不用再转一道；script 写法留在下面当输入别名
 function Club_I18n_Match($lang) {
     static $map = [
         'zh' => 'zh-CN', 'zh-hans' => 'zh-CN', 'zh-cn' => 'zh-CN', 'zh-sg' => 'zh-CN',
@@ -307,26 +287,20 @@ function Club_I18n($key, $locale, $vars = []) {
     } return '';
 }
 
-// 建库连接。worker 开多进程时，每个子进程 fork 完都要自己调一次重新建：
-// fork 继承的是父进程那条连接的 socket，而领队列用的 last_insert_id() 是连接级状态，
-// 共用一条会让两个子进程领到同一行，同一条投递发两遍。
-// 持久连接只对 fpm 有意义（进程复用），CLI 下进程活着连接就活着，
-// 而且持久连接的池子也会被 fork 继承，子进程再 new PDO 会直接拿回父进程那条
+// 建库连接。worker 开多进程时，每个子进程 fork 完都要自己调一次重新建：fork 继承的是父进程那条连接的 socket，而 last_insert_id() 和会话隔离级别都是连接级状态，共用一条就是两个子进程互相串。
+// 持久连接只对 fpm 有意义（进程复用），CLI 下进程活着连接就活着，而且持久连接的池子也会被 fork 继承，子进程再 new PDO 会直接拿回父进程那条
 function Club_DB_Connect() {
     global $db, $config;
     $options = [PDO::ATTR_PERSISTENT => PHP_SAPI != 'cli', PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
-    // worker 的短事务不依赖 RR 快照，但领队列那条 UPDATE 要拿两个子查询筛掉整家整家的
-    // host，RR 下扫过的行全要上锁，几十个进程抢同一段索引就撞死锁。RC 开着
-    // semi-consistent read，不匹配的行当场放锁。web 端有事务，保持 RR 不动。
-    // 空字符串不能留给 web：mysqlnd 会拿它当一条查询发出去，连上就报 Query was empty
+    // worker 全是短事务，不依赖 RR 快照，而 RC 不留间隙锁、UPDATE 扫到的不匹配行当场放锁，几十个进程同时改 endpoints、分批删 queues 才不会互相咬住，所以直接定在连接上。
+    // web 走持久连接，会话级设置会跨请求留下来，那边的隔离级别由 Club_DB_Transaction 逐事务设。init command 不能给空字符串：mysqlnd 会拿它当一条查询发出去，连上就报 Query was empty
     if (PHP_SAPI == 'cli')
         $options[PDO::MYSQL_ATTR_INIT_COMMAND] = 'set session transaction isolation level read committed';
     return $db = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'].';charset=utf8mb4',
         $config['mysql']['username'], $config['mysql']['password'], $options);
 }
 
-// 库里当前的结构版本。meta 表本身是这套版本机制引入的，它不在就说明这个库
-// 停留在引入之前，一律当 0 处理，由 worker 从头合并
+// 库里当前的结构版本。meta 表本身是这套版本机制引入的，它不在就说明这个库停留在引入之前，一律当 0 处理，由 worker 从头合并
 function Club_DB_Version($set = null) {
     global $db;
     if (isset($set)) {
@@ -349,17 +323,14 @@ function Club_DB_Version($set = null) {
             throw new UnexpectedValueException('database schema version is out of range: '.substr($raw, 0, 100));
         return (int)$number;
     } catch (PDOException $e) {
-        // 只有版本机制尚未建立才是历史库；连接、权限或表损坏必须原样上抛，
-        // 否则 worker 会把基础设施故障误判成 schema 0 并尝试迁移。
+        // 只有版本机制尚未建立才是历史库；连接、权限或表损坏必须原样上抛，否则 worker 会把基础设施故障误判成 schema 0 并尝试迁移。
         if ($e->getCode() === '42S02' || (int)($e->errorInfo[1] ?? 0) === 1146) return 0;
         throw $e;
     }
 }
 
-// 死锁（1213）和锁等待超时（1205）重来一次通常就过去了，连成片才是真出事。
-// 1213 服务端已经把整笔事务回滚了，1205 只回滚当前语句，后者不显式 rollback
-// 就会带着半截事务往下走；inTransaction 为假时再 rollback 只会抛一个盖住原因的异常。
-// 只包住数据库这一段：已经发出去的 HTTP 永远不能跟着重试再发一次
+// 死锁（1213）和锁等待超时（1205）重来一次通常就过去了，连成片才是真出事。1213 服务端已经把整笔事务回滚了，1205 只回滚当前语句，后者不显式 rollback 就会带着半截事务往下走；
+// inTransaction 为假时再 rollback 只会抛一个盖住原因的异常。只包住数据库这一段：已经发出去的 HTTP 永远不能跟着重试再发一次
 function Club_DB_Retry($what, $run, $attempts = 3) {
     global $db;
     for ($attempt = 1; ; $attempt++) try {
@@ -374,8 +345,7 @@ function Club_DB_Retry($what, $run, $attempts = 3) {
     }
 }
 
-// 入站本地状态和它派生的出站队列共用这条短事务边界。已有事务时只加入，
-// 最外层才负责重试和提交；调用方必须在进来之前完成 actor 拉取、DNS 和 HTTP。
+// 入站本地状态和它派生的出站队列共用这条短事务边界。已有事务时只加入，最外层才负责重试和提交；调用方必须在进来之前完成 actor 拉取、DNS 和 HTTP。
 function Club_DB_Transaction($what, $run) {
     global $db;
     if ($db->inTransaction()) return $run();
@@ -402,41 +372,34 @@ function Club_Log_Level($level) {
     return $rank[$set] >= $rank[$level];
 }
 
-// 日志目录一律按 APP_ROOT 建：worker 的工作目录不一定是项目根目录，
-// 用相对路径会把目录建在别处，而写日志用的是绝对路径，等于白建
+// 日志目录一律按 APP_ROOT 建：worker 的工作目录不一定是项目根目录，用相对路径会把目录建在别处，而写日志用的是绝对路径，等于白建
 function Club_Log_Dir($dir = '') {
-    // 父目录单独建：用 mkdir 的递归模式的话，中间层 logs/ 是 mkdir 内部建的，
-    // 拿不到下面那次 chmod，会停在被 umask 削过的权限上
+    // 父目录单独建：用 mkdir 的递归模式的话，中间层 logs/ 是 mkdir 内部建的，拿不到下面那次 chmod，会停在被 umask 削过的权限上
     if ($dir !== '' && !Club_Log_Dir()) return false;
     $path = APP_ROOT.'/logs'.($dir === '' ? '' : '/'.$dir);
-    // web 和 worker 通常不是同一个用户，谁建的目录另一方都要能往里写、能删里面的文件
-    //（unlink 看的是目录权限，不是文件权限）
+    // web 和 worker 通常不是同一个用户，谁建的目录另一方都要能往里写、能删里面的文件（unlink 看的是目录权限，不是文件权限）
     if (!is_dir($path)) {
-        // 并发请求可能同时建同一个目录，mkdir 失败后再确认一次。
-        // 留着递归是为了 APP_ROOT 本身还不存在的情况，logs/ 这一层已经由上面那次调用单独建过
+        // 并发请求可能同时建同一个目录，mkdir 失败后再确认一次。留着递归是为了 APP_ROOT 本身还不存在的情况，logs/ 这一层已经由上面那次调用单独建过
         if (!@mkdir($path, 0777, true) && !is_dir($path)) return false;
         // mkdir 的 mode 一样会被 umask 削掉，只能补一次 chmod
         @chmod($path, 0777);
-    // 已经存在的目录也校一次：老部署留下的是 0755，不自己修就得人工 chmod
+    // 已经存在的目录也校一次：不是这次建的，权限未必够，跨用户写入前统一校正
     } elseif ((fileperms($path) & 0777) !== 0777) @chmod($path, 0777);
     return $path;
 }
 
-// 日志文件的实际落盘。同样是跨用户的问题：logs/event/ 和 logs/error/ 按天追加，
-// web 用户先建出 0644 的文件后 worker 用户连 append 都会失败，比删不掉更早发作
+// 日志文件的实际落盘。同样是跨用户的问题：logs/event/ 和 logs/error/ 按天追加，web 用户先建出 0644 的文件后 worker 用户连 append 都会失败，比删不掉更早发作
 function Club_Log_Put($file, $data, $flags = 0) {
     $new = !is_file($file);
     if (@file_put_contents($file, $data, $flags) === false) return false;
-    // 已存在的也要校一次，不能假设「存在就说明对方建的时候 chmod 过了」：
-    // logs/error/ 下的文件是 PHP 引擎自己建的，从来没经过这里；老部署留下的也是 0644。
+    // 已存在的也要校一次，不能假设「存在就说明建的时候 chmod 过了」：logs/error/ 下的文件是 PHP 引擎自己建的，从来没经过这里。
     // chmod 只有属主能调，不是自己的文件这一步会静默失败，但那时对方多半已经放开了
     if ($new || (fileperms($file) & 0777) !== 0666) @chmod($file, 0666);
     return true;
 }
 
-// 文件名片段清洗。片段来源里 status-line、url、webfinger 的 resource 都是对端可控的：
-// 路径分隔符换成形近的 Ⳇ 保留可读性，空白并成 _，控制字符和 glob 元字符去掉
-//（去重时要拿基名当 glob 模式用）。不加 u 修饰符，对端发来非法 UTF-8 时按字节处理才不会整个变空
+// 文件名片段清洗。片段来源里 status-line、url、webfinger 的 resource 都是对端可控的：路径分隔符换成形近的 Ⳇ 保留可读性，空白并成 _，控制字符和 glob 元字符去掉（去重时要拿基名当 glob 模式用）。
+// 不加 u 修饰符，对端发来非法 UTF-8 时按字节处理才不会整个变空
 function Club_Log_Slug($part) {
     $part = str_replace(['/', '\\'], 'Ⳇ', (string)$part);
     return preg_replace(['/\s+/', '/[\x00-\x1f\x7f*?\[\]]/'], ['_', ''], $part);
@@ -456,8 +419,7 @@ function Club_Log_Name($dir, $parts) {
     return $name;
 }
 
-// 写日志的唯一入口：级别不够直接跳过，目录按需建。
-// $name 传数组表示这条日志独占一个基名，传字符串则是 Club_Log_Name 的结果加后缀
+// 写日志的唯一入口：级别不够直接跳过，目录按需建。$name 传数组表示这条日志独占一个基名，传字符串则是 Club_Log_Name 的结果加后缀
 function Club_Log_Write($level, $dir, $name, $data, $ext = 'json') {
     if (!Club_Log_Level($level)) return false;
     if (is_array($name)) $name = Club_Log_Name($dir, $name);
@@ -466,8 +428,7 @@ function Club_Log_Write($level, $dir, $name, $data, $ext = 'json') {
         is_string($data) ? $data : Club_Json_Encode($data));
 }
 
-// PHP 自己写的 error log 的目标文件。worker 是长期进程，不会重新走 bootstrap：
-// 跨天后它还指着启动那天的文件，等 rotate 把那个删掉，引擎会自己重建一个，权限也就丢了
+// PHP 自己写的 error log 的目标文件。worker 是长期进程，不会重新走 bootstrap：跨天后它还指着启动那天的文件，等 rotate 把那个删掉，引擎会自己重建一个，权限也就丢了
 function Club_Log_Error_Path() {
     static $last = '';
     if (!Club_Log_Level('error')) return;
@@ -480,8 +441,7 @@ function Club_Log_Error_Path() {
     ini_set('error_log', $last = $file);
 }
 
-// 当前这次处理的关联标记，值就是 logs/inbox/ 或 logs/outbox/ 下那组文件的基名。
-// event 里每行都带上它，看到可疑的一行可以直接 ls logs/inbox/<标记>* 把报文捞出来。
+// 当前这次处理的关联标记，值就是 logs/inbox/ 或 logs/outbox/ 下那组文件的基名。event 里每行都带上它，看到可疑的一行可以直接 ls logs/inbox/<标记>* 把报文捞出来。
 // 同一秒进来好几条活动是常态，只靠 event 的时间戳对不上具体是哪一条
 function Club_Log_Ref($ref = null) {
     static $current = '';
@@ -489,8 +449,7 @@ function Club_Log_Ref($ref = null) {
     return $current;
 }
 
-// 低频事件写成按天追加的一个文件：拉黑、建群、销号这类一行就说清楚的事，
-// 按事件切成一堆 JSON 文件反而难查。跟 logs/error/ 分开，那边只留 PHP 引擎自己的报错
+// 低频事件写成按天追加的一个文件：拉黑、建群、销号这类一行就说清楚的事，按事件切成一堆 JSON 文件反而难查。跟 logs/error/ 分开，那边只留 PHP 引擎自己的报错
 function Club_Log_Event($level, $message, $context = []) {
     if (!Club_Log_Level($level) || !($path = Club_Log_Dir('event'))) return false;
     if ($ref = Club_Log_Ref()) $message = $ref.' '.$message;
@@ -499,15 +458,13 @@ function Club_Log_Event($level, $message, $context = []) {
     $written = Club_Log_Put($path.'/'.date('Y-m-d').'.log',
         date('[Y-m-d H:i:s] ').strtoupper($level).' '.preg_replace('/\s+/', ' ', $message)."\n",
         FILE_APPEND);
-    // 只算真正落盘的 worker 事件；web/master 没有 slot，不能污染某个 worker 的窗口。
-    // Flush 自己只写 info，所以这里累计 warning/error 不会递归制造新的 material。
+    // 只算真正落盘的 worker 事件；web/master 没有 slot，不能污染某个 worker 的窗口。Flush 自己只写 info，所以这里累计 warning/error 不会递归制造新的 material。
     if ($written && Club_Worker_Slot() !== null && in_array($level, ['warning', 'error'], true))
         Club_Stat($level === 'warning' ? 'log_warnings' : 'log_errors');
     return $written;
 }
 
-// worker 的输出既要实时给人看，也要留档，两边共用一个入口。
-// 上下文照着 Club_Log_Event 的样子拼在消息后面，终端和 event 日志里是同一行；
+// worker 的输出既要实时给人看，也要留档，两边共用一个入口。上下文照着 Club_Log_Event 的样子拼在消息后面，终端和 event 日志里是同一行；
 // 多进程模式下几个进程的输出混在一起，靠这里的 pid 才分得清哪句是谁说的
 function Club_Log_Console($level, $message, $context = []) {
     if (PHP_SAPI == 'cli')
@@ -515,16 +472,14 @@ function Club_Log_Console($level, $message, $context = []) {
     Club_Log_Event($level, $message, $context);
 }
 
-// 本进程是哪个队列，FPM 里是 null。master 补进程之后 pid 会变，
-// 按「类型.序号」才认得出重启的是同一个位置，日志也能按类型分开看
+// 本进程是哪个队列，FPM 里是 null。master 补进程之后 pid 会变，按「类型.序号」才认得出重启的是同一个位置，日志也能按类型分开看
 function Club_Worker_Slot($slot = null) {
     static $current = null;
     if (isset($slot)) $current = $slot;
     return $current;
 }
 
-// 默认 info 级别下逐条 debug 是关掉的，性能只能靠进程自己在内存里攒。
-// 传 null 表示取走并清空，汇总时用
+// 默认 info 级别下逐条 debug 是关掉的，性能只能靠进程自己在内存里攒。传 null 表示取走并清空，汇总时用
 function Club_Stat($key, $value = 1) {
     static $data = [];
     if (!isset($key)) { $out = $data; $data = []; return $out; }
@@ -533,8 +488,7 @@ function Club_Stat($key, $value = 1) {
     return $data[$key];
 }
 
-// 分位数要原始样本，计数器攒不出来。一个窗口最多留 1000 个：
-// 够算 p99，也不会让一个卡住的进程把内存吃光
+// 分位数要原始样本，计数器攒不出来。一个窗口最多留 1000 个：够算 p99，也不会让一个卡住的进程把内存吃光
 function Club_Stat_Sample($key, $ms = null) {
     static $data = [];
     if (!isset($key)) { $out = $data; $data = []; return $out; }
@@ -559,9 +513,8 @@ function Club_Stat_Percentile($samples) {
     return $out;
 }
 
-// 每 60 秒一次的结构化汇总。空转不输出：32 个进程每分钟 32 行全零汇总，
-// 既看不出问题，还会把真正的事件冲出滚动窗口。纯 claim miss 不算发生过事情，
-// 但那样的进程 15 分钟要留一条心跳 —— 没有任何记录的槽位才是要告警的
+// 每 60 秒一次的结构化汇总。空转不输出：32 个进程每分钟 32 行全零汇总，既看不出问题，还会把真正的事件冲出滚动窗口。
+// 纯 claim miss 不算发生过事情，但那样的进程 15 分钟要留一条心跳 —— 没有任何记录的槽位才是要告警的
 function Club_Stat_Flush($force = false, $window = 60, $heartbeat = 900) {
     static $opened = 0, $checked = 0, $seen = 0, $progress = 0, $jitter = null;
     static $pending = [], $pending_samples = [], $pending_gauges = [];
@@ -602,8 +555,7 @@ function Club_Stat_Flush($force = false, $window = 60, $heartbeat = 900) {
             'idle_ms' => (int)($pending['idle_ms'] ?? 0),
             'endpoint_claim_attempts' => (int)($pending['endpoint_claim_attempts'] ?? 0),
             'endpoint_claim_misses' => (int)($pending['endpoint_misses'] ?? 0),
-            // 一直在抢、一直没抢到的槽位跟真空闲的槽位在这里长得一模一样，
-            // 而前者说明并发开过头了，只有这一个数能把两者分开
+            // 一直在抢、一直没抢到的槽位跟真空闲的槽位在这里长得一模一样，而前者说明并发开过头了，只有这一个数能把两者分开
             'endpoint_claim_races' => (int)($pending['endpoint_claim_races'] ?? 0),
             'scheduler_db_ops' => (int)($pending['scheduler_db_ops'] ?? 0)]);
         $pending = []; $pending_samples = []; $pending_gauges = [];
@@ -613,8 +565,7 @@ function Club_Stat_Flush($force = false, $window = 60, $heartbeat = 900) {
     $attempts = (int)($pending['endpoint_claim_attempts'] ?? 0);
     $summary = ['slot' => $slot, 'pid' => getmypid(), 'window_s' => $elapsed,
         'endpoint_claim_attempts' => $attempts,
-        // 命中率仍然是「拿到租约的比例」，跨版本可比。没拿到的两种原因差别很大，
-        // 所以 races 单列：hit 低而 races 高是并发开过头，hit 低而 races 是 0 才是没活干
+        // 命中率仍然是「拿到租约的比例」，跨版本可比。没拿到的两种原因差别很大，所以 races 单列：hit 低而 races 高是并发开过头，hit 低而 races 是 0 才是没活干
         'endpoint_claim_hit' => $attempts ? round(1 - (($pending['endpoint_misses'] ?? 0)
             + ($pending['endpoint_claim_races'] ?? 0)) / $attempts, 3) : 0,
         'scheduler_db_ops' => (int)($pending['scheduler_db_ops'] ?? 0)];
@@ -629,8 +580,7 @@ function Club_Stat_Flush($force = false, $window = 60, $heartbeat = 900) {
     return true;
 }
 
-// FPM 也会走 resolver，跨进程的 DNS 争用只能靠两边各自的汇总在日志侧拼起来。
-// 请求里一次 DNS 都没发生时不写，否则每个页面请求都要多一行
+// FPM 也会走 resolver，跨进程的 DNS 争用只能靠两边各自的汇总在日志侧拼起来。请求里一次 DNS 都没发生时不写，否则每个页面请求都要多一行
 function Club_Stat_Request() {
     $counters = Club_Stat(null); $samples = Club_Stat_Sample(null);
     if (!$counters) return false;
@@ -766,8 +716,7 @@ function Club_Fetch_Actor($club, $actor) {
         Club_Log_Event('warning', 'fetch actor failed: '.$actor);
         return false;
     }
-    // inbox 是这个 actor 之后所有投递的 key，规范化不了就没有能落库的目标：
-    // 存原样的话，同一个 inbox 换个大小写写法就会变成两条 endpoint、两套退避
+    // inbox 是这个 actor 之后所有投递的 key，规范化不了就没有能落库的目标：存原样的话，同一个 inbox 换个大小写写法就会变成两条 endpoint、两套退避
     if (($inbox = Club_Endpoint_Require($jsonld['inbox'], ['actor' => $actor])) === false) {
         Club_Log_Event('warning', 'fetch actor failed, inbox is not a usable endpoint',
             ['actor' => $actor, 'inbox' => $jsonld['inbox']]);
@@ -822,22 +771,16 @@ function Club_Sync_Actor($actor, $cooldown = 3600) {
     return ($club = Club_System()) ? Club_Fetch_Actor($club, $actor) : false;
 }
 
-// 所有远端 inbox 进 users、queues、endpoints、blacklist 之前的唯一入口。
-// 规范化结果既是数据库主键，也是真正交给 cURL 的 URL，两者必须是同一个字符串。
-// 只合并协议上必然等价的写法：scheme 和域名的大小写、默认端口、IPv6 压缩、空 path。
-// path 和 query 一个字节都不动 —— 反向代理完全可以让 /Inbox 和 /inbox 落到两个应用，
-// 猜错了就是把两家的投递串到一起。失败返回 false
+// 所有远端 inbox 进 users、queues、endpoints、blacklist 之前的唯一入口。规范化结果既是数据库主键，也是真正交给 cURL 的 URL，两者必须是同一个字符串。
+// 只合并协议上必然等价的写法：scheme 和域名的大小写、默认端口、IPv6 压缩、空 path。path 和 query 一个字节都不动 —— 反向代理完全可以让 /Inbox 和 /inbox 落到两个应用，猜错了就是把两家的投递串到一起
 function Club_Endpoint_Normalize($url) {
     if (!is_string($url) || $url === '') return false;
-    // 非 ASCII 可打印字符直接拒绝：IDN 和 UTF-8 path 这一版不做转换，
-    // 硬塞进 ascii 列只会被 MySQL 截断或报错，不如在入口挡掉
-    // fragment 即使为空也不能进 endpoint；PHP 7.3/8.x 对尾随 # 的 parse_url 结果不同，
-    // 所以必须从原始 URL 判断。
+    // 非 ASCII 可打印字符直接拒绝：IDN 和 UTF-8 path 这一版不做转换，硬塞进 ascii 列只会被 MySQL 截断或报错，不如在入口挡掉。fragment 即使为空也不能进 endpoint；
+    // PHP 7.3/8.x 对尾随 # 的 parse_url 结果不同，所以必须从原始 URL 判断
     if (preg_match('/[^\x21-\x7e]/', $url) || strpos($url, '#') !== false
         || !($parts = parse_url($url))) return false;
     if (!isset($parts['scheme'], $parts['host'])) return false;
-    // userinfo 能把 curl 带去另一个 host，fragment 根本不会发给服务端，
-    // 两者都不该出现在一个 inbox 里，出现了就是这个 URL 本身有问题
+    // userinfo 能把 curl 带去另一个 host，fragment 根本不会发给服务端，两者都不该出现在一个 inbox 里，出现了就是这个 URL 本身有问题
     if (isset($parts['user']) || isset($parts['pass']) || isset($parts['fragment'])) return false;
     if (($scheme = strtolower($parts['scheme'])) !== 'http' && $scheme !== 'https') return false;
     $host = $parts['host'];
@@ -858,15 +801,13 @@ function Club_Endpoint_Normalize($url) {
     }
     $canonical = $scheme.'://'.$host.$port
         .(isset($parts['path']) && $parts['path'] !== '' ? $parts['path'] : '/');
-    // 同样从原始 URL 取 query：尾随 ? 是一个真实的空 query，不能被 7.3 丢掉；
-    // 值恰好为 "0" 也不能被 empty() 当成不存在。
+    // 同样从原始 URL 取 query：尾随 ? 是一个真实的空 query，不能被 7.3 丢掉；值恰好为 "0" 也不能被 empty() 当成不存在。
     if (($query = strpos($url, '?')) !== false) $canonical .= substr($url, $query);
     // 列宽就是 255，超了写进去是被截断的半截 URL，投不出去也对不上黑名单
     return strlen($canonical) > 255 ? false : $canonical;
 }
 
-// 规范化失败必须留下来源。只返回 false 的话，事后只知道少了一次投递，
-// 不知道是谁的 inbox 坏了，也就没法去刷新那个 actor
+// 规范化失败必须留下来源。只返回 false 的话，事后只知道少了一次投递，不知道是谁的 inbox 坏了，也就没法去刷新那个 actor
 function Club_Endpoint_Require($url, $context = []) {
     if (($canonical = Club_Endpoint_Normalize($url)) !== false) return $canonical;
     Club_Log_Event('warning', 'endpoint rejected, url cannot be normalized',
@@ -874,20 +815,15 @@ function Club_Endpoint_Require($url, $context = []) {
     return false;
 }
 
-// endpoint、blacklist、DNS 三处租约共用。数据库存 binary(16)，PHP 只经手 hex：
-// 原始 16 字节里有 NUL，绑进 utf8mb4 的模拟预处理连接就是一串截断的乱码
+// endpoint、blacklist、DNS 三处租约共用。数据库存 binary(16)，PHP 只经手 hex：原始 16 字节里有 NUL，绑进 utf8mb4 的模拟预处理连接就是一串截断的乱码
 function Club_Token() {
     return bin2hex(random_bytes(16));
 }
 
-// endpoint 和 blacklist 领取共用的挑选策略。两处都是先用非锁定读取一小组候选，
-// 再逐条按主键 CAS —— 沿二级索引扫描的 UPDATE 先锁索引记录再回表锁主键，而所有
-// 完成路径都是先按主键锁行、末尾才回头改索引列，两个方向凑成环就是 1213。
-// 起点取 token 的前 8 bit，让并发的 worker 不要每轮都挤在最早的那一条上；抢输就
-// 换下一条，影响 0 行的 UPDATE 在 RC 下不留锁，换一条不会把锁集合摊大。
-// 不用 mt_rand 是因为它只在 fork 之后首次使用才各自播种：master 将来但凡在 fork
-// 之前碰一次 PRNG，几十个 worker 就会静默地同步挑同一条候选。token 是 random_bytes，
-// 按构造就没有这个前提。候选都被抢走返回 null，跟「一条候选都没有」由调用方各自区分
+// endpoint 和 blacklist 领取共用：先无锁读候选，再逐条按主键 CAS；二级索引 UPDATE 与完成路径锁序相反，会形成 1213 死锁。
+// 起点取 token 的前 8 bit，让并发的 worker 不要每轮都挤在最早的那一条上；抢输就换下一条，影响 0 行的 UPDATE 在 RC 下不留锁，换一条不会把锁集合摊大。
+// 不用 mt_rand 是因为它只在 fork 之后首次使用才各自播种：master 将来但凡在 fork 之前碰一次 PRNG，几十个 worker 就会静默地同步挑同一条候选。token 是 random_bytes，按构造就没有这个前提。
+// 候选都被抢走返回 null，跟「一条候选都没有」由调用方各自区分
 function Club_Lease_Pick($candidates, $token, $attempt, $tries = 3) {
     $count = count($candidates); $start = hexdec(substr($token, 0, 2)) % $count;
     for ($i = 0; $i < min($tries, $count); $i++) {
@@ -897,16 +833,12 @@ function Club_Lease_Pick($candidates, $token, $attempt, $tries = 3) {
     return null;
 }
 
-// 一次入队涉及的所有 target 的控制行。跟 task、queues 同一个事务提交，
-// 不会留下「有活动可投、没人调度」的半成品
+// 一次入队涉及的所有 target 的控制行。跟 task、queues 同一个事务提交，不会留下「有活动可投、没人调度」的半成品
 function Club_Endpoint_Upsert($task) {
     global $db;
-    // 分组列不能直接在 on duplicate key update 里引用，套一层 derived table 才行；
-    // order by 让批量 upsert 按主键的二进制序取锁，减少和别的入队互相咬住的机会。
-    // greatest(retry_at, ...) 是硬边界：新活动不能把退避中的 endpoint 提前唤醒；
-    // next_at 为空的分支保证空 endpoint 收到新 queue 之后重新可调度。
-    // 算出来的 next_at 必然非空（incoming 是 min(due_at)，而 blacklist target 根本
-    // 入不了 queue），所以 idle_since 无条件清零：这一行重新排上了，不再是待回收的空行
+    // 分组列不能直接在 on duplicate key update 里引用，套一层 derived table 才行；order by 让批量 upsert 按主键的二进制序取锁，减少和别的入队互相咬住的机会。
+    // greatest(retry_at, ...) 是硬边界：新活动不能把退避中的 endpoint 提前唤醒；next_at 为空的分支保证空 endpoint 收到新 queue 之后重新可调度。
+    // 算出来的 next_at 必然非空（incoming 是 min(due_at)，而 blacklist target 根本入不了 queue），所以 idle_since 无条件清零：这一行重新排上了，不再是待回收的空行
     $pdo = $db->prepare('insert into `endpoints` (`url`, `next_at`)'.
         ' select `incoming`.`url`, `incoming`.`next_at` from ('.
         ' select `q`.`target` collate ascii_bin as `url`, min(`q`.`due_at`) as `next_at`'.
@@ -951,8 +883,7 @@ function Club_Queue_Insert($task, $target) {
     $result = $pdo->execute([':tid' => $task, ':target' => $target,
         ':check' => $target, ':now' => time()]);
     if (!$result) return false;
-    // SQL 成功但没写行表示目标正在 blacklist；它是业务终态，不伪装成数据库异常，
-    // 也不能告诉私信/Accept 调用方“已经入队”。
+    // SQL 成功但没写行表示目标正在 blacklist；它是业务终态，不伪装成数据库异常，也不能告诉私信/Accept 调用方“已经入队”。
     if (!$pdo->rowCount()) {
         Club_Log_Event('debug', 'push target is blacklisted', ['target' => $target]);
         return null;
@@ -960,8 +891,7 @@ function Club_Queue_Insert($task, $target) {
     return true;
 }
 
-// 按 shared_inbox 的二进制顺序分页入队。不能把大群组全部 fetchAll 到 PHP；投稿者 inbox
-// 也要通过同一个 UNION 游标插进全局顺序，否则它排在关注者之后会破坏并发事务的取锁顺序。
+// 按 shared_inbox 的二进制顺序分页入队。不能把大群组全部 fetchAll 到 PHP；投稿者 inbox 也要通过同一个 UNION 游标插进全局顺序，否则它排在关注者之后会破坏并发事务的取锁顺序。
 function Club_Queue_Insert_Followers($task, $club, $inbox = false) {
     global $db;
     $cursor = null; $page = 250; $now = time(); $invalid = []; $invalid_count = 0;
@@ -1002,9 +932,8 @@ function Club_Queue_Insert_Followers($task, $club, $inbox = false) {
         if ($valid) {
             $select = []; $insert = [':tid' => $task, ':now' => $now];
             foreach ($valid as $i => $target) {
-                // 参数在 utf8mb4 连接上就是 utf8mb4，直接拿去 collate ascii_bin 会被
-                // MySQL 按 1253 拒掉，整批扇出跟着回滚。转成 ascii 之后，跟
-                // blacklist.target 的比较和下面的排序才都落在同一个字符集上
+                // 参数在 utf8mb4 连接上就是 utf8mb4，直接拿去 collate ascii_bin 会被 MySQL 按 1253 拒掉，整批扇出跟着回滚。
+                // 转成 ascii 之后，跟 blacklist.target 的比较和下面的排序才都落在同一个字符集上
                 $key = ':target'.$i; $insert[$key] = $target;
                 $select[] = 'select convert('.$key.' using ascii) collate ascii_bin as `target`';
             }
@@ -1032,8 +961,7 @@ function Club_Queue_Delete($id, $task) {
 }
 
 // 数组是本站自己组的活动，字符串是原样透传的远端活动（$type 由调用方给）。
-// 透传的那份绝不能解码后重新编码：RsaSignature2017 签的是整包规范化的结果，
-// 而 json_decode 的关联数组模式会把 {} 变成 []，再编码出来签名就废了
+// 透传的那份绝不能解码后重新编码：RsaSignature2017 签的是整包规范化的结果，而 json_decode 的关联数组模式会把 {} 变成 []，再编码出来签名就废了
 function Club_Push_Enqueue($club, $activity, $direct, $inbox, &$error, &$reason) {
     global $db;
     if (!($task = Club_Task_Create('push', $club, $activity))) {
@@ -1043,8 +971,7 @@ function Club_Push_Enqueue($club, $activity, $direct, $inbox, &$error, &$reason)
     $queued = $direct ? Club_Queue_Insert($task, $inbox)
         : Club_Queue_Insert_Followers($task, $club, $inbox);
     if ($queued === null) {
-        // anti-blacklist 没产生 queue，刚建的 task 没有消费者；同一事务里收掉，调用方
-        // 保留可重试的本地状态（例如待撤回 notice），等 endpoint 恢复后再尝试。
+        // anti-blacklist 没产生 queue，刚建的 task 没有消费者；同一事务里收掉，调用方保留可重试的本地状态（例如待撤回 notice），等 endpoint 恢复后再尝试。
         $pdo = $db->prepare('delete from `tasks` where `tid` = :tid'.
             ' and not exists (select 1 from `queues` where `tid` = :tid_check)');
         $pdo->execute([':tid' => $task, ':tid_check' => $task]);
@@ -1060,8 +987,7 @@ function Club_Push_Activity($club, $activity, $inbox = false, $direct = false, $
     global $db;
     $reason = null;
     if (is_array($activity)) { $type = $activity['type']; $activity = Club_Json_Encode($activity); }
-    // 直接投递（Accept、私信）的目标是调用方现给的，规范化不了就没有可写库的 key。
-    // 先建一个投不出去的 task 只会在队列里留一条谁都处理不掉的行，这里必须显式失败
+    // 直接投递（Accept、私信）的目标是调用方现给的，规范化不了就没有可写库的 key。先建一个投不出去的 task 只会在队列里留一条谁都处理不掉的行，这里必须显式失败
     if ($direct && ($inbox = Club_Endpoint_Require($inbox, ['club' => $club, 'type' => $type])) === false) {
         $reason = 'invalid-endpoint';
         Club_Log_Event('error', 'push failed, target inbox is not a usable endpoint',
@@ -1137,8 +1063,7 @@ function Club_Limit_Check($club, $user, $content) {
     return false;
 }
 
-// 用系统群组发私信提醒。传了 $reply 就作为那条帖子的回复发出，每条都回；
-// 不针对具体帖子的提醒才做冷却，避免刷屏
+// 用系统群组发私信提醒。传了 $reply 就作为那条帖子的回复发出，每条都回；不针对具体帖子的提醒才做冷却，避免刷屏
 function Club_Notice_Send($actor, $type, $vars = [], $lang = null, $reply = null, $cooldown = 3600) {
     global $db, $base, $config;
     if (!($config['notice']['enabled'] ?? true) || empty($actor)) return false;
@@ -1209,8 +1134,7 @@ function Club_Notice_Send($actor, $type, $vars = [], $lang = null, $reply = null
     });
 }
 
-// 用户删帖时把针对这条帖子的提醒一并撤回，不留孤儿回复。
-// 限定 actor，不然别人报一个帖子 id 就能把发给你的提醒清掉
+// 用户删帖时把针对这条帖子的提醒一并撤回，不留孤儿回复。限定 actor，不然别人报一个帖子 id 就能把发给你的提醒清掉
 function Club_Notice_Delete($object, $actor) {
     global $db;
     $pdo = $db->prepare('select n.id, n.note, u.actor, u.inbox, u.shared_inbox from `notices` `n`'.
@@ -1228,8 +1152,7 @@ function Club_Notice_Delete($object, $actor) {
     return Club_Notice_Revoke($notices);
 }
 
-// 迁移保留的非 canonical endpoint 不能被“顺手规范化”后继续使用；只有缓存值本身已经
-// 精确 canonical 才可派生 queue。个人 inbox 坏掉时，合法 shared inbox 是安全的后备目标。
+// 迁移保留的非 canonical endpoint 不能被“顺手规范化”后继续使用；只有缓存值本身已经精确 canonical 才可派生 queue。个人 inbox 坏掉时，合法 shared inbox 是安全的后备目标。
 function Club_Notice_Endpoint($notice) {
     foreach (['inbox', 'shared_inbox'] as $key) {
         $url = $notice[$key] ?? null;
@@ -1239,8 +1162,7 @@ function Club_Notice_Endpoint($notice) {
     return false;
 }
 
-// 只删本地记录的话对端会永远留着那条私信，所以要撤回。revoke 用稳定 id 游标扫一轮；
-// 坏 endpoint 留下原记录但本轮仍向后走，扫到底后再按 interval 退避，不能卡在前 20 条热循环。
+// 只删本地记录的话对端会永远留着那条私信，所以要撤回。revoke 用稳定 id 游标扫一轮；坏 endpoint 留下原记录但本轮仍向后走，扫到底后再按 interval 退避，不能卡在前 20 条热循环。
 function Club_Notice_Expire($days = 30, $limit = 20, $interval = 600) {
     global $db; static $last = 0, $cursor = 0, $cleanup = false;
     $now = time();
@@ -1273,8 +1195,7 @@ function Club_Notice_Expire($days = 30, $limit = 20, $interval = 600) {
 function Club_Notice_Revoke($notices) {
     global $db, $base;
     if (!$notices) return 0;
-    // maintain 也走这里，绝不能触发 resolver/cURL；只用查询带来的两个缓存值做纯校验。
-    // 两个都不可用的 notice 留着等 web Delete 刷新，或下一轮缓存自然更新。
+    // maintain 也走这里，绝不能触发 resolver/cURL；只用查询带来的两个缓存值做纯校验。两个都不可用的 notice 留着等 web Delete 刷新，或下一轮缓存自然更新。
     $ready = []; $failed = [];
     foreach ($notices as $notice) {
         $actor = (string)($notice['actor'] ?? '');
@@ -1292,8 +1213,7 @@ function Club_Notice_Revoke($notices) {
     return Club_DB_Transaction('notice revoke', function () use ($db, $club, $club_url, $ready) {
         $deleted = 0;
         foreach ($ready as $notice) {
-            // Club_Notice_Delete 与 expiry 可能撞上；先按 id 锁定仍存在的原记录，避免两边
-            // 各自创建一条 Delete task。所有 notice 都按 id 升序取锁。
+            // Club_Notice_Delete 与 expiry 可能撞上；先按 id 锁定仍存在的原记录，避免两边各自创建一条 Delete task。所有 notice 都按 id 升序取锁。
             $pdo = $db->prepare('select `id` from `notices` where `id` = :id and `note` = :note for update');
             $pdo->execute([':id' => $notice['id'], ':note' => $notice['note']]);
             if (!$pdo->fetch(PDO::FETCH_COLUMN, 0)) continue;
@@ -1332,8 +1252,7 @@ function Club_Task_Cleanup($age = 30, $limit = 200) {
     return $rows >= $limit;
 }
 
-// 群组 inbox 和 shared inbox 共用，避免两处日志走偏。基名由调用方算好传进来：
-// 它同时是 event 里的关联标记，两边必须是同一个值
+// 群组 inbox 和 shared inbox 共用，避免两处日志走偏。基名由调用方算好传进来：它同时是 event 里的关联标记，两边必须是同一个值
 function Club_Log_Inbox($name, $input, $verify) {
     global $verify_reason, $verify_signed;
     // 验签没过时正文跟着降到 warning 一起留：只有失败原因没有请求体，排查时等于少了一半
@@ -1344,8 +1263,7 @@ function Club_Log_Inbox($name, $input, $verify) {
         "\n\ndigest: ".($_SERVER['HTTP_DIGEST'] ?? '-')."\n\nsigned string:\n".($verify_signed ?? '-'), 'txt');
 }
 
-// inbox 链路上每个提前 return 的去向。这条链上十几个 return 从外面看长得一模一样：
-// 没数据、没报错、logs/inbox/ 里躺着一个正常的 _input 文件，只能回源码里数 return。
+// inbox 链路上每个提前 return 的去向。这条链上十几个 return 从外面看长得一模一样：没数据、没报错、logs/inbox/ 里躺着一个正常的 _input 文件，只能回源码里数 return。
 // 写法沿用 Club_Exist_Fail 那套，在返回点直接 return Club_Inbox_Skip(...)
 function Club_Inbox_Skip($reason, $context = []) {
     Club_Log_Event('debug', 'inbox skip, '.$reason, $context);
@@ -1356,9 +1274,7 @@ class Club_Inbox_Deferred extends RuntimeException {}
 // endpoint/club 等前提本身终局无效：同样回滚本轮状态，但不能用 5xx 制造无限重投。
 class Club_Inbox_Rejected extends RuntimeException {}
 
-// inbox 的对外入口。DB 抛异常必须在 event 里也留一行，否则那边是「inbox in」之后
-// 戛然而止，判断不出是没匹配到分支还是中途挂了。
-// 500 会让对端重投，这对临时性的 DB 故障是对的行为，跟未捕获时一致
+// inbox 的对外入口。DB 抛异常必须在 event 里也留一行，否则那边是「inbox in」之后戛然而止，判断不出是没匹配到分支还是中途挂了。500 会让对端重投，这对临时性的 DB 故障是对的行为，跟未捕获时一致
 function Club_Inbox_Process($input, $club = null) {
     try { Club_Inbox_Dispatch($input, $club); }
     catch (Club_Inbox_Deferred $e) {
@@ -1376,8 +1292,7 @@ function Club_Inbox_Process($input, $club = null) {
     }
     catch (PDOException $e) {
         Club_Log_Event('error', 'inbox aborted, database error', ['error' => $e->getMessage()]);
-        // 中断可能发生在 Club_Log_Inbox 之前，那样 event 里的关联标记会指向一个不存在的文件。
-        // 报文是查这类中断的唯一依据，非补不可；已经写过的话同名覆盖，无害
+        // 中断可能发生在 Club_Log_Inbox 之前，那样 event 里的关联标记会指向一个不存在的文件。报文是查这类中断的唯一依据，非补不可；已经写过的话同名覆盖，无害
         if ($name = Club_Log_Ref()) Club_Log_Write('error', 'inbox', $name.'_input', $input);
         // 前面可能已经输出过 400，重复 header 会触发警告
         if (!headers_sent()) Club_Json_Output(['message' => 'Internal error'], 0, 500);
@@ -1388,12 +1303,10 @@ function Club_Inbox_Process($input, $club = null) {
 function Club_Inbox_Dispatch($input, $club = null) {
     global $db, $config, $verify_reason;
     $jsonld = is_array($jsonld = json_decode($input, 1)) ? $jsonld : [];
-    // 顶层数组是合法 JSON-LD（node object 的数组），Foundkey 一类实现这么发。
-    // 单个活动拆开照常处理；多元素是活动集合，只认第一条等于把其余的静默丢掉，那种不收
+    // 顶层数组是合法 JSON-LD（node object 的数组），Foundkey 一类实现这么发。单个活动拆开照常处理；多元素是活动集合，只认第一条等于把其余的静默丢掉，那种不收
     $wrapped = count($jsonld) === 1 && isset($jsonld[0]) && is_array($jsonld[0]);
     if ($wrapped) $jsonld = $jsonld[0];
-    // 拆过的包不能再转发：原始字节仍是数组形态，下游多半跟我们一样只认单个对象。
-    // 清掉之后走的就是对端没签 LD 签名时那条路 —— 本站照删、群发 Undo 撤回，只是不转原报文。
+    // 拆过的包不能再转发：原始字节仍是数组形态，下游多半跟我们一样只认单个对象。清掉之后走的就是对端没签 LD 签名时那条路 —— 本站照删、群发 Undo 撤回，只是不转原报文。
     // $input 得留着，日志里那份要的是对端发来的原样字节
     $payload = $wrapped ? null : $input;
     // type 会进日志文件名，不限成纯字母的话对端能用 ../ 穿出 logs 目录
@@ -1402,8 +1315,7 @@ function Club_Inbox_Dispatch($input, $club = null) {
     // actor 必须是外站的绝对地址：本站自己的 activity 不该从 inbox 进来，不是 URL 的也没法验签
     $host = $actor === '' ? '' : (string)parse_url($actor, PHP_URL_HOST);
 
-    // 基名一次请求只算一次：它既是 logs/inbox/ 下那组文件的前缀，也是 event 里的关联标记，
-    // 两边必须完全一致，否则从 event 定位报文时对不上。销号那条多带一段方便肉眼筛
+    // 基名一次请求只算一次：它既是 logs/inbox/ 下那组文件的前缀，也是 event 里的关联标记，两边必须完全一致，否则从 event 定位报文时对不上。销号那条多带一段方便肉眼筛
     $parts = [$club ?? 'shared_inbox', $type ?: 'unknown'];
     if ($type === 'Delete' && $actor !== '' && $actor === Club_Object_Id($jsonld['object'] ?? ''))
         $parts[] = 'actor';
@@ -1427,14 +1339,12 @@ function Club_Inbox_Dispatch($input, $club = null) {
     Club_Log_Event('debug', 'inbox in, '.$type, ['club' => $club ?? 'shared',
         'actor' => $actor, 'object' => Club_Object_Id($jsonld['object'] ?? '')]);
 
-    // 销号和改资料是广播给所有见过的实例的，绝大多数是我们从没见过的用户。这两类都只作用于
-    // actor 自己，本地没缓存过它就是空操作：验签纯属白烧一次 RSA，还会记一堆 unknown actor 的
-    // 失败日志（Update 那条更糟，默认会顺带触发一次拉取）。判据与 Mastodon 的
-    // skip_unknown_actor_activity 一致，同样放在验签之前
+    // 销号和改资料是广播给所有见过的实例的，绝大多数是我们从没见过的用户。
+    // 这两类都只作用于 actor 自己，本地没缓存过它就是空操作：验签纯属白烧一次 RSA，还会记一堆 unknown actor 的失败日志（Update 那条更糟，默认会顺带触发一次拉取）。
+    // 判据与 Mastodon 的 skip_unknown_actor_activity 一致，同样放在验签之前
     if (in_array($type, ['Delete', 'Update'], true)
         && $actor === Club_Object_Id($jsonld['object'] ?? '') && !Club_Has_Actor($actor)) {
-        // 这条路不验签也不走 Club_Log_Inbox，debug 下得自己补一份报文，
-        // 否则 event 里这条 skip 的关联标记在 logs/inbox/ 下找不到对应文件
+        // 这条路不验签也不走 Club_Log_Inbox，debug 下得自己补一份报文，否则 event 里这条 skip 的关联标记在 logs/inbox/ 下找不到对应文件
         Club_Log_Write('debug', 'inbox', $name.'_input', $input);
         return Club_Inbox_Skip('broadcast from actor we never cached', ['type' => $type, 'actor' => $actor]);
     }
@@ -1566,10 +1476,8 @@ function Club_Announce_Process($jsonld) {
     } else Club_Inbox_Skip('create already processed', ['object' => $object]);
 }
 
-// 转发的两条共同前提。
-// 一是得带 LD 签名：对端只能从 HTTP 签名验到群组，验不到原作者，没签名的转过去必被丢弃。
-// 二是不能大到离谱：转发存进 tasks.jsonld 的是对端完全可控的原始字节，出队时按关注实例数
-// 逐个扇出。2 万字的中文投稿约 118 KB，乘上千个实例就是上百 MB 出站，不封顶等于开放放大器。
+// 转发的两条共同前提。一是得带 LD 签名：对端只能从 HTTP 签名验到群组，验不到原作者，没签名的转过去必被丢弃。
+// 二是不能大到离谱：转发存进 tasks.jsonld 的是对端完全可控的原始字节，出队时按关注实例数逐个扇出。2 万字的中文投稿约 118 KB，乘上千个实例就是上百 MB 出站，不封顶等于开放放大器。
 // 上限默认写死在代码里，config.php 没同步过去时也得有个数
 function Club_Relay_Allow($jsonld, $input, $object, $type) {
     global $config; $type = strtolower($type);
@@ -1585,10 +1493,8 @@ function Club_Relay_Allow($jsonld, $input, $object, $type) {
     return true;
 }
 
-// 计票包的版本号在活动 id 的 #updates/<poll.updated_at> 后缀里（UpdatePollSerializer），随每一
-// 轮计票递增，是这类包唯一能用来判重的量：object 里没有对应字段，NoteSerializer 的 updated 只在
-// edited_at 有值时才输出，有人投票并不算编辑。
-// 编辑包（UpdateNoteSerializer）的 id 是同一个形状，重放时也会落到这里，转出去就是重复扇出。
+// 计票包的版本号在活动 id 的 #updates/<poll.updated_at> 后缀里（UpdatePollSerializer），随每一轮计票递增，是这类包唯一能用来判重的量：
+// object 里没有对应字段，NoteSerializer 的 updated 只在 edited_at 有值时才输出，有人投票并不算编辑。编辑包（UpdateNoteSerializer）的 id 是同一个形状，重放时也会落到这里，转出去就是重复扇出。
 // 它顶层有 published，值就是 edited_at；计票包的顶层只有 id、type、actor、to 四项。
 //
 // 类型和选项两项都要，跟 Mastodon 的 PollParser#valid? 对齐；type 可以是数组
@@ -1602,20 +1508,16 @@ function Club_Poll_Revision($jsonld, $object) {
     return ($revision = (int)$matches[1]) > time() + 86400 ? 0 : $revision;
 }
 
-// 原作者编辑帖子后，Mastodon 只把 Update 发给自己的关注者。A 和 B 不在同一实例、之间也没有关注
-// 关系时，B 只是通过群组的 Announce 拿到的原帖，收不到这条 Update，本地那份就永远停在旧版本。
-// 投票的计票更新同理，群组的关注者看到的票数会一直停在他们收到 Announce 的那一刻。
-// Update 自带 RsaSignature2017，对端验得出原作者，所以整包原样转出去即可
+// 原作者编辑帖子后，Mastodon 只把 Update 发给自己的关注者。A 和 B 不在同一实例、之间也没有关注关系时，B 只是通过群组的 Announce 拿到的原帖，收不到这条 Update，本地那份就永远停在旧版本。
+// 投票的计票更新同理，群组的关注者看到的票数会一直停在他们收到 Announce 的那一刻。Update 自带 RsaSignature2017，对端验得出原作者，所以整包原样转出去即可
 function Club_Update_Process($jsonld, $input) {
     global $db;
     if (!is_array($object = $jsonld['object'] ?? null) || !($id = Club_Object_Id($object['id'] ?? '')))
         return Club_Inbox_Skip('update without object id', ['actor' => $jsonld['actor']]);
     $edited = strtotime(is_string($u = $object['updated'] ?? '') ? $u : '') ?: 0;
-    // 「这条帖子本站真的 Announce 过」加「发送者就是原作者」，两条合起来就是准入闸门：
-    // 入站验签已经证明 HTTP 签名属于 $jsonld['actor']，这里再确认那个 actor 正是这条帖子的作者。
-    // 少了它，任何人往 inbox 推一包活动都能改本站的记录、并被扇到全部关注者。
-    // 注意这已经足够「我们自己」相信作者，所以本地落库照做；LD 签名是给第三方验的，
-    // 只决定能不能转发出去，不该拦住本地那一半——否则 GtS 一类不签名的实现连列表页都跟不上
+    // 「这条帖子本站真的 Announce 过」加「发送者就是原作者」，两条合起来就是准入闸门：入站验签已经证明 HTTP 签名属于 $jsonld['actor']，这里再确认那个 actor 正是这条帖子的作者。
+    // 少了它，任何人往 inbox 推一包活动都能改本站的记录、并被扇到全部关注者。注意这已经足够「我们自己」相信作者，所以本地落库照做；
+    // LD 签名是给第三方验的，只决定能不能转发出去，不该拦住本地那一半——否则 GtS 一类不签名的实现连列表页都跟不上
     $pdo = $db->prepare('select a.id, a.updated, a.clubs from `activities` `a`'.
         ' join `users` `u` on a.uid = u.uid'.
         ' where a.object = :object and a.type = :type and u.actor = :actor');
@@ -1624,11 +1526,9 @@ function Club_Update_Process($jsonld, $input) {
     if (!($activity = $pdo->fetch(PDO::FETCH_ASSOC)))
         return Club_Inbox_Skip('update for a post we never announced, or not from its author',
             ['actor' => $jsonld['actor'], 'object' => $id]);
-    // 计票包按形状认，不拿库里的 updated 反推：漏收或还没处理编辑包时，后面几个计票包带的是同一个
-    // object.updated，反推会把它们全判成编辑，并发下只有一包过得了 updated 的 CAS，被判重的那包
-    // 若是投票关闭前的最后一次计票，关注者就永远停在旧票数。
-    // 两列各判各的。updated 是正文的版本号，就是 Mastodon 的 statuses.edited_at；计票要判重是因为
-    // 本站把包原样转出去，重放就是重复扇出，Mastodon 不转发、票数重复应用一次没副作用，那边根本不判
+    // 计票包按形状认，不拿库里的 updated 反推：漏收或还没处理编辑包时，后面几个计票包带的是同一个 object.updated，反推会把它们全判成编辑，
+    // 并发下只有一包过得了 updated 的 CAS，被判重的那包若是投票关闭前的最后一次计票，关注者就永远停在旧票数。两列各判各的。updated 是正文的版本号，就是 Mastodon 的 statuses.edited_at；
+    // 计票要判重是因为本站把包原样转出去，重放就是重复扇出，Mastodon 不转发、票数重复应用一次没副作用，那边根本不判
     $poll = (bool)($revision = Club_Poll_Revision($jsonld, $object));
     // 计票包也带着编辑后的正文，漏收编辑包时顺手把本地副本补上
     $edit = $edited > (int)$activity['updated'];
@@ -1646,17 +1546,14 @@ function Club_Update_Process($jsonld, $input) {
     $vars = ['object' => $id, 'clubs' => $clubs, 'revision' => gmdate('Y-m-d\TH:i:s\Z', $revision)];
     return Club_DB_Transaction($what.' inbox', function () use ($db, $activity, $revision, $content,
         $summary, $clubs, $vars, $jsonld, $input, $id, $poll, $edit, $edited, $what, $column) {
-        // 判重、本地副本和全部转发队列必须一起提交；回滚后同一包才能重新通过版本闸门。
-        // 上面那次比较用的是事务外读到的 updated，中间可能已经有新版本落库：这条 CAS 在库里
-        // 重比一次，输的那包连正文都写不到
+        // 判重、本地副本和全部转发队列必须一起提交；回滚后同一包才能重新通过版本闸门。上面那次比较用的是事务外读到的 updated，中间可能已经有新版本落库：这条 CAS 在库里重比一次，输的那包连正文都写不到
         $pdo = $db->prepare('update `activities` set `'.$column.'` = :revision'.
             ' where `id` = :id and `'.$column.'` < :revision');
         $pdo->execute([':id' => $activity['id'], ':revision' => $revision]);
         if (!$pdo->rowCount())
             return Club_Inbox_Skip($what.' is a duplicate or older than what we relayed',
                 ['object' => $id, 'revision' => gmdate('Y-m-d\TH:i:s\Z', $revision)]);
-        // 计票包补正文得自己再 CAS 一次 updated：$edit 是事务外读的，中间可能已经有更新的编辑落库，
-        // 无条件写就是拿旧正文盖掉新的，而 updated 还停在新版本，之后再没有包会来修这份不一致。
+        // 计票包补正文得自己再 CAS 一次 updated：$edit 是事务外读的，中间可能已经有更新的编辑落库，无条件写就是拿旧正文盖掉新的，而 updated 还停在新版本，之后再没有包会来修这份不一致。
         // 推进 updated 不会让晚到的编辑包漏转发：这一包携带并转出去的就是同一份完整对象
         if ($poll && $edit) {
             $pdo = $db->prepare('update `activities` set `updated` = :edited'.
@@ -1715,8 +1612,7 @@ function Club_Follow_Process($jsonld) {
                 ]
             ], $actor['inbox'], true, null, $reason);
             if (!$queued) {
-                // 新 follower 与 Accept 必须一起提交。blacklist 是可恢复状态，503 让对端重投；
-                // 非法 endpoint/消失的 club 是终局拒绝，回滚但不能制造无限 5xx。
+                // 新 follower 与 Accept 必须一起提交。blacklist 是可恢复状态，503 让对端重投；非法 endpoint/消失的 club 是终局拒绝，回滚但不能制造无限 5xx。
                 if ($reason === 'blacklisted')
                     throw new Club_Inbox_Deferred('follow Accept target is currently blacklisted');
                 throw new Club_Inbox_Rejected('follow Accept enqueue rejected: '.($reason ?: 'unknown'));
@@ -1734,10 +1630,8 @@ function Club_Tombstone_Process($jsonld, $input = null) {
     global $db, $base, $public_streams;
     if (!is_array($jsonld['object'] ?? null) || !($object = Club_Object_Id($jsonld['object']['id'] ?? '')))
         return Club_Inbox_Skip('delete without object id', ['actor' => $jsonld['actor']]);
-    // Delete 的 id 只拿来去重，不能当准入条件：activity 的 id 在规范里是 SHOULD，
-    // GoToSocial 一类实现会省掉，拿它当准入条件的话删嘟会静默失效。
-    // 更隐蔽的是有的实现拿被删对象的 URI 当 activity id，而 activities.object 的唯一键
-    // 是全表共用的，那样去重查询会命中帖子自己的 Create 记录，同样静默跳过。
+    // Delete 的 id 只拿来去重，不能当准入条件：activity 的 id 在规范里是 SHOULD，GoToSocial 一类实现会省掉，拿它当准入条件的话删嘟会静默失效。
+    // 更隐蔽的是有的实现拿被删对象的 URI 当 activity id，而 activities.object 的唯一键是全表共用的，那样去重查询会命中帖子自己的 Create 记录，同样静默跳过。
     // 统一补成 <对象>#delete 两种都躲开，这也正是 Mastodon 自己用的形式
     $id = Club_Object_Id($jsonld['id'] ?? '');
     if ($id === '' || $id === $object) $id = $object.'#delete';
@@ -1783,8 +1677,7 @@ function Club_Tombstone_Process($jsonld, $input = null) {
                         'object' => $activity['object']
                     ]
                 ]);
-                // Undo 只撤掉群组那条转嘟，跨实例的关注者本地那份原帖会留成孤儿
-                //（作者不在他们那儿，谁也不会再来删它）。原始 Delete 一并转出去才能真正清掉。
+                // Undo 只撤掉群组那条转嘟，跨实例的关注者本地那份原帖会留成孤儿（作者不在他们那儿，谁也不会再来删它）。原始 Delete 一并转出去才能真正清掉。
                 // 放在 Undo 之后：不验 LD 签名的实现只认得 Undo，先让它落地
                 if ($relay) Club_Push_Activity($club, $input, false, false, 'Delete-relay');
             }
@@ -1794,8 +1687,7 @@ function Club_Tombstone_Process($jsonld, $input = null) {
             $pdo->execute([':activity' => $activity['id']]);
             return true;
             });
-        // 被限流拦下的帖子本来就没转发过，走到这里是正常的；但删嘟没生效时，
-        // 这条是唯一能区分「没转发过」和「作者对不上」的线索，不记就只能靠猜
+        // 被限流拦下的帖子本来就没转发过，走到这里是正常的；但删嘟没生效时，这条是唯一能区分「没转发过」和「作者对不上」的线索，不记就只能靠猜
         } else Club_Log_Event('info', 'delete has no announce to revoke',
             ['actor' => $jsonld['actor'], 'object' => $object]);
     }
@@ -1875,8 +1767,7 @@ function Club_IP_Matches($packed, $network, $bits) {
     return (ord($packed[$bytes]) & $mask) === (ord($base[$bytes]) & $mask);
 }
 
-// 只允许普通公网单播。PHP 的 NO_PRIV_RANGE/NO_RES_RANGE 没覆盖共享地址、
-// benchmark、multicast、deprecated IPv6 和 NAT64 等段，不能作为 SSRF 边界。
+// 只允许普通公网单播。PHP 的 NO_PRIV_RANGE/NO_RES_RANGE 没覆盖共享地址、benchmark、multicast、deprecated IPv6 和 NAT64 等段，不能作为 SSRF 边界。
 function Club_IP_Public($ip) {
     if (!is_string($ip) || ($packed = @inet_pton($ip)) === false) return false;
     if (strlen($packed) === 4) {
@@ -1899,25 +1790,19 @@ function Club_IP_Public($ip) {
     return true;
 }
 
-// 只放行公网 http(s)：actor、keyId、inbox 都是对端给的，
-// 不挡的话伪造一个签名就能让本站去访问 127.0.0.1、云元数据服务之类的内网目标。
-// 三态：IP 列表 = 可投的公网地址 / false 一个公网地址都没有或协议不对，该拦 /
-// null 解析不出来，什么都没证明。返回的是筛过的地址，调用方必须把它钉给 curl
+// 只放行公网 http(s)：actor、keyId、inbox 都是对端给的，不挡的话伪造一个签名就能让本站去访问 127.0.0.1、云元数据服务之类的内网目标。
+// 三态：IP 列表 = 可投的公网地址 / false 一个公网地址都没有或协议不对，该拦 / null 解析不出来，什么都没证明。返回的是筛过的地址，调用方必须把它钉给 curl
 function Club_Url_Public($url) {
     $parts = parse_url((string)$url);
     if (empty($parts['host']) || !in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'])) return false;
     // 域名要先解析成 IP 再判断，否则内网地址套个域名就绕过去了
     $host = trim($parts['host'], '[]');
     if (filter_var($host, FILTER_VALIDATE_IP)) $ips = [$host];
-    // 「解析失败」和「对端指向内网」是两回事，混成同一个 false 的话，
-    // 本地 DNS 抽一次风就要报一堆 SSRF warning。至于这次失败该不该算对端的账，
-    // 这里判不了，交给调用方问 Club_Resolver_Deferred() 和 Club_Resolver_Healthy()
+    // 「解析失败」和「对端指向内网」是两回事，混成同一个 false 的话，本地 DNS 抽一次风就要报一堆 SSRF warning。
+    // 至于这次失败该不该算对端的账，这里判不了，交给调用方问 Club_Resolver_Deferred() 和 Club_Resolver_Healthy()
     elseif (!($ips = Club_Url_Resolve($host))) return null;
-    // 剔掉私网和保留段，剩下的公网地址才交出去。剔掉就等于对 curl 不存在，所以
-    // 只拦坏地址不牵连整家：把虚拟机的 fe80:: 发到公网 DNS 的实例并不少见，
-    // 一条垃圾 AAAA 不该让一个 A 记录正常的对端整个失联。
-    // 这道防线依赖「出网必钉地址」，新增出网路径时必须一起把 $ips 带上，
-    // 否则 curl 自己解析一遍就把这里剔掉的地址捡了回去
+    // 剔掉私网和保留段，剩下的公网地址才交出去。剔掉就等于对 curl 不存在，所以只拦坏地址不牵连整家：把虚拟机的 fe80:: 发到公网 DNS 的实例并不少见，一条垃圾 AAAA 不该让一个 A 记录正常的对端整个失联。
+    // 这道防线依赖「出网必钉地址」，新增出网路径时必须一起把 $ips 带上，否则 curl 自己解析一遍就把这里剔掉的地址捡了回去
     $public = [];
     foreach ($ips as $ip) if (Club_IP_Public($ip)) $public[] = $ip;
     $public = array_values(array_unique($public));
@@ -1926,17 +1811,13 @@ function Club_Url_Public($url) {
     if (count($public) < count($ips))
         Club_Log_Event('debug', 'dropped non-public addresses', ['host' => $host,
             'kept' => implode(',', $public), 'dropped' => implode(',', array_diff($ips, $public))]);
-    // 是不是公网每次都由 IP 现算，不缓存这个结论：它是 IP 的纯函数，而 IP 已经缓存过了。
-    // 单独存一份就是第二个时钟，放行的有效期可能超过 IP 的，安全窗口会悄悄漂长
+    // 是不是公网每次都由 IP 现算，不缓存这个结论：它是 IP 的纯函数，而 IP 已经缓存过了。单独存一份就是第二个时钟，放行的有效期可能超过 IP 的，安全窗口会悄悄漂长
     return $public;
 }
 
-// A 查到了就不查 AAAA 的话，对端只要 A 摆个公网地址、AAAA 指 ::1，
-// curl 默认优先走 v6 就绕过了检查，所以两种记录都要查，取并集一起校验。
-// 缓存只有 dns 表这一层，几十个 worker 加 fpm 共用。别再往进程内加一层：
-// 一次推送几千个对端、每个进程只经手其中一小份，下一条推送绝大多数 host 还是冷的，
-// 白占内存还多一个时钟；而查一次主键比查一次 DNS 快两个数量级。
-// 返回地址列表；[] 是查过了确实没有，false 是这一轮压根没查成，后者不能算对端的账
+// A 查到了就不查 AAAA 的话，对端只要 A 摆个公网地址、AAAA 指 ::1，curl 默认优先走 v6 就绕过了检查，所以两种记录都要查，取并集一起校验。缓存只有 dns 表这一层，几十个 worker 加 fpm 共用。
+// 别再往进程内加一层：一次推送几千个对端、每个进程只经手其中一小份，下一条推送绝大多数 host 还是冷的，白占内存还多一个时钟；而查一次主键比查一次 DNS 快两个数量级。返回地址列表；
+// [] 是查过了确实没有，false 是这一轮压根没查成，后者不能算对端的账
 function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
     $now = time(); Club_Resolver_Deferred(false);
     $row = Club_Resolver_Read($host);
@@ -1944,8 +1825,7 @@ function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
     if ($row && $row['checked_at'] > $now - ($row['ips'] === '' ? $miss : $ttl))
         return Club_Resolver_Cached($host, $row, $now, $miss);
     $stock = $row && $row['ips'] !== '' && $row['checked_at'] > $now - $stale ? $row['ips'] : null;
-    // 几十个进程同时发现同一个 host 过期会一起去查 DNS。抢到刷新锁的那个才真去解析，
-    // 其余的拿旧值先顶一轮；连旧值都没有的只能等赢家提交
+    // 几十个进程同时发现同一个 host 过期会一起去查 DNS。抢到刷新锁的那个才真去解析，其余的拿旧值先顶一轮；连旧值都没有的只能等赢家提交
     if (!Club_Resolver_Claim($host, $now, $token = Club_Token())) {
         Club_Stat('dns_contention');
         if (isset($stock)) {
@@ -1954,11 +1834,8 @@ function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
                 ['host' => $host, 'age' => $now - $row['checked_at'], 'ip' => $stock]);
             return explode(',', $stock);
         }
-        // 冷缓存又没抢到锁。自己再查一遍就把「同一个 host 只查一次」作废了，
-        // 32 个进程会一起打 UDP；赢家通常一秒内就提交，等一小会儿再重读划算得多。
-        // 抖动是为了别在同一刻齐步回来
-        // 负结果的新鲜窗口仍然是 $miss：拿一条上面刚判过期的负缓存当赢家的结论，
-        // 等于让对端为本站这一轮没查成的 DNS 白记一次 unresolved 和一整套退避
+        // 冷缓存又没抢到锁。自己再查一遍就把「同一个 host 只查一次」作废了，32 个进程会一起打 UDP；赢家通常一秒内就提交，等一小会儿再重读划算得多。抖动是为了别在同一刻齐步回来。
+        // 负结果的新鲜窗口仍然是 $miss：拿一条上面刚判过期的负缓存当赢家的结论，等于让对端为本站这一轮没查成的 DNS 白记一次 unresolved 和一整套退避
         usleep(mt_rand(200000, 1000000)); $now = time();
         if (($row = Club_Resolver_Read($host))
             && $row['checked_at'] > $now - ($row['ips'] === '' ? $miss : $ttl))
@@ -1968,25 +1845,21 @@ function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
         return false;
     }
     $ips = Club_Resolver_Query($host);
-    // 解析失败但手上还有一小时内的旧值：只放掉刷新锁，不写负缓存。写了的话一次
-    // SERVFAIL 就把还能用的地址抹掉；而 Store 会重置 checked_at，那道 1 小时的
-    // 安全边界会跟着一起续命，域名真改指到内网时我们还在拿旧地址放行
+    // 解析失败但手上还有一小时内的旧值：只放掉刷新锁，不写负缓存。写了的话一次 SERVFAIL 就把还能用的地址抹掉；
+    // 而 Store 会重置 checked_at，那道 1 小时的安全边界会跟着一起续命，域名真改指到内网时我们还在拿旧地址放行
     if (!$ips && isset($stock)) {
         Club_Resolver_Release($host, $token); Club_Stat('dns_stale');
         Club_Log_Event('debug', 'dns lookup failed, reusing cached address',
             ['host' => $host, 'age' => $now - $row['checked_at'], 'ip' => $stock]);
         return explode(',', $stock);
     }
-    // 负结果也要落库。不记的话，一家解析不出来的对端，它名下每一行都要重查一遍，
-    // 几千行乘以两次阻塞查询，足够把容器的 UDP conntrack 打满、把好域名也拖成解析失败
+    // 负结果也要落库。不记的话，一家解析不出来的对端，它名下每一行都要重查一遍，几千行乘以两次阻塞查询，足够把容器的 UDP conntrack 打满、把好域名也拖成解析失败
     if (!Club_Resolver_Store($host, $token, $ips ? implode(',', $ips) : '', time())) {
-        // 真实查询超过 30 秒，锁已经被别人接走：这份结果是旧的，覆盖新 owner 提交的
-        // 地址等于把安全检查退回上一轮，只能丢掉自己的结果去读赢家的
+        // 真实查询超过 30 秒，锁已经被别人接走：这份结果是旧的，覆盖新 owner 提交的地址等于把安全检查退回上一轮，只能丢掉自己的结果去读赢家的
         Club_Stat('dns_stale_store');
         Club_Log_Event('debug', 'stale dns result discarded', ['host' => $host, 'token' => $token]);
         // 赢家可能也还没提交，读回来的仍是过期行；超出窗口就不能再用了。
-        // 旧正缓存可以顶到 stale，负缓存只认 $miss —— 它不是可以续命的地址，
-        // 是一个「查了没有」的结论，过了期就该重查而不是拿去判对端失败
+        // 旧正缓存可以顶到 stale，负缓存只认 $miss —— 它不是可以续命的地址，是一个「查了没有」的结论，过了期就该重查而不是拿去判对端失败
         if (($row = Club_Resolver_Read($host))
             && $row['checked_at'] > time() - ($row['ips'] === '' ? $miss : $stale))
             return Club_Resolver_Cached($host, $row, time(), $miss);
@@ -1999,8 +1872,7 @@ function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
     return [];
 }
 
-// 命中已提交缓存的共同出口：正缓存顺带给本站 DNS 记一笔实据，
-// 但成功的时刻是写缓存那个进程的，不是此刻
+// 命中已提交缓存的共同出口：正缓存顺带给本站 DNS 记一笔实据，但成功的时刻是写缓存那个进程的，不是此刻
 function Club_Resolver_Cached($host, $row, $now, $miss) {
     if ($row['ips'] !== '') {
         Club_Stat('dns_positive'); Club_Resolver_Healthy($row['checked_at']);
@@ -2013,36 +1885,28 @@ function Club_Resolver_Cached($host, $row, $now, $miss) {
     return [];
 }
 
-// 上一次解析是不是「没查成」而不是「查了没有」。前者要判 local-dns：
-// 这一轮既没问过 DNS 也没问过对端，记在对端头上会让它白等一整套退避阶梯
+// 上一次解析是不是「没查成」而不是「查了没有」。前者要判 local-dns：这一轮既没问过 DNS 也没问过对端，记在对端头上会让它白等一整套退避阶梯
 function Club_Resolver_Deferred($set = null) {
     static $deferred = false;
     if (isset($set)) $deferred = (bool)$set;
     return $deferred;
 }
 
-// 一次查不到，到底是对端注销了域名、还是本站 DNS 坏了？单看这一次分不出来。
-// 但本站 DNS 坏了不会只坏一个 host：最近还成功解析过别的域名，就说明出口是通的，
-// 那这次查不到就是对端自己的事，该照常记失败；反之才是我们的问题，不能算在对端头上。
-// $mark 可以传时间戳：拿的是别的进程的成功记录，那是实据，但时刻是它的
+// 一次查不到，到底是对端注销了域名、还是本站 DNS 坏了？单看这一次分不出来。但本站 DNS 坏了不会只坏一个 host：最近还成功解析过别的域名，就说明出口是通的，那这次查不到就是对端自己的事，该照常记失败；
+// 反之才是我们的问题，不能算在对端头上。$mark 可以传时间戳：拿的是别的进程的成功记录，那是实据，但时刻是它的
 function Club_Resolver_Healthy($mark = false, $window = 600) {
     global $db, $config; static $last = 0;
     if ($mark !== false) { $last = max($last, $mark === true ? time() : (int)$mark); return true; }
     if ($last > time() - $window) return true;
-    // 本进程手上没有实据就问全站。只靠进程内那个 static 的话，刚 fork 出来的 worker
-    // 它是 0，接手的头几条只要正好是解析不出来的对端，就会一口咬定本站 DNS 坏了 ——
-    // 解析结果挪进 dns 表之后真解析本来就少，这个信号单靠一个进程攒不起来。
-    // 空 ips 是负缓存，它证明的是「查了没有」，不能拿来当本站 DNS 通着的实据。
-    // 只在准备下结论前跑，正常时随便扫几行就命中；真出口断了才会扫满，而那时也确实该断言
+    // 本进程手上没有实据就问全站。
+    // 只靠进程内那个 static 的话，刚 fork 出来的 worker 它是 0，接手的头几条只要正好是解析不出来的对端，就会一口咬定本站 DNS 坏了 —— 解析结果挪进 dns 表之后真解析本来就少，
+    // 这个信号单靠一个进程攒不起来。空 ips 是负缓存，它证明的是「查了没有」，不能拿来当本站 DNS 通着的实据。只在准备下结论前跑，正常时随便扫几行就命中；真出口断了才会扫满，而那时也确实该断言
     $pdo = $db->prepare('select `checked_at` from `dns` where length(`ips`) > 0 and `checked_at` > :window limit 1');
     $pdo->execute([':window' => time() - $window]);
     if ($resolved = $pdo->fetch(PDO::FETCH_COLUMN, 0)) { $last = max($last, (int)$resolved); return true; }
     // 全站都没有新鲜的成功记录，不等于解析坏了 —— 也可能只是这段时间没人投递过。
-    // 拿沉默当反面证据的话，闲下来之后每个死域名都会被判成本站 DNS 的锅，
-    // 而那条路既不记失败也不放弃，行每 300 秒重投一次，永远死不掉。
-    // 所以自己去解析一个必然存在的域名：本站自己的。它都解析不动才真是我们的问题。
-    // 看的是 $last 有没有被标上而不是返回值：真查通了和 stale 兜底拿回旧地址，
-    // 后者恰恰说明这会儿解析不动。缓存也顺带把频率压住，300 秒内不会再探第二次
+    // 拿沉默当反面证据的话，闲下来之后每个死域名都会被判成本站 DNS 的锅，而那条路既不记失败也不放弃，行每 300 秒重投一次，永远死不掉。所以自己去解析一个必然存在的域名：本站自己的。
+    // 它都解析不动才真是我们的问题。看的是 $last 有没有被标上而不是返回值：真查通了和 stale 兜底拿回旧地址，后者恰恰说明这会儿解析不动。缓存也顺带把频率压住，300 秒内不会再探第二次
     Club_Url_Resolve($config['base']);
     return $last > time() - $window;
 }
@@ -2055,8 +1919,7 @@ function Club_Resolver_Read($host) {
 }
 
 // 抢刷新权。行还不存在时 insert ignore 建出来，插进去的那个自然就是抢到的。
-// 锁和缓存分成两组列：抢到就先推 checked_at 的话，这次解析要是失败了，
-// 旧 IP 的 stale 窗口会跟着一起续命，那道 1 小时的安全边界就守不住了
+// 锁和缓存分成两组列：抢到就先推 checked_at 的话，这次解析要是失败了，旧 IP 的 stale 窗口会跟着一起续命，那道 1 小时的安全边界就守不住了
 function Club_Resolver_Claim($host, $now, $token, $window = 30) {
     global $db;
     $pdo = $db->prepare('update `dns` set `lock_token` = unhex(:token), `lock_until` = :until'.
@@ -2071,8 +1934,7 @@ function Club_Resolver_Claim($host, $now, $token, $window = 30) {
     return (bool)$pdo->rowCount();
 }
 
-// 凭 token 提交解析结果。查询超过 30 秒锁就会被别人接走，那之后这份结果已经是旧的：
-// 条件不匹配时一行都不写，让调用方去读赢家提交的地址
+// 凭 token 提交解析结果。查询超过 30 秒锁就会被别人接走，那之后这份结果已经是旧的：条件不匹配时一行都不写，让调用方去读赢家提交的地址
 function Club_Resolver_Store($host, $token, $ips, $now) {
     global $db;
     $pdo = $db->prepare('update `dns` set `ips` = :ips, `checked_at` = :now,'.
@@ -2083,8 +1945,7 @@ function Club_Resolver_Store($host, $token, $ips, $now) {
     return (bool)$pdo->rowCount();
 }
 
-// 查失败又不该写负缓存时放手。同样只按 token 放：锁已经易主的话，
-// 清掉的就是新 owner 的租约，两个进程会同时对一个 host 发起真实查询
+// 查失败又不该写负缓存时放手。同样只按 token 放：锁已经易主的话，清掉的就是新 owner 的租约，两个进程会同时对一个 host 发起真实查询
 function Club_Resolver_Release($host, $token) {
     global $db;
     $pdo = $db->prepare('update `dns` set `lock_until` = 0, `lock_token` = null'.
@@ -2094,10 +1955,8 @@ function Club_Resolver_Release($host, $token) {
     return (bool)$pdo->rowCount();
 }
 
-// 真实 A/AAAA 查询的唯一出口。系统 resolver 在本进程里跑，没有应用层硬期限，
-// 卡死的进程连一行完成日志都不会留 —— 所以进去之前先同步写一条 started。
-// 事后靠「有 started 没 finished」才认得出是卡在这里，光看心跳缺失说明不了原因。
-// 命中缓存和没抢到锁的都不写：那两种情况根本没进系统 resolver
+// 真实 A/AAAA 查询的唯一出口。系统 resolver 在本进程里跑，没有应用层硬期限，卡死的进程连一行完成日志都不会留 —— 所以进去之前先同步写一条 started。
+// 事后靠「有 started 没 finished」才认得出是卡在这里，光看心跳缺失说明不了原因。命中缓存和没抢到锁的都不写：那两种情况根本没进系统 resolver
 function Club_Resolver_Query($host) {
     static $seq = 0;
     $ref = getmypid().'-'.++$seq; $start = microtime(true);
@@ -2114,14 +1973,11 @@ function Club_Resolver_Query($host) {
     return $ips;
 }
 
-// dns 只是缓存，没有队列引用这一说：长期没人问就删掉，最多让下次重查一次。
-// 刷新锁还在有效期内的不能删，否则 Store 会插回一行没人认领的缓存
+// dns 只是缓存，没有队列引用这一说：长期没人问就删掉，最多让下次重查一次。刷新锁还在有效期内的不能删，否则 Store 会插回一行没人认领的缓存
 function Club_Resolver_Cleanup($ttl = 86400, $limit = 200) {
     global $db; $now = time(); $expire = $now - $ttl;
-    // 候选只读不锁、删除按主键，理由见 Club_Lease_Pick：沿 checked_at 扫描的 DELETE
-    // 会跟 Store 先按 host 主键锁行、再回头改 checked_at 咬成一个环。DELETE 没有
-    // 半一致读，不匹配的行也要先锁上再判，光靠 lock_until 这个条件躲不开。
-    // 而 Store 在投递路径上不走 Club_DB_Retry，被选成牺牲者就是一个 worker 停一秒
+    // 候选只读不锁、删除按主键，理由见 Club_Lease_Pick：沿 checked_at 扫描的 DELETE 会跟 Store 先按 host 主键锁行、再回头改 checked_at 咬成一个环。
+    // DELETE 没有半一致读，不匹配的行也要先锁上再判，光靠 lock_until 这个条件躲不开。而 Store 在投递路径上不走 Club_DB_Retry，被选成牺牲者就是一个 worker 停一秒
     $pdo = $db->prepare('select `host` from `dns` where `lock_until` <= :now'.
         ' and `checked_at` <= :expire limit '.(int)$limit);
     $pdo->execute([':now' => $now, ':expire' => $expire]);
@@ -2131,10 +1987,9 @@ function Club_Resolver_Cleanup($ttl = 86400, $limit = 200) {
         Club_Log_Event('debug', 'dns cache has nothing expired to evict', ['age' => $ttl]);
         return 0;
     }
-    // 一条一条按主键删。候选读到手就可能被重新锁上或刷新，两个条件在 delete 里原样
-    // 重判一遍。不用 in 列表：那样虽然给的也是主键，但走不走 PRIMARY 仍由优化器的
-    // 代价估算说了算，而这里要的恰恰是「一定不沿 checked_at 扫」这个保证，
-    // 单值等值条件才给得起。顺带每条各自 autocommit，锁不会攒到整批结束
+    // 一条一条按主键删。候选读到手就可能被重新锁上或刷新，两个条件在 delete 里原样重判一遍。
+    // 不用 in 列表：那样虽然给的也是主键，但走不走 PRIMARY 仍由优化器的代价估算说了算，而这里要的恰恰是「一定不沿 checked_at 扫」这个保证，单值等值条件才给得起。
+    // 顺带每条各自 autocommit，锁不会攒到整批结束
     $pdo = $db->prepare('delete from `dns` where `host` = :host'.
         ' and `lock_until` <= :now and `checked_at` <= :expire');
     $rows = 0;
@@ -2152,14 +2007,12 @@ function Club_Resolver_Cleanup($ttl = 86400, $limit = 200) {
     return $rows;
 }
 
-// 领一条 endpoint。所有权必须在解析和出网之前就拿到手：只按 queue 行调度的话，
-// 同一个 target 的几千条行会被几十个进程各领一条，一起对同一家发请求。
+// 领一条 endpoint。所有权必须在解析和出网之前就拿到手：只按 queue 行调度的话，同一个 target 的几千条行会被几十个进程各领一条，一起对同一家发请求。
 // 候选读和领取都是 autocommit 的单条语句，不把行锁带进后面的 DNS 和 HTTP
 function Club_Endpoint_Claim($now, $lease = 120) {
     global $db; $start = microtime(true);
     // 候选只读不锁，领取按主键 CAS，取锁顺序才跟 completion 一致，理由见 Club_Lease_Pick。
-    // 只按 next_at 排序：lease_until 不是等值条件，再往 order by 里加列会跳过 schedule
-    // 索引的中间列，退化成 filesort，几万行 endpoint 时每轮都要排一遍
+    // 只按 next_at 排序：lease_until 不是等值条件，再往 order by 里加列会跳过 schedule 索引的中间列，退化成 filesort，几万行 endpoint 时每轮都要排一遍
     $pdo = $db->prepare('select `url` from `endpoints` where `next_at` is not null'.
         ' and `next_at` <= :now and `retry_at` <= :now and `lease_until` <= :now'.
         ' order by `next_at` limit 32');
@@ -2183,8 +2036,7 @@ function Club_Endpoint_Claim($now, $lease = 120) {
         return (bool)$claim->rowCount();
     });
     Club_Stat_Sample('endpoint_claim_sql_ms', (microtime(true) - $start) * 1000);
-    // 有活可干却一条都没抢到，跟空闲不是一回事：这说明并发已经压过了可调度的
-    // endpoint 数量，加进程只会让抢输更多。混进 miss 里的话命中率再也读不出这个区别
+    // 有活可干却一条都没抢到，跟空闲不是一回事：这说明并发已经压过了可调度的 endpoint 数量，加进程只会让抢输更多。混进 miss 里的话命中率再也读不出这个区别
     if (!isset($url)) {
         Club_Stat('endpoint_claim_races');
         Club_Log_Event('debug', 'endpoint claim lost every candidate it tried',
@@ -2224,10 +2076,8 @@ function Club_Endpoint_Queue($url, $token, $now) {
     return $row;
 }
 
-// 出网前的最后一道闸：解析可能已经卡过了整段租约。租约到期不单独作废 token；若尚未被
-// 接管，旧 owner 可用 CAS 续租，若已被接管 token 必然变化，所以只有影响到一行才算拿到发送权。
-// 顺带把出网前提一次查清 ——
-// 退避、queue 还在不在、有没有进黑名单，任何一条不成立都不能发
+// 出网前的最后一道闸：解析可能已经卡过了整段租约。租约到期不单独作废 token；若尚未被接管，旧 owner 可用 CAS 续租，若已被接管 token 必然变化，所以只有影响到一行才算拿到发送权。
+// 顺带把出网前提一次查清 —— 退避、queue 还在不在、有没有进黑名单，任何一条不成立都不能发
 function Club_Endpoint_Authorize($url, $token, $next, $queue, $lease = 120) {
     global $db; $now = time();
     $pdo = $db->prepare('update `endpoints` set `lease_token` = unhex(:next), `lease_until` = :until'.
@@ -2253,9 +2103,7 @@ function Club_Endpoint_Authorize($url, $token, $next, $queue, $lease = 120) {
     return false;
 }
 
-// 这条 endpoint 此刻应该排在什么时候：进了黑名单或者一条 queue 都没有是 null，
-// 其余是 max(retry_at, min(due_at))。完成、重排和对账都要算它，各写一份的话
-// 三处会慢慢漂开，而漂出来的差值恰好没人看得见
+// 这条 endpoint 此刻应该排在什么时候：进了黑名单或者一条 queue 都没有是 null，其余是 max(retry_at, min(due_at))。完成、重排和对账都要算它，各写一份的话三处会慢慢漂开，而漂出来的差值恰好没人看得见
 function Club_Endpoint_Desired($url, $retry_at) {
     global $db;
     $pdo = $db->prepare('select 1 from `blacklist` where `target` = :url');
@@ -2268,16 +2116,12 @@ function Club_Endpoint_Desired($url, $retry_at) {
     return isset($due) ? max((int)$retry_at, (int)$due) : null;
 }
 
-// 重算调度提示并放掉租约，必须在已经锁住控制行的事务里调用。
-// next_at 偏早不会绕过退避（领取和出网前都还要硬判 retry_at 和黑名单），
-// 偏晚才会真耽误投递，所以每次完成都照 queues 重算一遍。
-// 并发入队的 upsert 要改这一行就得先等我们的行锁，所以它要么排在前面已经
-// 被这次 min 看见，要么排在后面再用 least 把更早的时间写回来，不会被盖掉
+// 重算调度提示并放掉租约，必须在已经锁住控制行的事务里调用。next_at 偏早不会绕过退避（领取和出网前都还要硬判 retry_at 和黑名单），偏晚才会真耽误投递，所以每次完成都照 queues 重算一遍。
+// 并发入队的 upsert 要改这一行就得先等我们的行锁，所以它要么排在前面已经被这次 min 看见，要么排在后面再用 least 把更早的时间写回来，不会被盖掉
 function Club_Endpoint_Reschedule($url, $token, $retry_at) {
     global $db; $now = time();
     $next = Club_Endpoint_Desired($url, $retry_at);
-    // idle_since 只在「变空」的那一次落时刻，已经空着的保持原值：每次重排都刷新的话
-    // 空置时长永远回到零，回收的宽限期就再也到不了
+    // idle_since 只在「变空」的那一次落时刻，已经空着的保持原值：每次重排都刷新的话空置时长永远回到零，回收的宽限期就再也到不了
     $pdo = $db->prepare('update `endpoints` set `next_at` = :next, `lease_token` = null,'.
         ' `lease_until` = 0, `idle_since` = if(:next is null,'.
         ' if(`idle_since` > 0, `idle_since`, :now), 0)'.
@@ -2287,8 +2131,7 @@ function Club_Endpoint_Reschedule($url, $token, $retry_at) {
     return (bool)$pdo->rowCount();
 }
 
-// 领到了却没活可干、或者出网前被拦下：也要按 token 重排一次再放手。
-// 就这么让租约挂到自然过期的话，这 120 秒里这条 endpoint 谁都碰不了
+// 领到了却没活可干、或者出网前被拦下：也要按 token 重排一次再放手。就这么让租约挂到自然过期的话，这 120 秒里这条 endpoint 谁都碰不了
 function Club_Endpoint_Release($url, $token) {
     global $db; $released = false;
     try {
@@ -2308,26 +2151,20 @@ function Club_Endpoint_Release($url, $token) {
     return $released;
 }
 
-// 退避档位读故障年龄，不读次数：一家挂掉的那一刻几十个 worker 手上各有一条在途，
-// 一轮下来 fails 加的是在途条数而不是 1。放弃前仍要求最低采样数，
-// 避免一次 DNS 或网络抖动直接把整个 endpoint 清空。返回 [等多久, 要不要放弃]
+// 退避档位读故障年龄，不读次数：一家挂掉的那一刻几十个 worker 手上各有一条在途，一轮下来 fails 加的是在途条数而不是 1。放弃前仍要求最低采样数，避免一次 DNS 或网络抖动直接把整个 endpoint 清空。
+// 返回 [等多久, 要不要放弃]
 function Club_Endpoint_Backoff($reason, $age, $fails) {
-    // 指向内网是确定性的，重试不会有不同结果。但内网判定依赖 DNS，
-    // 本站解析被投毒或抽一次风就会误伤，所以隔两小时还是这个结论才算数
+    // 指向内网是确定性的，重试不会有不同结果。但内网判定依赖 DNS，本站解析被投毒或抽一次风就会误伤，所以隔两小时还是这个结论才算数
     if ($reason == 'blocked') return [3600, $age > 7200 && $fails >= 3];
-    // 换 NS 的传播、域名续费后恢复、DNSSEC 配错修好，都是小时级的事，
-    // 前两天密集探测才接得住；之后逐档拉开，一个月还没回来才认定是真没了
+    // 换 NS 的传播、域名续费后恢复、DNSSEC 配错修好，都是小时级的事，前两天密集探测才接得住；之后逐档拉开，一个月还没回来才认定是真没了
     if ($reason == 'unresolved')
         return [$age < 172800 ? 300 : ($age < 604800 ? 3600 : 21600), $age > 2592000 && $fails >= 7];
-    // 对端临时挂掉是常态，这套阶梯本来就是照着它调的。顶档不敢拉太长：
-    // 同一 endpoint 只放一条在途，这个间隔就等于探活间隔，拉长它不省并发、
-    // 只让恢复更晚被发现
+    // 对端临时挂掉是常态，这套阶梯本来就是照着它调的。顶档不敢拉太长：同一 endpoint 只放一条在途，这个间隔就等于探活间隔，拉长它不省并发、只让恢复更晚被发现
     return [$age < 300 ? 60 : ($age < 1800 ? 300 : ($age < 7200 ? 600 : 900)),
         $age > 604800 && $fails >= 7];
 }
 
-// 投递结果落库的唯一路径。先按 token 锁住控制行：租约过期且已被接管的旧 worker 回来时，
-// 它手上的 token 已经不是当前那个，这里一个字都写不进去，删不掉新 owner 的 queue。
+// 投递结果落库的唯一路径。先按 token 锁住控制行：租约过期且已被接管的旧 worker 回来时，它手上的 token 已经不是当前那个，这里一个字都写不进去，删不掉新 owner 的 queue。
 // 已经发出去的 HTTP 收不回来，重复投递由远端按 Activity ID 去重
 function Club_Endpoint_Complete($url, $token, $task, $result) {
     global $db, $curl; $now = time(); $state = ''; $retry_at = 0; $fails = 0; $age = 0;
@@ -2343,13 +2180,11 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
             return false;
         }
         $fails = (int)$row['fails']; $since = (int)$row['fail_since']; $retry_at = (int)$row['retry_at'];
-        // 放弃分支要写 blacklist，而清理批次是先锁 blacklist 再删 queues。不在这里
-        // 按同一顺序先取一次，两边就各持一半互相等：清理拿着 blacklist 等 queue 行，
-        // 这边拿着 queue 行等 blacklist。行不存在时 RC 下不留 gap 锁，等于零成本
+        // 放弃分支要写 blacklist，而清理批次是先锁 blacklist 再删 queues。不在这里按同一顺序先取一次，两边就各持一半互相等：清理拿着 blacklist 等 queue 行，这边拿着 queue 行等 blacklist。
+        // 行不存在时 RC 下不留 gap 锁，等于零成本
         $pdo = $db->prepare('select `target` from `blacklist` where `target` = :url for update');
         $pdo->execute([':url' => $url]); Club_Stat('scheduler_db_ops');
-        // queue 也属于 completion 的授权边界。选中之后它可能被维护路径删除；
-        // 只凭 worker 手上的旧数组继续记失败，会把另一个 endpoint 的当前状态一起推进。
+        // queue 也属于 completion 的授权边界。选中之后它可能被维护路径删除；只凭 worker 手上的旧数组继续记失败，会把另一个 endpoint 的当前状态一起推进。
         $pdo = $db->prepare('select `tid`, `retries` from `queues`'.
             ' where `id` = :id and `target` = :url for update');
         $pdo->execute([':id' => $task['id'], ':url' => $url]); Club_Stat('scheduler_db_ops');
@@ -2362,9 +2197,8 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
         }
         $task['tid'] = $queue['tid']; $task['retries'] = (int)$queue['retries'];
         switch ($result) {
-            // 2xx，或者对端应用层给的终局拒绝。后者说明 DNS、TCP、TLS 到应用层全通，
-            // 它只是永远不会收这一条，故障段照样该结束 —— 让一条谁都不收的活动去推
-            // 整个 endpoint 的退避，就成了一行毒 payload 把好端端一家实例拉黑
+            // 2xx，或者对端应用层给的终局拒绝。
+            // 后者说明 DNS、TCP、TLS 到应用层全通，它只是永远不会收这一条，故障段照样该结束 —— 让一条谁都不收的活动去推整个 endpoint 的退避，就成了一行毒 payload 把好端端一家实例拉黑
             case 'ok':
             case 'rejected':
                 Club_Queue_Delete($task['id'], $task['tid']);
@@ -2374,13 +2208,10 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
                     $pdo->execute([':url' => $url, ':token' => $token]);
                     $age = $since ? $now - $since : 0; $retry_at = 0; $state = 'recovered';
                 } break;
-            // 本地就处理不掉的一行，一个字节都没出网。删掉它，但绝不能顺手清故障段：
-            // 上面那两种清零的依据是「已经通到远端应用层」，这里什么都没证明，
-            // 一条脏 queue 就能把一家真在挂的实例从退避里放出来
+            // 本地就处理不掉的一行，一个字节都没出网。删掉它，但绝不能顺手清故障段：上面那两种清零的依据是「已经通到远端应用层」，这里什么都没证明，一条脏 queue 就能把一家真在挂的实例从退避里放出来
             case 'dropped':
                 Club_Queue_Delete($task['id'], $task['tid']); break;
-            // 本站自己解析不动，什么都没证明：retries 和 fails 都不加，只把这行往后推。
-            // 记在对端头上的话，本站 DNS 挂几天就能把关注的实例全拉黑一遍
+            // 本站自己解析不动，什么都没证明：retries 和 fails 都不加，只把这行往后推。记在对端头上的话，本站 DNS 挂几天就能把关注的实例全拉黑一遍
             case 'local-dns':
                 Club_Queue_Defer($task['id'], $now + 300);
                 // 同 target 的其他 queue 立刻重判也是同一个结论，整条 endpoint 一起推
@@ -2394,27 +2225,22 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
                 $begin = $since === 0; if ($begin) $since = $now;
                 $fails++; $age = $now - $since;
                 list($wait, $drop) = Club_Endpoint_Backoff($result, $age, $fails);
-                // 不抖的话一家恢复的那一秒几十个进程会一起扑上去，对端更容易限流，
-                // 然后所有行齐步走向放弃
+                // 不抖的话一家恢复的那一秒几十个进程会一起扑上去，对端更容易限流，然后所有行齐步走向放弃
                 $retry_at = $now + $wait + mt_rand(0, (int)($wait / 4));
                 $pdo = $db->prepare('update `endpoints` set `fails` = :fails, `fail_since` = :since,'.
                     ' `retry_at` = :retry_at where `url` = :url and `lease_token` = unhex(:token)');
                 $pdo->execute([':url' => $url, ':token' => $token, ':fails' => $fails,
                     ':since' => $since, ':retry_at' => $retry_at]);
-                // 单条 retries 每个故障段只加一次：连续宕机由 endpoint 的时长阶梯管，
-                // 期间任何一条投成功都会清掉故障段，下一次失败才再算这条一笔
+                // 单条 retries 每个故障段只加一次：连续宕机由 endpoint 的时长阶梯管，期间任何一条投成功都会清掉故障段，下一次失败才再算这条一笔
                 $task['retries'] = $begin ? (int)$task['retries'] + 1 : (int)$task['retries'];
                 if ($drop) {
-                    // 判死刑只写黑名单和控制行。它名下可能有几千条 queue，
-                    // 一个事务里全删会把复制和锁等待一起拖下水，交给 0 号分批清
+                    // 判死刑只写黑名单和控制行。它名下可能有几千条 queue，一个事务里全删会把复制和锁等待一起拖下水，交给维护队列分批清
                     Club_Blacklist_Add($url, $now); $state = 'blacklisted';
                 } elseif ($task['retries'] >= 8) {
-                    // 对端在正常收别的行，就这一条一直过不去：签名它认不下来、
-                    // 或者只有这个 inbox 在 500。按行放弃，不牵连这家的其他投递
+                    // 对端在正常收别的行，就这一条一直过不去：签名它认不下来、或者只有这个 inbox 在 500。按行放弃，不牵连这家的其他投递
                     Club_Queue_Delete($task['id'], $task['tid']); $state = 'exhausted';
                 } else {
-                    // 行也要跟着推到解禁之后。只靠 retry_at 拦的话这几千行一直是
-                    // 「到期可领」，领到手才发现要退回来，白占一次租约
+                    // 行也要跟着推到解禁之后。只靠 retry_at 拦的话这几千行一直是「到期可领」，领到手才发现要退回来，白占一次租约
                     Club_Queue_Retry($task['id'], $task['retries'], $retry_at);
                     $state = $begin ? 'failing' : 'still-failing';
                 } break;
@@ -2426,8 +2252,7 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
         throw $e;
     }
     Club_Stat('endpoint_done');
-    // endpoint 这一层只记状态变化：开始挂、恢复、被放弃。中间那些重复失败
-    // 一家大实例挂一天就是几万行，全记等于把 event 日志冲掉
+    // endpoint 这一层只记状态变化：开始挂、恢复、被放弃。中间那些重复失败，一家大实例挂一天就是几万行，全记等于把 event 日志冲掉
     if ($state == 'recovered')
         Club_Log_Event('info', 'endpoint recovered: '.$url, ['fails' => $fails, 'age' => $age,
             'via' => $result == 'ok' ? 'delivery' : 'transport']);
@@ -2475,12 +2300,10 @@ function Club_Blacklist_Add($url, $now) {
     return (bool)$pdo->rowCount();
 }
 
-// 领一条待探活的黑名单行。restore_pending_at 非空的不领：那些已经确认活过来了，
-// 正在等 0 号把历史 queue 清完，再探一次只是白白多一次出网
+// 领一条待探活的黑名单行。restore_pending_at 非空的不领：那些已经确认活过来了，正在等维护队列把历史 queue 清完，再探一次只是白白多一次出网
 function Club_Blacklist_Claim($now, $lease = 120) {
     global $db;
-    // 跟 endpoint 领取同一套取锁顺序：候选只读不锁，领取按主键 CAS。沿 schedule 扫描
-    // 会跟 Result、Cleanup 那些先按主键锁行的路径咬成 1213，理由见 Club_Lease_Pick
+    // 跟 endpoint 领取同一套取锁顺序：候选只读不锁，领取按主键 CAS。沿 schedule 扫描会跟 Result、Cleanup 那些先按主键锁行的路径咬成 1213，理由见 Club_Lease_Pick
     $pdo = $db->prepare('select `target` from `blacklist` where `restore_pending_at` is null'.
         ' and `check_at` <= :now and `lease_until` <= :now order by `check_at` limit 32');
     $pdo->execute([':now' => $now]);
@@ -2515,8 +2338,7 @@ function Club_Blacklist_Claim($now, $lease = 120) {
     return $row;
 }
 
-// 探活出网前的最后一道闸，跟投递用同一套：租约到期后仍以 token CAS 判定所有权，
-// 未被接管可原子续租，已被接管则 token 不同。顺带确认这一行还没被别人恢复掉。
+// 探活出网前的最后一道闸，跟投递用同一套：租约到期后仍以 token CAS 判定所有权，未被接管可原子续租，已被接管则 token 不同。顺带确认这一行还没被别人恢复掉。
 function Club_Blacklist_Authorize($target, $token, $next, $lease = 120) {
     global $db; $now = time();
     $pdo = $db->prepare('update `blacklist` set `lease_token` = unhex(:next), `lease_until` = :until'.
@@ -2531,8 +2353,7 @@ function Club_Blacklist_Authorize($target, $token, $next, $lease = 120) {
     return false;
 }
 
-// resolver 没给出结果就退回来。这一轮既没问过 DNS 也没问过对端，
-// checks 不能加，check_at 也只短推一会儿：本站 DNS 抖一下不该把恢复推迟一整天
+// resolver 没给出结果就退回来。这一轮既没问过 DNS 也没问过对端，checks 不能加，check_at 也只短推一会儿：本站 DNS 抖一下不该把恢复推迟一整天
 function Club_Blacklist_Defer($target, $token, $reason) {
     global $db; $check = time() + 300 + mt_rand(0, 75);
     $pdo = $db->prepare('update `blacklist` set `check_at` = :check,'.
@@ -2577,8 +2398,7 @@ function Club_Blacklist_Result($target, $token, $alive) {
             $pdo = $db->prepare('select 1 from `queues` where `target` = :target limit 1');
             $pdo->execute([':target' => $target]);
             if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) {
-                // 活过来了但历史 backlog 还在。先只记状态：blacklist 行留着继续挡住
-                // 入队和出网，等 0 号分批清干净再真正解禁，不然几千条陈年活动会一起复活
+                // 活过来了但历史 backlog 还在。先只记状态：blacklist 行留着继续挡住入队和出网，等维护队列分批清干净再真正解禁，不然几千条陈年活动会一起复活
                 $pdo = $db->prepare('update `blacklist` set `restore_pending_at` = :now,'.
                     ' `lease_token` = null, `lease_until` = 0'.
                     ' where `target` = :target and `lease_token` = unhex(:token)');
@@ -2611,13 +2431,10 @@ function Club_Blacklist_Result($target, $token, $alive) {
     return $state;
 }
 
-// 分批清掉黑名单目标的历史 queues。每批都是独立的有界事务，而且必须先锁住
-// blacklist 行确认它还在：只凭事务外读到的旧 target 删，会在它刚恢复的那一刻
-// 把新入队的活动一起清掉
+// 分批清掉黑名单目标的历史 queues。每批都是独立的有界事务，而且必须先锁住 blacklist 行确认它还在：只凭事务外读到的旧 target 删，会在它刚恢复的那一刻把新入队的活动一起清掉
 function Club_Blacklist_Cleanup($limit = 500) {
     global $db; $now = time(); $rows = 0; $state = '';
-    // 已确认恢复的排在前面，而且哪怕它的 queues 早就清光了也要选中：
-    // 最后一步删 blacklist 行只在这条路径上，漏掉它这个 target 就永远解禁不了
+    // 已确认恢复的排在前面，而且哪怕它的 queues 早就清光了也要选中：最后一步删 blacklist 行只在这条路径上，漏掉它这个 target 就永远解禁不了
     $pdo = $db->query('select `target`, `restore_pending_at` from `blacklist`'.
         ' where `restore_pending_at` is not null'.
         ' or exists (select 1 from `queues` where `queues`.`target` = `blacklist`.`target`)'.
@@ -2648,8 +2465,7 @@ function Club_Blacklist_Cleanup($limit = 500) {
     return $rows;
 }
 
-// 真正解禁：blacklist 行在这一步提交之前一直挡着入队和出网，
-// 提交之后只接受未来的新活动，过去的 backlog 不会被随机复活
+// 真正解禁：blacklist 行在这一步提交之前一直挡着入队和出网，提交之后只接受未来的新活动，过去的 backlog 不会被随机复活
 function Club_Blacklist_Restore($target, $now) {
     global $db; $restored = false;
     try {
@@ -2681,8 +2497,7 @@ function Club_Blacklist_Restore($target, $now) {
     return $restored;
 }
 
-// 以 queues 为投递真相、blacklist 为 disabled 真相，分页把 endpoints 补齐、修正。
-// 不做整表 group by：queues 上百万行时那一条语句就够把唯一的维护 slot 卡到超时。
+// 以 queues 为投递真相、blacklist 为 disabled 真相，分页把 endpoints 补齐、修正。不做整表 group by：queues 上百万行时那一条语句就够把唯一的维护 slot 卡到超时。
 // 三段各自留一个稳定游标，每次只走一页，中途被打断下次接着走
 function Club_Reconcile_Step($limit = 200) {
     global $db; static $phase = 0, $cursor = '';
@@ -2720,8 +2535,7 @@ function Club_Reconcile_Step($limit = 200) {
         }
     }
     Club_Stat('scheduler_db_ops');
-    // 回收跟修复分开计：修复是「不变量被破坏过」，回收是「一条 endpoint 真的离开了」，
-    // 合在一个数里的话，稳态下的回收流量会把偶发的修复彻底盖住
+    // 回收跟修复分开计：修复是「不变量被破坏过」，回收是「一条 endpoint 真的离开了」，合在一个数里的话，稳态下的回收流量会把偶发的修复彻底盖住
     Club_Monitor_Count('reconciliation_repairs', $repairs);
     Club_Monitor_Count('endpoints_pruned', $pruned);
     // 这一页没走满就是走到头了，换下一段重新开始
@@ -2730,21 +2544,17 @@ function Club_Reconcile_Step($limit = 200) {
 }
 
 // 单条 endpoint 的修复。缺行先按健康默认值补出来，再在短事务里锁行重算 next_at 和 idle_since。
-// 只写这两列 —— fails/fail_since/retry_at 是 endpoint 自己的故障历史，
-// queues 里恢复不出来，被这里覆盖掉就等于把一家挂了一个月的实例重新当成健康的
+// 只写这两列 —— fails/fail_since/retry_at 是 endpoint 自己的故障历史，queues 里恢复不出来，被这里覆盖掉就等于把一家挂了一个月的实例重新当成健康的
 function Club_Reconcile_Endpoint($url, $now) {
     global $db; $repaired = false; $next = null;
-    // 先无锁看一眼。直接 for update 的话，每一轮对账都要在每一条 endpoint 上排到
-    // 正在投递的那个完成事务后面去等锁，等到了却发现租约还在、什么都不用做；
+    // 先无锁看一眼。直接 for update 的话，每一轮对账都要在每一条 endpoint 上排到正在投递的那个完成事务后面去等锁，等到了却发现租约还在、什么都不用做；
     // 稳态下绝大多数行本来就是对的，脏读只用来跳过，进了事务照样从头重判
     $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until` from `endpoints`'.
         ' where `url` = :url');
     $pdo->execute([':url' => $url]); Club_Stat('scheduler_db_ops');
     if (($peek = $pdo->fetch(PDO::FETCH_ASSOC)) !== false) {
         if ((int)$peek['lease_until'] > $now) return false;
-        // idle_since 和 next_at 必须同进同出。next_at 本身对得上就跳过的话，
-        // 一行两者不一致的记录没有任何路径会去修：回收只认 idle_since，
-        // 而它错了这行就永远等不到宽限期
+        // idle_since 和 next_at 必须同进同出。next_at 本身对得上就跳过的话，一行两者不一致的记录没有任何路径会去修：回收只认 idle_since，而它错了这行就永远等不到宽限期
         if (Club_Endpoint_Desired($url, (int)$peek['retry_at'])
             === (isset($peek['next_at']) ? (int)$peek['next_at'] : null)
             && ((int)$peek['idle_since'] > 0) === !isset($peek['next_at'])) return false;
@@ -2754,8 +2564,7 @@ function Club_Reconcile_Endpoint($url, $now) {
         $pdo = $db->prepare('select `next_at`, `retry_at`, `idle_since`, `lease_until`'.
             ' from `endpoints` where `url` = :url for update');
         $pdo->execute([':url' => $url]);
-        // 缺行才补，而且补在事务里：并发入队已经建好这一行时 insert ignore 不写，
-        // 重新 select 会等它提交后拿到它的版本，不会把它的故障状态盖掉
+        // 缺行才补，而且补在事务里：并发入队已经建好这一行时 insert ignore 不写，重新 select 会等它提交后拿到它的版本，不会把它的故障状态盖掉
         if (($row = $pdo->fetch(PDO::FETCH_ASSOC)) === false) {
             $pdo = $db->prepare('insert ignore into `endpoints`(`url`, `next_at`, `idle_since`)'.
                 ' values (:url, null, :now)');
@@ -2793,20 +2602,15 @@ function Club_Reconcile_Endpoint($url, $now) {
 }
 
 // 回收空置够久的控制行。事务外确认过的条件到这里可能已经不成立，锁上之后要全部重判一遍。
-// 空了就删是错的：投递完成只把 next_at 置空，一个几千人的群组每投一轮就让名下几千行
-// 同时变空，几分钟后的下一轮又原样建回来。那样换不回空间（页只回到 free list，
-// 文件不缩），却要拿维护槽把同一批主键删一遍建一遍，还会顺手丢掉 fails/fail_since。
-// 隔一周再看，剩下的才是真的不会再来的 inbox：群组的投稿间隔本来就可能按周算，
-// 宽限期比它短的话，同一批行每个投稿周期都要重来一遍，等于没有宽限期。
-// 不判 fails：它只在投成功时清零，而一条没有 queue 的 endpoint 永远等不到下一次投递，
-// 要求 fails 为零等于让带过故障的空行永久留下。
-// idle_since 还没起算的无主行在这里就地转成空闲态而不是删掉：它们通常由领取路径
-// 自愈（领到手发现没有 queue 就重排），但 next_at 若损坏成未来时间就永远领不到，
-// 而这一段是唯一还会扫到它的地方。返回 'pruned' 或 'idled' 区分这两件事
+// 空了就删是错的：投递完成只把 next_at 置空，一个几千人的群组每投一轮就让名下几千行同时变空，几分钟后的下一轮又原样建回来。
+// 那样换不回空间（页只回到 free list，文件不缩），却要拿维护槽把同一批主键删一遍建一遍，还会顺手丢掉 fails/fail_since。
+// 隔一周再看，剩下的才是真的不会再来的 inbox：群组的投稿间隔本来就可能按周算，宽限期比它短的话，同一批行每个投稿周期都要重来一遍，等于没有宽限期。
+// 不判 fails：它只在投成功时清零，而一条没有 queue 的 endpoint 永远等不到下一次投递，要求 fails 为零等于让带过故障的空行永久留下。
+// idle_since 还没起算的无主行在这里就地转成空闲态而不是删掉：它们通常由领取路径自愈（领到手发现没有 queue 就重排），但 next_at 若损坏成未来时间就永远领不到，而这一段是唯一还会扫到它的地方。
+// 返回 'pruned' 或 'idled' 区分这两件事
 function Club_Endpoint_Prune($url, $now, $idle = 604800) {
     global $db; $pruned = false; $idled = false; $before = $now - $idle;
-    // 跟对账同一个道理：能删的是少数，不先筛一遍就是每一行都开一次写锁事务，
-    // 把维护 slot 一条条押在投递的完成事务后面
+    // 跟对账同一个道理：能删的是少数，不先筛一遍就是每一行都开一次写锁事务，把维护 slot 一条条押在投递的完成事务后面
     $pdo = $db->prepare('select `e`.`lease_until` as `lease`, `e`.`idle_since` as `idle`,'.
         ' `e`.`retry_at` as `retry`,'.
         ' (select count(*) from `queues` where `target` = :url) as `queued`,'.
@@ -2858,8 +2662,7 @@ function Club_Endpoint_Prune($url, $now, $idle = 604800) {
     return $pruned ? 'pruned' : ($idled ? 'idled' : false);
 }
 
-// 只有维护队列统计的那几个区间计数。跟 Club_Stat 分开：那一组每 60 秒被汇总带走，
-// 而这些要凑满 5 分钟才输出一次
+// 只有维护队列统计的那几个区间计数。跟 Club_Stat 分开：那一组每 60 秒被汇总带走，而这些要凑满 5 分钟才输出一次
 function Club_Monitor_Count($key, $value = 1) {
     static $data = [];
     if (!isset($key)) { $out = $data; $data = []; return $out; }
@@ -2868,16 +2671,14 @@ function Club_Monitor_Count($key, $value = 1) {
     return $data[$key];
 }
 
-// 全站视角的周期记录，只有 0 号跑。snapshot 是此刻的数据库存量，
-// interval 是这 5 分钟里发生的事，两类混在一起就没法算速率了
+// 全站视角的周期记录，只有维护队列跑。snapshot 是此刻的数据库存量，interval 是这 5 分钟里发生的事，两类混在一起就没法算速率了
 function Club_Monitor_Snapshot($interval = 300) {
     global $db; static $last = 0;
     $now = time();
     if (!$last) { $last = $now; return false; }
     if ($last > $now - $interval) return false;
     $window = $now - $last;
-    // total 含着待回收的空行，单看它读不出「有多少 endpoint 在排队投递」。
-    // idle 减去同一行日志里的 blacklist 就是等着被回收的那部分，卡住了它只会单调涨；
+    // total 含着待回收的空行，单看它读不出「有多少 endpoint 在排队投递」。idle 减去同一行日志里的 blacklist 就是等着被回收的那部分，卡住了它只会单调涨；
     // due/leased/oldest 都带 next_at 非空或租约条件，空行本来就进不去
     $pdo = $db->prepare('select count(*) as `total`,'.
         ' sum(`next_at` is not null and `next_at` <= :now and `retry_at` <= :now'.

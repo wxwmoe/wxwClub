@@ -13,8 +13,7 @@ function shutdown() {
     Club_Log_Console('info', 'shutdown requested, finishing current task', ['pid' => getmypid()]);
 };
 
-// 子进程的去向：正常退出记 code，被信号带走记 signal，9 多半是宽限期不够被强杀的。
-// 补进程和关停收尾两处都要记，抄两遍迟早漏一处
+// 子进程的去向：正常退出记 code，被信号带走记 signal，9 多半是宽限期不够被强杀的。补进程和关停收尾两处都要记，抄两遍迟早漏一处
 function worker_reaped($slot, $pid, $status) {
     global $slots;
     if (pcntl_wifsignaled($status)) {
@@ -29,12 +28,10 @@ function worker_reaped($slot, $pid, $status) {
         ['slot' => $slot, 'type' => $slots[$slot] ?? '?', 'pid' => $pid, 'status' => $result]);
 }
 
-// 一个 worker 的主循环。多进程模式下这就是子进程的全部工作，
-// declare(ticks) 是文件作用域的，循环留在这个文件里信号才收得到
+// 一个 worker 的主循环。多进程模式下这就是子进程的全部工作，declare(ticks) 是文件作用域的，循环留在这个文件里信号才收得到
 function worker_loop($type) {
     global $stop, $db;
-    // 在第一条任务开始前打开统计窗口；否则首条慢请求刚结束就停机时，force flush
-    // 只能看到一秒窗口，busy_ratio 和吞吐率都会被夸大。
+    // 在第一条任务开始前打开统计窗口；否则首条慢请求刚结束就停机时，force flush 只能看到一秒窗口，busy_ratio 和吞吐率都会被夸大。
     Club_Stat_Flush();
     while (!$stop) {
         try { worker($type); }
@@ -43,8 +40,7 @@ function worker_loop($type) {
             // 多进程抢同一张队列表，偶尔会撞出死锁，重来一次就好；连成片才是真出事了
             Club_Log_Console('error', 'database error', ['error' => $e->getMessage(), 'pid' => getmypid()]);
             Club_Stat('db_retries');
-            // 连接断了就重连。长期进程握着一个失效的 PDO 只会每秒重复报同一行错，
-            // 而队列那边看起来只是没人在投递
+            // 连接断了就重连。长期进程握着一个失效的 PDO 只会每秒重复报同一行错，而队列那边看起来只是没人在投递
             try { if ($db) $db->query('select 1'); else Club_DB_Connect(); }
             catch (PDOException $lost) {
                 try {
@@ -69,8 +65,7 @@ if (!isset($argv[1])) {
 
 switch ($argv[1]) {
     case 'worker':
-        // 库里的结构与这份代码不一致时，先进入结构合并闸门。合并期间 web 那边整个
-        // 入口是 503，这里也不能起队列进程 —— 半新半旧的结构下投递会写出对不上的行。
+        // 库里的结构与这份代码不一致时，先进入结构合并闸门。合并期间 web 那边整个入口是 503，这里也不能起队列进程 —— 半新半旧的结构下投递会写出对不上的行。
         // 合并完直接退出，让容器按 restart 策略把正常的队列进程带起来
         try { $version = Club_DB_Version(); }
         catch (Throwable $e) {
@@ -80,8 +75,7 @@ switch ($argv[1]) {
         }
         if ($version !== DB_VERSION) {
             require_once(APP_ROOT.'/src/migrate.php');
-            // 合并中途崩了没有事务能回滚，但每一步都会先问一次 information_schema，
-            // 重启后接着跑不会把已经合并好的部分改坏。这里只负责把原因记下来
+            // 合并中途崩了没有事务能回滚，但每一步都会先问一次 information_schema，重启后接着跑不会把已经合并好的部分改坏。这里只负责把原因记下来
             try { $version = Club_Migrate_Run(); }
             catch (Throwable $e) {
                 Club_Log_Console('error', 'database merge failed',
@@ -96,8 +90,7 @@ switch ($argv[1]) {
             Club_Log_Console('info', 'database merged, exiting for restart', ['schema' => $version]);
             break;
         }
-        // 维护是全站一份的活，多开只是把同样的事做 N 遍，所以固定一个、不作配置。
-        // 投递和探活都靠 token 租约互斥，加进程就是加并发，队列逻辑一行都不用改
+        // 维护是全站一份的活，多开只是把同样的事做 N 遍，所以固定一个、不作配置。投递和探活都靠 token 租约互斥，加进程就是加并发，队列逻辑一行都不用改
         $slots = ['maintain.0' => 'maintain'];
         foreach (['delivery' => 8, 'probe' => 1] as $type => $fallback)
             for ($i = 0, $n = (int)($config['worker'][$type] ?? $fallback); $i < $n; $i++)
@@ -116,16 +109,14 @@ switch ($argv[1]) {
             Club_Log_Console('error', 'worker unavailable, ext-pcntl missing');
             exit(1);
         }
-        // 停止时要靠它把 SIGTERM 转发给子进程（docker stop 只发给 master）。
-        // 缺了的话直到关停那一刻才发作，子进程会变成谁也收不到通知的孤儿，先拦下来
+        // 停止时要靠它把 SIGTERM 转发给子进程（docker stop 只发给 master）。缺了的话直到关停那一刻才发作，子进程会变成谁也收不到通知的孤儿，先拦下来
         if (!function_exists('posix_kill')) {
             Club_Log_Console('error', 'worker unavailable, ext-posix missing');
             exit(1);
         }
         pcntl_signal(SIGINT, 'shutdown');
         pcntl_signal(SIGTERM, 'shutdown');
-        // master 只管 fork 和收尸，先把 bootstrap 建的连接关掉：
-        // 带着连接 fork 的话父子共享同一个 socket，谁先断开都会把别人的一起带走
+        // master 只管 fork 和收尸，先把 bootstrap 建的连接关掉：带着连接 fork 的话父子共享同一个 socket，谁先断开都会把别人的一起带走
         $db = null;
         Club_Log_Console('info', 'master started',
             ['slots' => array_count_values($slots), 'pid' => getmypid()]);
@@ -149,8 +140,7 @@ switch ($argv[1]) {
                 Club_Log_Console('info', 'worker started',
                     ['slot' => $slot, 'type' => $type, 'pid' => $pid]);
             }
-            // 不用阻塞版的 wait：SIGTERM 在它进去之后才到的话，得等到有子进程
-            // 退出才醒得过来，而 docker stop 只给 10 秒。sleep 会被信号打断
+            // 不用阻塞版的 wait：SIGTERM 在它进去之后才到的话，得等到有子进程退出才醒得过来，而 docker stop 只给 10 秒。sleep 会被信号打断
             if (($pid = pcntl_wait($status, WNOHANG)) > 0) {
                 // 内存超限自杀、或者崩溃，都在这里补回去，不用整个容器重启
                 worker_reaped($children[$pid] ?? '?', $pid, $status);
@@ -160,9 +150,7 @@ switch ($argv[1]) {
         if ($children) {
             Club_Log_Console('info', 'stopping workers', ['jobs' => count($children)]);
             foreach (array_keys($children) as $pid) posix_kill($pid, SIGTERM);
-            // 子进程要跑完手上那条投递才退。宽限期不够被 SIGKILL 也不丢任务，
-            // 它握着的租约 120 秒后自然过期，别人重新领走就是；那之后旧进程
-            // 就算复活也拿不到出网权，token 已经不是它的了
+            // 子进程要跑完手上那条投递才退。宽限期不够被 SIGKILL 也不丢任务，它握着的租约 120 秒后自然过期，别人重新领走就是；那之后旧进程就算复活也拿不到出网权，token 已经不是它的了
             while ($children && ($pid = pcntl_wait($status)) > 0) {
                 worker_reaped($children[$pid] ?? '?', $pid, $status);
                 unset($children[$pid]);
