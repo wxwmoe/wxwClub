@@ -31,7 +31,7 @@ function ActivityPub_GET($url, $club, $hops = 3) {
 // 返回原因码，调用方要分开处置：这几种失败的自愈概率差好几个数量级，共用一套退避阶梯的话，注销了域名的对端会被按「临时挂掉」每分钟重试：
 //   ok         成功
 //   rejected   对端给的终局答复：它是好的，只是这一条它永远不会收，跟整家的健康无关
-//   failed     连不上、超时，或对端答得不对但还有救
+//   failed     连不上、超时、inbox 已经不在了，或对端答得不对但还有救
 //   unresolved 域名解析不出来，而本站 DNS 是好的
 //   blocked    目标指向内网或协议不对，该拦
 //   local-dns  本站自己解析不动、或刷新锁在别人手上，什么都没证明，不能算在对端头上
@@ -72,6 +72,9 @@ function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
     // 不能照 Curl 的返回值判：它只把 4xx / 5xx 算错误，而 POST 是不跟跳转的，对端回一个 301 就会被当成投递成功、这一行当场删掉，那条活动其实谁都没收到。3xx 归 failed，照常重试
     $code = isset($curl) ? $curl->httpStatusCode : 0;
     if ($code >= 200 && $code < 300) return 'ok';
+    // 这三个说的是这个 inbox 不在了，不是这一条活动不被收。实例关站之后域名往往还解析得动、还有个静态站或空路由在应答，归进 rejected 就等于每条新活动都再打它一次，是唯一一条没有出口的失败路径。
+    // 交给退避阶梯管的正是「以后可能回来」这件事；endpoint 的身份是 URL 本身，个人 inbox 没了只拉黑那一个，同实例的 shared inbox 不受牵连
+    if (in_array($code, [404, 405, 410])) return 'failed';
     // 划线跟 Mastodon 的 response_error_unsalvageable? 一致：501 和 4xx（401、408、429 除外）是对端应用层给的终局答复，DNS、TCP、TLS 到应用层全通，它只是永远不会收这一条。
     // 它自己碰到这些也不重试、也不计对端的失败，我们更不能拿它去推整家的熔断和放弃阶梯，否则一条谁都不收的活动就能把好端端一家实例算成挂了。
     // 留下的 401 多半是密钥轮换那类会自愈的，408 和 429 是对端在喊慢一点，都该整家一起退
@@ -81,14 +84,18 @@ function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
 }
 
 // 黑名单探活只问一件事：对端还在不在。空 body 打 inbox 本来就会被 400/401 挡回来，而 Curl 把 4xx 也算进 $error，照投递成功与否来判的话，进了黑名单的实例永远出不来。
-// 这里只看有没有拿到状态码：拿到了就说明 DNS、TCP、TLS 到应用层全通；5xx 不算，CDN 回源失败也是有状态码的，那种情况对端其实还是死的。
+// 判活的门槛照着投递侧划：2xx，或者应用层还在拒的 4xx —— 拿到这些就说明 DNS、TCP、TLS 到应用层全通。5xx 不算，CDN 回源失败也是有状态码的，那种情况对端其实还是死的。
+// 3xx 不算：POST 从不跟跳转，一个只会 301 的旧 inbox 在投递侧永远是 failed。404/405/410 不算，理由同投递侧。
+// 两者误判成活的代价是一样的：解禁之后每条新活动都再打它一次，一周后重新拉黑，来回空转 —— 历史 backlog 在解禁前已经清掉，不是它们复活，是新活动在填
 // HTTP 之后返回 alive/dead；出网授权前的 blocked/unresolved/local-dns/lease-lost 原样返回，让调用方继续用第一阶段 token，本站 DNS 的问题也不会被记成对端探活失败
 function ActivityPub_Probe($url, $club, $authorize = null) {
     global $curl;
     $result = ActivityPub_POST($url, $club, '{}', $authorize);
     // 这些结果都发生在授权 callback 之前，调用方必须继续使用第一阶段 token。折叠成 dead 会让 completion 误拿尚未安装的新 token，结果永远被 fencing 丢掉。
     if (in_array($result, ['blocked', 'unresolved', 'local-dns', 'lease-lost'], true)) return $result;
-    return isset($curl) && !$curl->curlError && $curl->httpStatusCode > 0 && $curl->httpStatusCode < 500 ? 'alive' : 'dead';
+    if (!isset($curl) || $curl->curlError) return 'dead';
+    $code = $curl->httpStatusCode;
+    return ($code >= 200 && $code < 300) || ($code >= 400 && $code < 500 && !in_array($code, [404, 405, 410])) ? 'alive' : 'dead';
 }
 
 function ActivityPub_CURL($url, $date, $head, $data = null, $ips = null) {
