@@ -570,6 +570,32 @@ function Club_Stat_Request() {
     return true;
 }
 
+// master 启动时把上一次运行留下的当天流式日志挪到 .001 .002，tail 和排查不用再从半截文件里找边界。
+// 只在 fork 之前调用一次：worker 各自重启（master 补进程、超内存自杀）不是重启，跟着挪的话一天下来全是几分钟一份的碎片。
+// 边界是尽力而为，不是严格分段：rename 期间 FPM 和上一批还没退干净的 worker 仍在写，
+// 一次 Club_Log_Put 若在改名前解析完路径、改名后才落笔，这一行就进了 .001（POSIX 上 rename 不动 inode）。窗口是一次 open-write-close，亚毫秒级，跨过它的顶多是几行。
+// 要做到一行不错就得给每次写日志加一把跨进程锁 —— 为了「这一行属于哪次运行」把每条日志都变成一次加锁，代价远大于收益。真要精确定位边界，看 master started 那一行的时间戳
+// 只挪 event/stat：这两个由 Club_Log_Put 每次开-写-关，rename 之后还在写的 worker 和 FPM 会在原路径重建；logs/error/ 是 PHP 引擎自己写的，管不到它什么时候重开。
+// 序号跟 Club_Log_Name 一样往后排而不是照 logrotate 级联：一次 rename 不用把 .001..N 全推一遍，序号大的就是晚的，跟按天读日志的方向一致。
+// crash loop 里挤掉的也是最新那份而不是最早那份 —— 崩溃循环里第一次的现场最值钱。
+// rename 保留 mtime，保留期照旧由 Club_Log_Rotate 按天数删
+function Club_Log_Shift($dirs = ['event', 'stat']) {
+    foreach ($dirs as $dir) {
+        // 目录建不出来时下面这行也落不了盘，但 master 是 CLI，Club_Log_Console 至少还会 echo 到 stdout（容器里就是 docker logs）
+        if (!($path = Club_Log_Dir($dir))) { Club_Log_Console('warning', 'log shift skipped, cannot create directory', ['dir' => $dir]); continue; }
+        $file = $path.'/'.date('Y-m-d').'.log';
+        // 第一次跑和跨天都走这里，是常态，不值一条 warning。空文件挪了也只是留一串空壳
+        if (!is_file($file) || !filesize($file)) { Club_Log_Event('debug', 'log shift skipped, nothing to move', ['file' => $file]); continue; }
+        // 序号补零对齐三位：不补的话 ls 和 glob 的字典序从第十次切分起就不是时间序了（.1 .10 .100 .11 .2 .9），采集器按 *.log.* 收上去正好把崩溃循环打乱。
+        // 同一天重启一百次之后不再往后排，最后一个反复被覆盖
+        for ($i = 1; $i < 100 && is_file($file.sprintf('.%03d', $i)); $i++);
+        error_clear_last();
+        if (@rename($file, $target = $file.sprintf('.%03d', $i))) continue;
+        // 挪不动只是本次运行接着写上一次的尾巴，不该拦住启动；但没有这一行的话，现场看到的是「切分功能像是没生效」而不是原因。warning 正好落在没挪走的那个文件里
+        Club_Log_Console('warning', 'log shift failed, still appending to the previous file', ['file' => $file, 'target' => $target, 'error' => error_get_last()['message'] ?? '']);
+    }
+}
+
 // logs/ 按请求写文件，长期跑会占满 inode，由 worker 空闲时清理
 function Club_Log_Rotate($days, $interval = 3600) {
     static $last = 0;

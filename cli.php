@@ -92,12 +92,7 @@ switch ($argv[1]) {
             Club_Log_Console('error', 'worker needs at least one delivery process, nothing would ever be sent', ['worker' => $config['worker'] ?? []]);
             exit(1);
         }
-        // 进了黑名单的对端只有探活能把它捞回来，一个都不开就是永久拉黑
-        if (!in_array('probe', $slots, true))
-            Club_Log_Console('warning', 'no probe process configured,'.
-                ' blacklisted endpoints will never be restored');
-        if (!function_exists('pcntl_signal') || !function_exists('pcntl_fork')
-            || !function_exists('pcntl_wait')) {
+        if (!function_exists('pcntl_signal') || !function_exists('pcntl_fork') || !function_exists('pcntl_wait')) {
             Club_Log_Console('error', 'worker unavailable, ext-pcntl missing');
             exit(1);
         }
@@ -110,7 +105,12 @@ switch ($argv[1]) {
         pcntl_signal(SIGTERM, 'shutdown');
         // master 只管 fork 和收尸，先把 bootstrap 建的连接关掉：带着连接 fork 的话父子共享同一个 socket，谁先断开都会把别人的一起带走
         $db = null;
+        // 挪在 master started 之前，那一行是这次运行的起点标记，但不保证是文件第一行：debug 下 shift 自己的早退记录、切分失败的 warning 都排在它前面，级别低于 info 时它压根不落盘
+        Club_Log_Shift();
         Club_Log_Console('info', 'master started', ['slots' => array_count_values($slots), 'pid' => getmypid()]);
+        // 进了黑名单的对端只有探活能把它捞回来，一个都不开就是永久拉黑。
+        // 放在切分之后：它说的是刚起来的这个 master，写在前面就会被稳定地归档进上一段，而 warning 级别下 master started 不写，当天的 .log 那时还没生成，tail 也就看不到这条
+        if (!in_array('probe', $slots, true)) Club_Log_Console('warning', 'no probe process configured, blacklisted endpoints will never be restored');
         $children = [];     // pid => 槽位，槽位空出来就补一个回去
         while (!$stop) {
             $taken = array_flip($children);
