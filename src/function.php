@@ -613,7 +613,7 @@ function Club_System_Name($club = null) {
     return isset($club) ? strtolower($club) === strtolower($name) : $name;
 }
 
-// 发私信提醒和对外拉取都用它，不开放注册、不进目录、不接受关注
+// 发私信提醒、对外拉取、给透传的转发签名都用它，不开放注册、不进目录、不接受关注
 function Club_System() {
     global $db; $name = Club_System_Name();
     $pdo = $db->prepare('select `name` from `clubs` where `name` = :name');
@@ -657,7 +657,7 @@ function Club_Create($club, $system = false) {
     return $pdo->fetch(PDO::FETCH_COLUMN, 0);
 }
 
-function Club_Get_Actor($club, $actor) {
+function Club_Get_Actor($actor) {
     global $db; $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     $row = $pdo->fetch(PDO::FETCH_ASSOC);
@@ -672,12 +672,19 @@ function Club_Get_Actor($club, $actor) {
         Club_Log_Event('warning', 'actor refresh skipped inside database transaction', ['actor' => $actor]);
         return false;
     }
-    return Club_Fetch_Actor($club, $actor);
+    return Club_Fetch_Actor($actor);
 }
 
-// 拉取远端 actor 写入本地缓存，已存在则更新（对方可能轮换密钥或迁移 inbox）
-function Club_Fetch_Actor($club, $actor) {
-    global $db; $jsonld = json_decode(ActivityPub_GET($actor, $club), 1);
+// 拉取远端 actor 写入本地缓存，已存在则更新（对方可能轮换密钥或迁移 inbox）。
+// users 是全站共用的一份，这行属于哪个群组无从谈起，签名统一用系统群组：同一行的建立和刷新由不同群组签本来就不一致，
+// 而随手拿投稿命中的某个群组来签，等于让对端为一次首访去拉一个它没见过、还可能单独封过的 actor
+function Club_Fetch_Actor($actor) {
+    global $db;
+    if (!($club = Club_System())) {
+        Club_Log_Event('warning', 'fetch actor skipped, no system club', ['actor' => $actor]);
+        return false;
+    }
+    $jsonld = json_decode(ActivityPub_GET($actor, $club), 1);
     if (empty($jsonld['id']) || $jsonld['id'] != $actor || empty($jsonld['inbox'])) {
         Club_Log_Event('warning', 'fetch actor failed: '.$actor);
         return false;
@@ -730,7 +737,7 @@ function Club_Sync_Actor($actor, $cooldown = 3600) {
         Club_Log_Event('debug', 'actor refresh on cooldown', ['actor' => $actor, 'retry in' => ($refresh + $cooldown - time()).'s']);
         return false;
     }
-    return ($club = Club_System()) ? Club_Fetch_Actor($club, $actor) : false;
+    return Club_Fetch_Actor($actor);
 }
 
 // 所有远端 inbox 进 users、queues、endpoints、blacklist 之前的唯一入口。规范化结果既是数据库主键，也是真正交给 cURL 的 URL，两者必须是同一个字符串。
@@ -822,10 +829,11 @@ function Club_Queue_Retry($id, $retries, $due) {
     return (bool)$pdo->rowCount();
 }
 
-function Club_Task_Create($type, $club, $jsonld) {
+// cid 记的是签这批请求的群组，未必是扇出目标：它的私钥只用来签 HTTP 签名
+function Club_Task_Create($type, $signer, $jsonld) {
     global $db;
     $pdo = $db->prepare('insert into `tasks`(`cid`,`type`,`jsonld`,`timestamp`) select `cid`, :type as `type`, :jsonld as `jsonld`, :timestamp as `timestamp` from `clubs` where `name` = :club');
-    $pdo->execute([':type' => $type, ':club' => $club, ':jsonld' => $jsonld, ':timestamp' => time()]);
+    $pdo->execute([':type' => $type, ':club' => $signer, ':jsonld' => $jsonld, ':timestamp' => time()]);
     // 群组不存在时 insert-select 不写入任何行，此时 last_insert_id() 是上一条的残值
     return $pdo->rowCount() ? $db->lastInsertId() : false;
 }
@@ -844,13 +852,17 @@ function Club_Queue_Insert($task, $target) {
 }
 
 // 按 shared_inbox 的二进制顺序分页入队。不能把大群组全部 fetchAll 到 PHP；投稿者 inbox 也要通过同一个 UNION 游标插进全局顺序，否则它排在关注者之后会破坏并发事务的取锁顺序。
-function Club_Queue_Insert_Followers($task, $club, $inbox = false) {
+// 一次传进来多个群组时取它们关注者的并集：转发的原始报文对这几个群组是同一包，各建各的 task 分头扇出，同时关注了两个群组的实例就会收到两遍，而并集里的 distinct 天然把它去掉
+function Club_Queue_Insert_Followers($task, $clubs, $inbox = false) {
     global $db;
-    $cursor = null; $page = 250; $now = time(); $invalid = []; $invalid_count = 0;
+    $cursor = null; $page = 250; $now = time(); $invalid = []; $invalid_count = 0; $names = []; $binds = [];
+    $clubs = array_values(to_array($clubs));
+    foreach ($clubs as $i => $club) { $key = ':club'.$i; $names[] = $key; $binds[$key] = $club; }
     do {
         $after = isset($cursor) ? ' and u.shared_inbox collate ascii_bin > convert(:f_cursor using ascii) collate ascii_bin' : '';
-        $source = 'select distinct u.shared_inbox collate ascii_bin as `target` from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid where c.name = :club'.$after;
-        $params = [':club' => $club];
+        $source = 'select distinct u.shared_inbox collate ascii_bin as `target` from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid'.
+            ' where c.name in ('.implode(', ', $names).')'.$after;
+        $params = $binds;
         if (isset($cursor)) $params[':f_cursor'] = $cursor;
         if ($inbox !== false) {
             // 参数跟列统一成 ascii_bin，避免连接字符集把 UNION 的结果提升回大小写不敏感排序。
@@ -889,7 +901,7 @@ function Club_Queue_Insert_Followers($task, $club, $inbox = false) {
             $pdo->execute($insert);
         }
     } while ($count >= $page);
-    if ($invalid) Club_Log_Event('warning', 'invalid cached follower endpoints skipped', ['club' => $club, 'count' => $invalid_count, 'targets' => $invalid]);
+    if ($invalid) Club_Log_Event('warning', 'invalid cached follower endpoints skipped', ['clubs' => $clubs, 'count' => $invalid_count, 'targets' => $invalid]);
     return true;
 }
 
@@ -905,13 +917,13 @@ function Club_Queue_Delete($id, $task) {
 
 // 数组是本站自己组的活动，字符串是原样透传的远端活动（$type 由调用方给）。
 // 透传的那份绝不能解码后重新编码：RsaSignature2017 签的是整包规范化的结果，而 json_decode 的关联数组模式会把 {} 变成 []，再编码出来签名就废了
-function Club_Push_Enqueue($club, $activity, $direct, $inbox, &$error, &$reason) {
+function Club_Push_Enqueue($signer, $clubs, $activity, $direct, $inbox, &$error, &$reason) {
     global $db;
-    if (!($task = Club_Task_Create('push', $club, $activity))) {
-        $reason = 'club-missing'; $error = 'club not found: '.$club;
+    if (!($task = Club_Task_Create('push', $signer, $activity))) {
+        $reason = 'club-missing'; $error = 'club not found: '.$signer;
         return false;
     }
-    $queued = $direct ? Club_Queue_Insert($task, $inbox) : Club_Queue_Insert_Followers($task, $club, $inbox);
+    $queued = $direct ? Club_Queue_Insert($task, $inbox) : Club_Queue_Insert_Followers($task, $clubs, $inbox);
     if ($queued === null) {
         // anti-blacklist 没产生 queue，刚建的 task 没有消费者；同一事务里收掉，调用方保留可重试的本地状态（例如待撤回 notice），等 endpoint 恢复后再尝试。
         $pdo = $db->prepare('delete from `tasks` where `tid` = :tid and not exists (select 1 from `queues` where `tid` = :tid_check)');
@@ -926,8 +938,12 @@ function Club_Push_Enqueue($club, $activity, $direct, $inbox, &$error, &$reason)
 
 function Club_Push_Activity($club, $activity, $inbox = false, $direct = false, $type = null, &$reason = null) {
     global $db;
-    $reason = null;
-    if (is_array($activity)) { $type = $activity['type']; $activity = Club_Json_Encode($activity); }
+    $reason = null; $clubs = array_values(to_array($club)); $club = $clubs[0];
+    // 本站自己组的活动，actor 就是这个群组，对端除了 HTTP 签名没有别的东西能验归属，只能由它自己签。
+    // 透传的转发相反：归属由报文自带的 LD 签名认，签名群组不参与判断，改用系统群组签有两个好处 ——
+    // 收件实例不必为一条它没关注的群组的转发去拉那个 actor，管理员单独封了其中一个群组时，也不会把整包连同别的群组的关注者一起丢掉
+    if (is_array($activity)) { $type = $activity['type']; $activity = Club_Json_Encode($activity); $signer = $club; }
+    else $signer = Club_System() ?: $club;
     // 直接投递（Accept、私信）的目标是调用方现给的，规范化不了就没有可写库的 key。先建一个投不出去的 task 只会在队列里留一条谁都处理不掉的行，这里必须显式失败
     if ($direct && ($inbox = Club_Endpoint_Require($inbox, ['club' => $club, 'type' => $type])) === false) {
         $reason = 'invalid-endpoint';
@@ -936,20 +952,20 @@ function Club_Push_Activity($club, $activity, $inbox = false, $direct = false, $
     }
     // 扇出时多带的那个 inbox 只是投稿者本人，坏了不该连累整群关注者的转发
     if (!$direct && $inbox !== false && ($inbox = Club_Endpoint_Normalize($inbox)) === false) {
-        Club_Log_Event('warning', 'push author inbox skipped, url cannot be normalized', ['club' => $club]);
+        Club_Log_Event('warning', 'push author inbox skipped, url cannot be normalized', ['clubs' => $clubs]);
         $inbox = false;
     }
-    $name = Club_Log_Name('outbox', [$club, $type ?: 'unknown']);
+    $name = Club_Log_Name('outbox', [implode('-', $clubs), $type ?: 'unknown']);
     Club_Log_Write('info', 'outbox', $name.'_output', $activity);
     Club_Log_Write('debug', 'outbox', $name.'_server', $_SERVER);
     $commit = false; $error = ''; $owned = !$db->inTransaction();
     try {
         if ($owned)
-            $commit = Club_DB_Transaction('push enqueue', function () use ($club, $activity, $direct, $inbox,
+            $commit = Club_DB_Transaction('push enqueue', function () use ($signer, $clubs, $activity, $direct, $inbox,
                 &$error, &$reason) {
-                return Club_Push_Enqueue($club, $activity, $direct, $inbox, $error, $reason);
+                return Club_Push_Enqueue($signer, $clubs, $activity, $direct, $inbox, $error, $reason);
             });
-        else $commit = Club_Push_Enqueue($club, $activity, $direct, $inbox, $error, $reason);
+        else $commit = Club_Push_Enqueue($signer, $clubs, $activity, $direct, $inbox, $error, $reason);
     } catch (PDOException $e) {
         $error = $e->getMessage();
         // 外层 inbox 事务会负责整段重试；独立调用到最终一次仍失败时在这里落失败文件。
@@ -963,7 +979,7 @@ function Club_Push_Activity($club, $activity, $inbox = false, $direct = false, $
         Club_Log_Write('error', 'outbox', $name.'_commit_failed', $error ?: 'commit returned false', 'txt');
     // 带上 outbox 那组文件的基名：入站活动的关联标记是 inbox 的，跳不到发出去的报文
     } else Club_Log_Event('debug', 'push queued, '.($type ?: 'unknown'),
-        ['club' => $club, 'target' => $direct ? $inbox : 'followers', 'outbox' => $name]);
+        ['clubs' => $clubs, 'signer' => $signer, 'target' => $direct ? $inbox : 'followers', 'outbox' => $name]);
     return (bool)$commit;
 }
 
@@ -1006,7 +1022,7 @@ function Club_Limit_Check($club, $user, $content) {
 function Club_Notice_Send($actor, $type, $vars = [], $lang = null, $reply = null, $cooldown = 3600) {
     global $db, $base, $config;
     if (!($config['notice']['enabled'] ?? true) || empty($actor)) return false;
-    if (!($club = Club_System()) || !($user = Club_Get_Actor($club, $actor))) return false;
+    if (!($club = Club_System()) || !($user = Club_Get_Actor($actor))) return false;
 
     if (!isset($reply)) {
         $pdo = $db->prepare('select max(`timestamp`) from `notices` where `uid` = :uid and `type` = :type');
@@ -1076,8 +1092,7 @@ function Club_Notice_Delete($object, $actor) {
     $pdo->execute([':object' => $object, ':actor' => $actor]);
     $notices = $pdo->fetchAll(PDO::FETCH_ASSOC);
     // 入站 Delete 的 web 路径可以在撤回事务之外刷新一次；maintain 共用的 Revoke 绝不出网。
-    if ($notices && Club_Notice_Endpoint($notices[0]) === false
-        && ($club = Club_System()) && ($user = Club_Get_Actor($club, $actor))) {
+    if ($notices && Club_Notice_Endpoint($notices[0]) === false && ($user = Club_Get_Actor($actor))) {
         foreach ($notices as &$notice) {
             $notice['inbox'] = $user['inbox']; $notice['shared_inbox'] = $user['shared_inbox'];
         }
@@ -1304,9 +1319,9 @@ function Club_Inbox_Dispatch($input, $club = null) {
             Club_Log_Event('info', 'actor deleted: '.$actor.', '.$pdo->rowCount().' row(s)');
             // 本站把他的投稿扇给过这些群组的关注者，那边本地留着他的副本和帖子，作者不在他们那儿，谁也不会再来删。原始 Delete 一并转出去才清得掉
             if ($relay_clubs && isset($payload) && Club_Relay_Allow($jsonld, $payload, $actor, 'Delete')) {
-                $relayed = [];
-                foreach (array_keys($relay_clubs) as $relay_club) if (Club_Push_Activity($relay_club, $payload, false, false, 'Delete-relay')) $relayed[] = $relay_club;
-                Club_Log_Event(count($relayed) === count($relay_clubs) ? 'info' : 'warning', 'actor delete relayed', ['actor' => $actor, 'clubs' => array_keys($relay_clubs), 'relayed' => $relayed]);
+                $relay_clubs = array_keys($relay_clubs);
+                $relayed = Club_Push_Activity($relay_clubs, $payload, false, false, 'Delete-relay');
+                Club_Log_Event($relayed ? 'info' : 'warning', 'actor delete '.($relayed ? 'relayed' : 'not relayed'), ['actor' => $actor, 'clubs' => $relay_clubs]);
             }
             return true;
         });
@@ -1368,7 +1383,7 @@ function Club_Announce_Process($jsonld) {
             }
         if (!empty($clubs) && ($clubs = array_keys($clubs)) && in_array($public_streams, $to)) {
             sort($clubs, SORT_STRING);
-            if ($actor = Club_Get_Actor($clubs[0], $jsonld['actor'])) {
+            if ($actor = Club_Get_Actor($jsonld['actor'])) {
                 return Club_DB_Transaction('create inbox', function () use ($db, $base, $public_streams,
                     $clubs, $actor, $jsonld, $object, $lang) {
                 // 同一条内容可能同时投到 shared inbox 和群组 inbox，靠唯一键去重
@@ -1507,9 +1522,8 @@ function Club_Update_Process($jsonld, $input) {
             if ($edit) Club_Log_Event('info', 'update applied locally, not relayed', $vars);
             return true;
         }
-        $relayed = [];
-        foreach ($clubs as $club) if (Club_Push_Activity($club, $input, false, false, $poll ? 'Update-poll' : 'Update-relay')) $relayed[] = $club;
-        Club_Log_Event(count($relayed) === count($clubs) ? 'info' : 'warning', $what.' relayed', array_merge($vars, ['relayed' => $relayed]));
+        $relayed = $clubs && Club_Push_Activity($clubs, $input, false, false, $poll ? 'Update-poll' : 'Update-relay');
+        Club_Log_Event($relayed ? 'info' : 'warning', $what.($relayed ? ' relayed' : ' not relayed'), $vars);
         return true;
     });
 }
@@ -1519,7 +1533,7 @@ function Club_Follow_Process($jsonld) {
     if (!($club = Club_Object_Name($jsonld['object'] ?? '')))
         return Club_Inbox_Skip('follow target is not a club url',
             ['actor' => $jsonld['actor'], 'object' => Club_Object_Id($jsonld['object'] ?? '')]);
-    if (!($actor = Club_Get_Actor($club, $jsonld['actor']))) return Club_Json_Output(['message' => 'Actor not found'], 0, 400);
+    if (!($actor = Club_Get_Actor($jsonld['actor']))) return Club_Json_Output(['message' => 'Actor not found'], 0, 400);
     return Club_DB_Transaction('follow inbox', function () use ($db, $base, $club, $actor, $jsonld) {
         // 对方重发 Follow 是常态，撞唯一键时保留原记录
         $pdo = $db->prepare('insert ignore into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
@@ -1582,7 +1596,8 @@ function Club_Tombstone_Process($jsonld, $input = null) {
             if (!$pdo->rowCount()) return Club_Inbox_Skip('delete claimed by a concurrent delivery', ['object' => $object]);
             // 作者和「本站转发过」这两条闸门由上面那次 join users 的查询把住，这里只差签名
             $relay = isset($input) && Club_Relay_Allow($jsonld, $input, $object, 'Delete');
-            foreach (json_decode($activity['clubs'], 1) ?: [] as $club) {
+            $clubs = json_decode($activity['clubs'], 1) ?: [];
+            foreach ($clubs as $club) {
                 $club_url = $base.'/club/'.$club;
                 Club_Push_Activity($club, [
                     '@context' => 'https://www.w3.org/ns/activitystreams',
@@ -1603,11 +1618,11 @@ function Club_Tombstone_Process($jsonld, $input = null) {
                         'object' => $activity['object']
                     ]
                 ]);
-                // Undo 只撤掉群组那条转嘟，跨实例的关注者本地那份原帖会留成孤儿（作者不在他们那儿，谁也不会再来删它）。原始 Delete 一并转出去才能真正清掉。
-                // 放在 Undo 之后：不验 LD 签名的实现只认得 Undo，先让它落地
-                if ($relay) Club_Push_Activity($club, $input, false, false, 'Delete-relay');
             }
-            Club_Log_Event('info', 'announce revoked', ['object' => $object, 'clubs' => json_decode($activity['clubs'], 1) ?: [], 'delete relayed' => $relay]);
+            // Undo 只撤掉群组那条转嘟，跨实例的关注者本地那份原帖会留成孤儿（作者不在他们那儿，谁也不会再来删它）。原始 Delete 一并转出去才能真正清掉。
+            // 排在全部 Undo 之后：不验 LD 签名的实现只认得 Undo，先让它落地。原始报文对这些群组是同一包，一次入队覆盖它们的关注者并集，逐个群组扇出会让同时关注两个的实例收到两遍
+            if ($relay && $clubs) Club_Push_Activity($clubs, $input, false, false, 'Delete-relay');
+            Club_Log_Event('info', 'announce revoked', ['object' => $object, 'clubs' => $clubs, 'delete relayed' => $relay]);
             $pdo = $db->prepare('delete from `announces` where `activity` = :activity');
             $pdo->execute([':activity' => $activity['id']]);
             return true;
