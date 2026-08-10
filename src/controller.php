@@ -24,7 +24,7 @@ function controller() {
                 if (isset($uri[3])) switch ($uri[3]) {
                     case 'inbox':
                         if ($_SERVER['REQUEST_METHOD'] == 'POST')
-                            Club_Inbox_Process(file_get_contents('php://input'), $club);
+                            Club_Inbox_Process($club);
                         else header('Content-type: application/activity+json'); break;
 
                     case 'outbox':
@@ -147,7 +147,7 @@ function controller() {
         
         case 'inbox':
             if ($_SERVER['REQUEST_METHOD'] == 'POST')
-                Club_Inbox_Process(file_get_contents('php://input'));
+                Club_Inbox_Process();
             else header('Content-type: application/activity+json'); break;
 
         case 'nodeinfo':

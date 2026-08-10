@@ -3,9 +3,12 @@
 // 这份代码要求的数据库结构版本，对应 src/migrate/ 下最大的那个步骤文件。库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，入站活动会写进本地状态再报错，对端重放就是半处理
 define('DB_VERSION', 4);
 
-// 跳转自己跟：交给 curl 的话每一跳既过不了内网检查，签名也对不上新 host。跳数与 Mastodon 一致
+// 跳转自己跟：交给 curl 的话每一跳既过不了内网检查，签名也对不上新 host。跳数与 Mastodon 一致。
+// $fetch_retry 说的是「这次拉不到」还是「这个地址永远拉不到」，两者的自愈概率差好几个数量级：调用方拿它决定给对端 5xx 还是终局 4xx，判错一边就是丢活动或者无限重投。
+// 默认终局，只有说得出「过一会儿可能就好了」的失败才置 true
 function ActivityPub_GET($url, $club, $hops = 3) {
-    global $curl;
+    global $curl, $fetch_retry;
+    $fetch_retry = false;
     for ($i = 0; $i <= $hops; $i++) {
         // 拦下的是内网地址和非 http(s)，属于有人在拿本站当探针，不能只是静默返回
         if (($public = Club_Url_Public($url)) === false) {
@@ -15,14 +18,18 @@ function ActivityPub_GET($url, $club, $hops = 3) {
         // 解析不出来只是这次拉不到，跟被人当探针不是一回事，别混进 warning 里
         if ($public === null) {
             Club_Log_Event(Club_Resolver_Healthy() ? 'info' : 'warning', 'fetch skipped, cannot resolve host', ['url' => $url, 'hop' => $i]);
-            return false;
+            $fetch_retry = true; return false;
         }
         $date = gmdate('D, d M Y H:i:s T');
         // 把验过的 IP 一起交下去，别让 curl 自己再解析一遍
         $result = ActivityPub_CURL($url, $date, [
             'Signature' => ActivityPub_Signature($url, $club, $date)
         ], null, $public);
-        if ($result === false || !in_array($curl->httpStatusCode, [301, 302, 303, 307, 308])) return $result;
+        // 有救的只有传输层没通（连不上、超时、TLS，看 curlError）和对端喊等会儿的那几个状态码。不能照 Curl 的返回值判：它把 4xx / 5xx 一律算进 error，
+        // 那样 404、410 这种「这个文档永远不在」的终局答复也成了还有救，对端会一直收到 5xx。这条线与投递侧的 rejected 完全互补（501 同样归终局），只多一个 2xx —— 拿到了文档但它不合法，那也是终局
+        $code = $curl->httpStatusCode;
+        $fetch_retry = $curl->curlError || in_array($code, [401, 408, 429]) || ($code >= 500 && $code != 501);
+        if ($result === false || !in_array($code, [301, 302, 303, 307, 308])) return $result;
         if (!($location = Club_Header_Get($curl->responseHeaders, 'Location'))) return $result;
         $url = Club_Url_Absolute($location, $url);
     } return false;
@@ -167,8 +174,10 @@ function ActivityPub_Signature($url, $club, $date, $digest = null) {
 }
 
 function ActivityPub_Verification($input = null, $pull = true) {
-    global $db, $verify_signed, $verify_actor;
+    global $db, $verify_signed, $verify_actor, $verify_retry, $fetch_retry;
     static $algos = ['rsa-sha256' => OPENSSL_ALGO_SHA256, 'hs2019' => OPENSSL_ALGO_SHA256, 'rsa-sha512' => OPENSSL_ALGO_SHA512];
+    // 默认终局：下面的每一条头部检查，失败原因都在对端那份请求里，重投多少次都是同一个结果
+    $verify_retry = false;
     if (empty($_SERVER['HTTP_SIGNATURE'])) return ActivityPub_Verify_Fail('no signature header');
     $signature = [];
     preg_match_all('/[,\s]*(.*?)="(.*?)"/', $_SERVER['HTTP_SIGNATURE'], $matches);
@@ -225,6 +234,10 @@ function ActivityPub_Verification($input = null, $pull = true) {
 
     // 可能是没见过的 actor，也可能是对方轮换了密钥，拉取一次后重试
     if ($pull && Club_Sync_Actor($actor)) return ActivityPub_Verification($input, false);
+    // 走到这里是本站手上没有可用的当前公钥。只有刷新是因为解析不动、连不上、对端 5xx、冷却中这类会好的原因才没成，重投才有意义；
+    // actor 指向内网、404、文档本身不合法那种刷多少遍都一样，和「拿着当前公钥仍然对不上」一起算终局 —— 投递侧不把验签失败当终局（本站的 ActivityPub_POST 和 Mastodon 的
+    // response_error_unsalvageable? 都把 401 排除在外），给会重试的状态码就是让一条永远验不过的活动无限重投，还会算进对端整家实例的失败统计。不拉取的调用方（销号那条）没有自愈机会，同样终局
+    $verify_retry = $pull && !empty($fetch_retry);
     return false;
 }
 
@@ -684,7 +697,7 @@ function Club_Create($club, $system = false) {
 }
 
 function Club_Get_Actor($actor) {
-    global $db; $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox` from `users` where `actor` = :actor');
+    global $db, $fetch_retry; $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     $row = $pdo->fetch(PDO::FETCH_ASSOC);
     if ($row) {
@@ -696,7 +709,8 @@ function Club_Get_Actor($actor) {
     // 出站拉取不能跨数据库事务；事务内的调用者只能使用已经验证过的缓存行。
     if ($db->inTransaction()) {
         Club_Log_Event('warning', 'actor refresh skipped inside database transaction', ['actor' => $actor]);
-        return false;
+        // 这次压根没拉，$fetch_retry 还是上一次拉取留下的值，得自己写：什么都没试过，对调用方就只能是「稍后再来」
+        $fetch_retry = true; return false;
     }
     return Club_Fetch_Actor($actor);
 }
@@ -705,10 +719,11 @@ function Club_Get_Actor($actor) {
 // users 是全站共用的一份，这行属于哪个群组无从谈起，签名统一用系统群组：同一行的建立和刷新由不同群组签本来就不一致，
 // 而随手拿投稿命中的某个群组来签，等于让对端为一次首访去拉一个它没见过、还可能单独封过的 actor
 function Club_Fetch_Actor($actor) {
-    global $db;
+    global $db, $fetch_retry;
     if (!($club = Club_System())) {
         Club_Log_Event('warning', 'fetch actor skipped, no system club', ['actor' => $actor]);
-        return false;
+        // 缺系统群组是本站自己的毛病，建出来就好了，不能让对端替我们把活动丢掉
+        $fetch_retry = true; return false;
     }
     $jsonld = json_decode(ActivityPub_GET($actor, $club), 1);
     if (empty($jsonld['id']) || $jsonld['id'] != $actor || empty($jsonld['inbox'])) {
@@ -755,13 +770,14 @@ function Club_Has_Actor($actor) {
 
 // 验签失败时刷新公钥，带冷却时间，防止伪造签名把本站当外连放大器
 function Club_Sync_Actor($actor, $cooldown = 3600) {
-    global $db; $pdo = $db->prepare('select `refresh` from `users` where `actor` = :actor');
+    global $db, $fetch_retry; $pdo = $db->prepare('select `refresh` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     $refresh = $pdo->fetch(PDO::FETCH_COLUMN, 0);
     // 冷却中就不再拉。验签失败又刷不了公钥时，这行是唯一的解释
     if ($refresh !== false && $refresh > time() - $cooldown) {
         Club_Log_Event('debug', 'actor refresh on cooldown', ['actor' => $actor, 'retry in' => ($refresh + $cooldown - time()).'s']);
-        return false;
+        // 冷却结束之后这次刷新照样会发生，对端过一会儿重投就是了
+        $fetch_retry = true; return false;
     }
     return Club_Fetch_Actor($actor);
 }
@@ -1238,37 +1254,71 @@ function Club_Inbox_Skip($reason, $context = []) {
     Club_Log_Event('debug', 'inbox skip, '.$reason, $context);
 }
 
+// inbox 的应答只发一次，链路上任何一处给出终局状态之后，外层那个 202 兜底就不能再覆盖它。用它自己的标记而不是 headers_sent()：开着输出缓冲时前一次输出还没落到网络上，那个函数仍然答 false。
+// 对端只按状态码分类，选错一边就是丢活动或者无限重投：本站发出去的 4xx 都取自不会被重投的那半（400、403、413），5xx 会被重投，所以只有真的临时故障才给 5xx。
+// 401、408、429 不在其中 —— 投递侧同样把这三个当可恢复故障重试，见 ActivityPub_POST 的分类
+function Club_Inbox_Reply($status, $message, $retry = 0) {
+    static $sent = false;
+    if ($sent) return; $sent = true;
+    if ($retry) header('Retry-After: '.$retry);
+    Club_Json_Output(['message' => $message], 0, $status);
+}
+
+// 验签过了，但本站拿不到能用的 actor 文档，没有它就落不了库。拉取失败的原因决定对端该不该再来一次：404、非法文档、非法 endpoint 重投多少遍都是同一个结果，
+// 回 5xx 就是让对端一直投；解析不动、连不上、对端 5xx、冷却中那些则相反，回终局 4xx 等于替它把这条活动丢了。两个调用点是同一个判断
+function Club_Inbox_Unresolved($actor) {
+    global $fetch_retry;
+    Club_Log_Event('warning', 'inbox '.($fetch_retry ? 'deferred' : 'rejected').', actor document is unusable', ['actor' => $actor]);
+    return $fetch_retry ? Club_Inbox_Reply(503, 'Actor is temporarily unavailable', 60) : Club_Inbox_Reply(400, 'Actor document is unusable');
+}
+
 // 入站已验证，但它必须派生的 direct enqueue 暂时被 blacklist 挡住：回滚本轮状态并让对端重投。
 class Club_Inbox_Deferred extends RuntimeException {}
 // endpoint/club 等前提本身终局无效：同样回滚本轮状态，但不能用 5xx 制造无限重投。
 class Club_Inbox_Rejected extends RuntimeException {}
 
-// inbox 的对外入口。DB 抛异常必须在 event 里也留一行，否则那边是「inbox in」之后戛然而止，判断不出是没匹配到分支还是中途挂了。500 会让对端重投，这对临时性的 DB 故障是对的行为，跟未捕获时一致
-function Club_Inbox_Process($input, $club = null) {
-    try { Club_Inbox_Dispatch($input, $club); }
+// inbox 的对外入口。请求体在这里读：那是对端完全可控的字节，先看 Content-Length 再决定要不要读进来，读完再判等于把本进程的内存占用交给对方。
+// DB 抛异常必须在 event 里也留一行，否则那边是「inbox in」之后戛然而止，判断不出是没匹配到分支还是中途挂了
+function Club_Inbox_Process($club = null) {
+    // 上限跟 Mastodon 的 ActivityPub::Activity::MAX_JSON_SIZE 取同一个数，它那边也是写死的常量。一条活动多大是协议决定的，不是每站不一样的东西
+    $limit = 1024 * 1024;
+    // Content-Length 可以缺失（分块传输）也可以撒谎，所以多读一个字节再复核一次，两处都拦住才算真的封顶
+    $long = (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > $limit;
+    $input = $long ? '' : file_get_contents('php://input', false, null, 0, $limit + 1);
+    // 读不出来是本站这边的输入流故障，不是对端发了个空包。当成空正文的话下面会因为解不出 type 回一个终局 400，那条活动就再也不会重投了
+    if ($input === false) {
+        Club_Log_Event('error', 'inbox aborted, cannot read the request body', ['club' => $club ?? 'shared', 'length' => $_SERVER['CONTENT_LENGTH'] ?? '-']);
+        return Club_Inbox_Reply(503, 'Unable to read the request body', 60);
+    }
+    if ($long || strlen($input) > $limit) {
+        Club_Log_Event('warning', 'inbox rejected, request body is too large', ['club' => $club ?? 'shared', 'length' => $_SERVER['CONTENT_LENGTH'] ?? '-', 'limit' => $limit]);
+        return Club_Inbox_Reply(413, 'Request body is too large');
+    }
+    try {
+        Club_Inbox_Dispatch($input, $club);
+        // 合法且认证成功的活动，无论真处理了、判重跳过还是没有对应处理分支，对端要的都是同一句「收下了，别再投」
+        Club_Inbox_Reply(202, 'Accepted');
+    }
     catch (Club_Inbox_Deferred $e) {
         Club_Log_Event('warning', 'inbox deferred, outbound enqueue is temporarily blocked', ['error' => $e->getMessage()]);
-        if (!headers_sent()) {
-            header('Retry-After: 300');
-            Club_Json_Output(['message' => 'Temporarily unable to enqueue the required response'], 0, 503);
-        }
+        Club_Inbox_Reply(503, 'Temporarily unable to enqueue the required response', 300);
     }
     catch (Club_Inbox_Rejected $e) {
         Club_Log_Event('warning', 'inbox rejected, required outbound response cannot be enqueued', ['error' => $e->getMessage()]);
-        if (!headers_sent()) Club_Json_Output(['message' => 'Required response target is invalid'], 0, 400);
+        Club_Inbox_Reply(400, 'Required response target is invalid');
     }
     catch (PDOException $e) {
         Club_Log_Event('error', 'inbox aborted, database error', ['error' => $e->getMessage()]);
         // 中断可能发生在 Club_Log_Inbox 之前，那样 event 里的关联标记会指向一个不存在的文件。报文是查这类中断的唯一依据，非补不可；已经写过的话同名覆盖，无害
         if ($name = Club_Log_Ref()) Club_Log_Write('error', 'inbox', $name.'_input', $input);
-        // 前面可能已经输出过 400，重复 header 会触发警告
-        if (!headers_sent()) Club_Json_Output(['message' => 'Internal error'], 0, 500);
+        // 写不进库是临时故障，503 + Retry-After 是明确的「稍后再来」；换成 5xx 里的 500 对端多半也会重投，但那是「本站有 bug」的意思，未捕获异常才归它
+        Club_Inbox_Reply(503, 'Temporarily unable to store the activity', 60);
     }
 }
 
 // 群组 inbox 和 shared inbox 走同一套流程，$club 为 null 表示 shared inbox
 function Club_Inbox_Dispatch($input, $club = null) {
-    global $db, $config, $verify_reason;
+    global $db, $config, $verify_reason, $verify_retry;
     $jsonld = is_array($jsonld = json_decode($input, 1)) ? $jsonld : [];
     // 顶层数组是合法 JSON-LD（node object 的数组），Foundkey 一类实现这么发。单个活动拆开照常处理；多元素是活动集合，只认第一条等于把其余的静默丢掉，那种不收
     $wrapped = count($jsonld) === 1 && isset($jsonld[0]) && is_array($jsonld[0]);
@@ -1298,7 +1348,7 @@ function Club_Inbox_Dispatch($input, $club = null) {
         Club_Log_Write('warning', 'inbox', $name.'_input', $input);
         Club_Log_Write('warning', 'inbox', $name.'_rejected', $reason, 'txt');
         Club_Log_Event('warning', 'inbox rejected, '.$reason, ['club' => $club ?? 'shared']);
-        return Club_Json_Output(['message' => 'Request is invalid'], 0, 400);
+        return Club_Inbox_Reply(400, 'Request is invalid');
     }
     $jsonld['actor'] = $actor;
     // 每条入站活动在 event 里留一行，logs/inbox/ 是按请求切的文件，翻不出时间线
@@ -1319,10 +1369,12 @@ function Club_Inbox_Dispatch($input, $club = null) {
         $verify = ActivityPub_Verification($input, false) && ActivityPub_Verify_Actor($actor);
         // 销号会连带级联删掉关注关系，是破坏性最大的一条，成没成都要留痕
         Club_Log_Inbox($name, $input, $verify);
+        // 这条从不吃未验签的包，inbox-verify 关掉也一样。给 202 对端会当作已经删干净了，所以要明说是签名的问题；这里不拉公钥（销号的 actor 拉了也是 410），没有会自愈的失败，一律终局
+        if (!$verify) return Club_Inbox_Reply(403, 'Signature verification failed');
         // 查的是即将被删掉的那行 users，只能赶在删除事务前面。这个人没了，同实例的其它用户还在，那条 shared_inbox 照样该提前探活
-        if ($verify) Club_Blacklist_Sooner($actor);
+        Club_Blacklist_Sooner($actor);
         // 删除和它派生的转发队列必须一起提交：分开提交时中途出错会留下删了一半的名单，而对端重投的那一包在上面 Club_Has_Actor 那里就被挡掉，剩下的群组永远等不到 Delete
-        if ($verify) Club_DB_Transaction('actor delete inbox', function () use ($db, $jsonld, $payload, $actor) {
+        Club_DB_Transaction('actor delete inbox', function () use ($db, $jsonld, $payload, $actor) {
             // 先锁住 users 那行再读 activities：并发的投稿插 activities 时要拿这行的外键共享锁，不先锁的话，读完名单到删除之间落库的那个群组会被级联一并删掉 ——
             // 它的关注者已经收到了转嘟，却不在转发名单里。锁不到行说明并发的重投已经删过，本站没有可匹配的数据，转发也就无从谈起
             $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor for update');
@@ -1355,15 +1407,20 @@ function Club_Inbox_Dispatch($input, $club = null) {
     }
     $verify = ActivityPub_Verification($input) && ActivityPub_Verify_Actor($actor);
     Club_Log_Inbox($name, $input, $verify);
-    if (($config['node']['inbox-verify'] ?? true) && !$verify)
+    if (($config['node']['inbox-verify'] ?? true) && !$verify) {
         // 详情在 logs/inbox/*_verify_failed 里，这里只留一行好对时间线
-        return Club_Inbox_Skip('verification failed', ['actor' => $actor, 'reason' => $verify_reason ?? '-']);
+        Club_Inbox_Skip('verification failed', ['actor' => $actor, 'reason' => $verify_reason ?? '-']);
+        // 缺签名、Digest 对不上、签名与当前公钥不符都是终局的，回 403 让对端别再投；只有公钥暂时拉不到那种回 5xx，理由见 ActivityPub_Verification 末尾
+        return $verify_retry ? Club_Inbox_Reply(503, 'Unable to verify the signature right now', 60) : Club_Inbox_Reply(403, 'Signature verification failed');
+    }
     if (!$verify) Club_Log_Event('warning', 'inbox unverified but accepted, inbox-verify is off', ['actor' => $actor, 'reason' => $verify_reason ?? '-']);
     // 验过签才算数：不验签就凭 actor 提前探活，等于让任何人点名让我们去敲谁
     else Club_Blacklist_Sooner($actor);
-    // 系统群组只负责发私信，不接受关注也不转发投稿
-    if (isset($club) && Club_System_Name($club))
-        return Club_Inbox_Skip('system club accepts nothing', ['club' => $club, 'type' => $type]);
+    // 系统群组只负责发私信，不接受关注也不转发投稿。身份是可信的，拦它的是本站策略，所以是 403 而不是 401
+    if (isset($club) && Club_System_Name($club)) {
+        Club_Inbox_Skip('system club accepts nothing', ['club' => $club, 'type' => $type]);
+        return Club_Inbox_Reply(403, 'This actor does not accept this activity');
+    }
 
     switch ($type) {
         case 'Create': Club_Announce_Process($jsonld); break;
@@ -1457,7 +1514,7 @@ function Club_Announce_Process($jsonld) {
                 // 同一条内容同时投到群组 inbox 和 shared inbox 时，输的那次走这里
                 } else Club_Inbox_Skip('create already claimed by a concurrent delivery', ['object' => $object]);
                 });
-            } else Club_Json_Output(['message' => 'Actor not found'], 0, 400);
+            } else Club_Inbox_Unresolved($jsonld['actor']);
         // $clubs 在上面的条件里已经被 array_keys 转成列表了，没进那步则还没定义
         } else Club_Inbox_Skip('create not addressed to a club, or not public',
             ['object' => $object, 'clubs' => $clubs ?? [], 'to' => $to]);
@@ -1559,7 +1616,7 @@ function Club_Follow_Process($jsonld) {
     if (!($club = Club_Object_Name($jsonld['object'] ?? '')))
         return Club_Inbox_Skip('follow target is not a club url',
             ['actor' => $jsonld['actor'], 'object' => Club_Object_Id($jsonld['object'] ?? '')]);
-    if (!($actor = Club_Get_Actor($jsonld['actor']))) return Club_Json_Output(['message' => 'Actor not found'], 0, 400);
+    if (!($actor = Club_Get_Actor($jsonld['actor']))) return Club_Inbox_Unresolved($jsonld['actor']);
     return Club_DB_Transaction('follow inbox', function () use ($db, $base, $club, $actor, $jsonld) {
         // 对方重发 Follow 是常态，撞唯一键时保留原记录
         $pdo = $db->prepare('insert ignore into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
