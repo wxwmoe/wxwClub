@@ -37,7 +37,7 @@ function ActivityPub_GET($url, $club, $hops = 3) {
 //   local-dns  本站自己解析不动、或刷新锁在别人手上，什么都没证明，不能算在对端头上
 //   lease-lost $authorize 没放行，这次请求根本没发出去
 // $authorize 在解析之后、真正出网之前调用。
-// 系统 resolver 没有应用层硬期限，一次解析卡过租约之后这条 endpoint 已经易主，旧 worker 醒过来再发一次，就是同一秒两个进程打同一家 —— 只在落库时验 token 拦不住已经出网的请求
+// 解析、签名、curl 各有各的超时，但合起来没有上界，跨过租约之后这条 endpoint 已经易主，旧 worker 醒过来再发一次，就是同一秒两个进程打同一家 —— 只在落库时验 token 拦不住已经出网的请求
 function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
     global $curl;
     // 队列里的 target 是很久以前拉取的，域名可能已经解析到内网，每次投递都要重判
@@ -1735,8 +1735,9 @@ function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
     if ($row && $row['checked_at'] > $now - ($row['ips'] === '' ? $miss : $ttl))
         return Club_Resolver_Cached($host, $row, $now, $miss);
     $stock = $row && $row['ips'] !== '' && $row['checked_at'] > $now - $stale ? $row['ips'] : null;
-    // 几十个进程同时发现同一个 host 过期会一起去查 DNS。抢到刷新锁的那个才真去解析，其余的拿旧值先顶一轮；连旧值都没有的只能等赢家提交
-    if (!Club_Resolver_Claim($host, $now, $token = Club_Token())) {
+    // 几十个进程同时发现同一个 host 过期会一起去查 DNS。抢到刷新锁的那个才真去解析，其余的拿旧值先顶一轮；连旧值都没有的只能等赢家提交。
+    // 窗口要盖得住最坏那次解析，再留点余量给前后几次数据库往返；30 秒是下限，免得配置调小之后一个卡住的进程把这个 host 锁得太久
+    if (!Club_Resolver_Claim($host, $now, $token = Club_Token(), max(30, Club_Resolver_Budget() + 10))) {
         Club_Stat('dns_contention');
         if (isset($stock)) {
             Club_Stat('dns_stale');
@@ -1752,16 +1753,23 @@ function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
         return false;
     }
     $ips = Club_Resolver_Query($host);
-    // 解析失败但手上还有一小时内的旧值：只放掉刷新锁，不写负缓存。写了的话一次 SERVFAIL 就把还能用的地址抹掉；
-    // 而 Store 会重置 checked_at，那道 1 小时的安全边界会跟着一起续命，域名真改指到内网时我们还在拿旧地址放行
-    if (!$ips && isset($stock)) {
-        Club_Resolver_Release($host, $token); Club_Stat('dns_stale');
-        Club_Log_Event('debug', 'dns lookup failed, reusing cached address', ['host' => $host, 'age' => $now - $row['checked_at'], 'ip' => $stock]);
-        return explode(',', $stock);
+    // 一家 resolver 都没答上来。这什么都没证明，绝不能写负缓存：写了就是把本站这一侧的故障记成「对端把域名撤了」，它名下几千行队列跟着按 unresolved 退避。
+    // 而 Store 还会重置 checked_at，那道 1 小时的安全边界会跟着续命，域名真改指到内网时我们还在拿旧地址放行。所以只放掉刷新锁，有旧值先顶一轮，没有就交给调用方按 local-dns 处置
+    if ($ips === false) {
+        Club_Resolver_Release($host, $token);
+        if (isset($stock)) {
+            Club_Stat('dns_stale');
+            Club_Log_Event('debug', 'dns lookup failed, reusing cached address', ['host' => $host, 'age' => $now - $row['checked_at'], 'ip' => $stock]);
+            return explode(',', $stock);
+        }
+        Club_Stat('dns_unreachable'); Club_Resolver_Deferred(true);
+        Club_Log_Event('warning', 'dns lookup failed, no resolver answered', ['host' => $host]);
+        return false;
     }
-    // 负结果也要落库。不记的话，一家解析不出来的对端，它名下每一行都要重查一遍，几千行乘以两次阻塞查询，足够把容器的 UDP conntrack 打满、把好域名也拖成解析失败
+    // 空结果是权威答复「没有这种记录」，跟上面那种问不到是两回事，照常落库。换掉系统 resolver 之前这两种混在一个 false 里分不开，只能一律留着旧值；现在分得开了，NXDOMAIN 就该让旧地址过期。
+    // 负结果也要落库。不记的话，一家解析不出来的对端，它名下每一行都要重查一遍，几千行乘以两次出网查询，足够把 resolver 那边的配额打满、把好域名也拖成解析失败
     if (!Club_Resolver_Store($host, $token, $ips ? implode(',', $ips) : '', time())) {
-        // 真实查询超过 30 秒，锁已经被别人接走：这份结果是旧的，覆盖新 owner 提交的地址等于把安全检查退回上一轮，只能丢掉自己的结果去读赢家的
+        // 真实查询超出了刷新窗口，锁已经被别人接走：这份结果是旧的，覆盖新 owner 提交的地址等于把安全检查退回上一轮，只能丢掉自己的结果去读赢家的
         Club_Stat('dns_stale_store');
         Club_Log_Event('debug', 'stale dns result discarded', ['host' => $host, 'token' => $token]);
         // 赢家可能也还没提交，读回来的仍是过期行；超出窗口就不能再用了。
@@ -1774,7 +1782,7 @@ function Club_Url_Resolve($host, $ttl = 300, $miss = 60, $stale = 3600) {
     }
     if ($ips) { Club_Stat('dns_positive'); Club_Resolver_Healthy(true); return $ips; }
     Club_Stat('dns_negative');
-    Club_Log_Event('debug', 'dns lookup failed, no usable cache', ['host' => $host]);
+    Club_Log_Event('debug', 'dns lookup returned no records', ['host' => $host]);
     return [];
 }
 
@@ -1823,7 +1831,8 @@ function Club_Resolver_Read($host) {
 }
 
 // 抢刷新权。行还不存在时 insert ignore 建出来，插进去的那个自然就是抢到的。
-// 锁和缓存分成两组列：抢到就先推 checked_at 的话，这次解析要是失败了，旧 IP 的 stale 窗口会跟着一起续命，那道 1 小时的安全边界就守不住了
+// 锁和缓存分成两组列：抢到就先推 checked_at 的话，这次解析要是失败了，旧 IP 的 stale 窗口会跟着一起续命，那道 1 小时的安全边界就守不住了。
+// $window 由调用方按 Club_Resolver_Budget 算好传进来，这里的默认值只是个兜底
 function Club_Resolver_Claim($host, $now, $token, $window = 30) {
     global $db;
     $pdo = $db->prepare('update `dns` set `lock_token` = unhex(:token), `lock_until` = :until where `host` = :host and `lock_until` <= :now');
@@ -1836,7 +1845,7 @@ function Club_Resolver_Claim($host, $now, $token, $window = 30) {
     return (bool)$pdo->rowCount();
 }
 
-// 凭 token 提交解析结果。查询超过 30 秒锁就会被别人接走，那之后这份结果已经是旧的：条件不匹配时一行都不写，让调用方去读赢家提交的地址
+// 凭 token 提交解析结果。查询超出刷新窗口锁就会被别人接走，那之后这份结果已经是旧的：条件不匹配时一行都不写，让调用方去读赢家提交的地址
 function Club_Resolver_Store($host, $token, $ips, $now) {
     global $db;
     $pdo = $db->prepare('update `dns` set `ips` = :ips, `checked_at` = :now, `lock_until` = 0, `lock_token` = null where `host` = :host and `lock_token` = unhex(:token)');
@@ -1854,17 +1863,126 @@ function Club_Resolver_Release($host, $token) {
     return (bool)$pdo->rowCount();
 }
 
-// 真实 A/AAAA 查询的唯一出口。系统 resolver 在本进程里跑，没有应用层硬期限，卡死的进程连一行完成日志都不会留 —— 所以进去之前先同步写一条 started。
-// 事后靠「有 started 没 finished」才认得出是卡在这里，光看心跳缺失说明不了原因。命中缓存和没抢到锁的都不写：那两种情况根本没进系统 resolver
+// 配置里的 resolver 列表，没配就用内置这两家。老部署升级上来时 config.php 里没有这一节，缺省不能是空列表 —— 那样全站一个域名都解析不动
+function Club_Resolver_List() {
+    global $config;
+    // 预设带 ip：这两组是多年不变的 anycast 地址，钉上去就完全不碰系统 resolver，本机 DNS 坏掉也不影响出网。
+    // 钉地址不动摇 TLS：CURLOPT_RESOLVE 换掉的只是这个 host:port 的解析结果，SNI 和证书校验用的仍然是 URL 里的域名。
+    // 但域名要选真名副其实的那个 —— one.one.one.one 和 dns.google 自己的 A/AAAA 就是下面这些地址，而 cloudflare-dns.com 的真实记录在 104.16 那段 CDN anycast 上，
+    // 把它钉到 1.1.1.1 当下能连通，靠的是那台机器上的证书恰好也覆盖这个名字，对方一调整就是整站解析不动
+    return $config['dns']['resolver'] ?? [
+        ['url' => 'https://one.one.one.one/dns-query', 'ip' => ['1.1.1.1', '1.0.0.1', '2606:4700:4700::1111', '2606:4700:4700::1001']],
+        ['url' => 'https://dns.google/resolve', 'ip' => ['8.8.8.8', '8.8.4.4', '2001:4860:4860::8888', '2001:4860:4860::8844']]
+    ];
+}
+
+// 一次解析最坏能花多久：每家顺序问 A 和 AAAA（A 就失败的话直接换下一家，所以是乘二不是乘查询数），一家问不出来再换下一家。
+// 刷新锁的窗口由它算出来，不能写死：窗口短于这个预算的话，第一个进程还没问完锁就到期，第二个进程接手重问一遍，而它同样问不完 —— resolver 出故障的那一刻恰好是查询被放大的时刻
+function Club_Resolver_Budget() {
+    global $config;
+    return max(1, (int)($config['dns']['timeout'] ?? 5)) * 2 * max(1, count(Club_Resolver_List()));
+}
+
+// 一次 DoH 查询。用 JSON 格式（application/dns-json）而不是 wireformat：后者要自己写报文编解码，而这里只要几个地址；两家的参数名和返回结构一致，换一家不用换解析。
+// 三态，调用方必须分开处置：
+//   数组   查到的地址，空数组是权威答复「没有这种记录」
+//   null   resolver 答了 SERVFAIL —— 这个域名解析不出来，是对端的故障
+//   false  这家没答上来（连不上、4xx/5xx、报文坏、REFUSED），什么都没证明，是本站这一侧的事
+function Club_Resolver_DoH($resolver, $host, $type) {
+    global $config;
+    static $curl = null;
+    // 不复用 ActivityPub_CURL 那个全局句柄：那边的调用方在请求之后还要读 responseHeaders 和 httpStatusCode 判跳转，套进同一个句柄会把判断依据冲掉
+    if (!isset($curl)) { $curl = new Curl(); $curl->setHeader('Accept', 'application/dns-json'); $curl->setFollowLocation(false); $curl->setOpt(CURLOPT_PROTOCOLS, CURLPROTO_HTTPS); }
+    // 期限由 curl 自己执行，不经过 PHP 的检查点，两个 SAPI 都算数 —— 这正是换掉系统 resolver 的理由。
+    // 必须夹到 1 以上：libcurl 把 0 定义成「永不超时」，配置里手滑写个 0 或负数就等于把刚拆掉的无限等待原样装回来，而那种故障要等到线上卡住才发作
+    $curl->setTimeout(max(1, (int)($config['dns']['timeout'] ?? 5)));
+    $curl->setConnectTimeout(max(1, (int)($config['dns']['connect-timeout'] ?? 3)));
+    // 钉住 resolver 自己的地址。没配 ip 就交给 curl 去解析：那仍然是系统 resolver，但走在 curl 里，超时管得住，不像 gethostbynamel 那样能把整个进程挂死。
+    // 不像 ActivityPub_CURL 那样每次先用 '-' 撤掉上一条：那边钉的 host 是对端域名，一个长期进程会经手几千个，这边钉的只有 resolver 列表里那两三个，条目数是常数，攒不起来
+    if (!empty($resolver['ip']) && !empty(($parts = parse_url($resolver['url']))['host'])) {
+        $ips = $resolver['ip'];
+        foreach ($ips as $i => $ip) if (strpos($ip, ':') !== false) $ips[$i] = '['.$ip.']';
+        $curl->setOpt(CURLOPT_RESOLVE, [$parts['host'].':'.($parts['port'] ?? 443).':'.implode(',', $ips)]);
+    }
+    $json = json_decode((string)$curl->get($resolver['url'].'?name='.urlencode($host).'&type='.$type), 1);
+    // 传输失败和 4xx/5xx 都由 $curl->error 兜住（见 Curl::exec）。错误页的正文一般也过不了 Club_Resolver_Answer 那关，但那是巧合不是保证，状态码该自己看
+    $answer = $curl->error ? false : Club_Resolver_Answer($json, $type);
+    // SERVFAIL 是对端域名的毛病，这家 resolver 本身是好的，别混进 warning 里去污染本站的故障视图
+    if ($answer === null) Club_Log_Event('info', 'doh reports the domain fails to resolve', ['resolver' => $resolver['url'], 'host' => $host, 'type' => $type]);
+    elseif ($answer === false)
+        Club_Log_Event('warning', 'doh query failed', ['resolver' => $resolver['url'], 'host' => $host, 'type' => $type, 'http' => $curl->httpStatusCode, 'status' => is_array($json) ? ($json['Status'] ?? '?') : '?', 'error' => $curl->errorMessage]);
+    return $answer;
+}
+
+// DoH 报文的解析，单拎出来是为了能不出网地验：这段是整套东西里最该有检查的一节，而本机没有 curl 扩展，连不上就什么都跑不了。三态，含义同上
+function Club_Resolver_Answer($json, $type) {
+    // 报文根本不成形，这家没答上来
+    if (!is_array($json) || !isset($json['Status'])) return false;
+    // 2 = SERVFAIL。这是一次货真价实的 DNS 答复，说的是「这个域名解析不出来」—— 权威服务器挂了、DNSSEC 验不过都落在这里，是对端的事不是我们的事。
+    // 混进 false 的话这种对端会永远走 local-dns：不记 fails、不退避、进不了黑名单，队列每五分钟重投一次，活动还在继续入队，只增不减。
+    // 但一家的判断不能定罪，返回 null 让调用方拿其余 resolver 复核
+    if ($json['Status'] === 2) return null;
+    // 0 是 NOERROR，3 是 NXDOMAIN，这两种是答案。其余（REFUSED、NOTIMP、FORMERR）说的是这家不肯或没法替我们查 —— 限流、客户端被拦、查询本身不合法，都是本站这一侧的事，换一家问
+    if ($json['Status'] !== 0 && $json['Status'] !== 3) return false;
+    // TC 是「这份答复被截断了」。走 HTTPS 没有 512 字节那道限制，正常不会置位；真置了就说明记录不全，当没答上来换一家 —— 拿半份答案去写负缓存是这里最坏的结果
+    if (!empty($json['TC'])) return false;
+    // Answer 在但不是数组：报文坏了，不是「没有记录」。不挡的话 foreach 会对着一个标量报 warning 然后一圈都不转，函数照样返回空数组，一份垃圾响应就成了对端的罪证
+    if (isset($json['Answer']) && !is_array($json['Answer'])) return false;
+    // NXDOMAIN 是终局否定，这个名字不存在，底下不用看了。带地址记录的 NXDOMAIN 是自相矛盾的报文，那个地址下一步就要钉给 curl，宁可不要 ——
+    // 而 Answer 里跟着 CNAME 是合规的（链走到一半、末端不存在），所以也不能因为 Answer 非空就当它是正答复
+    if ($json['Status'] === 3) return [];
+    // Answer 里会夹着 CNAME 链，只认问的那一种；1 = A，28 = AAAA。
+    // 只按 type 筛，不按 name 筛：CNAME 之后的地址记录挂的是链尾的名字而不是问的那个，按 name 对齐会把所有用 CNAME 的对端一律判成没有地址
+    $want = $type === 'AAAA' ? 28 : 1; $ips = []; $seen = 0; $junk = false;
+    foreach ($json['Answer'] ?? [] as $rr) {
+        // 记录本身不是对象：两家都不会这么答，这份报文就是坏的
+        if (!is_array($rr)) { $junk = true; continue; }
+        // type 按数值比，不按类型比：两家现在都给数字，但一个把它序列化成字符串的 resolver 会让每条记录都被跳过，好域名整片写进负缓存
+        if ((int)($rr['type'] ?? 0) !== $want) continue;
+        $seen++;
+        // 地址来自站外，而它下一步就是 SSRF 检查的输入，格式必须自己验一遍，不能拿去当 IP 用
+        if (filter_var($rr['data'] ?? '', FILTER_VALIDATE_IP)) $ips[] = $rr['data'];
+    }
+    // 报文里有不成形的记录，或者有想要的记录却一个地址都不成形：这家答的东西没法用，当没答上来换一家。
+    // 返回空数组的话，一份坏报文就会被写成「这个域名没有地址」的负缓存，罪算在对端头上。夹着 CNAME 却没有地址记录是另一回事，那是合规的「没有这种记录」，照常返回空数组
+    if ($junk || ($seen && !$ips)) return false;
+    return $ips;
+}
+
+// 真实 A/AAAA 查询的唯一出口。不走系统 resolver：它在本进程里跑又没有应用层硬期限，卡住就是一个 worker 槽位或一个 fpm 子进程永久占着，
+// 而 PHP 侧任何期限都拦不住它 —— max_execution_time 计的是 CPU 时间，阻塞时根本不走；SIGALRM 处理器要等它自己返回才轮得到派发。DoH 走 curl，超时由 curl 执行，这才是有界的。
+// 命中缓存和没抢到锁的都不写日志：那两种情况根本没发查询。返回 [] 是问过了确实没有（含每一家都答上话、且有人说 SERVFAIL），false 是没问成
 function Club_Resolver_Query($host) {
     static $seq = 0;
-    $ref = getmypid().'-'.++$seq; $start = microtime(true);
-    Club_Log_Event('info', 'resolver_query_started', ['sapi' => PHP_SAPI, 'slot' => Club_Worker_Slot(), 'pid' => getmypid(), 'host' => $host, 'query_ref' => $ref]);
-    $ips = gethostbynamel($host) ?: [];
-    if (function_exists('dns_get_record')) foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $rr) if (!empty($rr['ipv6'])) $ips[] = $rr['ipv6'];
+    $ref = getmypid().'-'.++$seq; $start = microtime(true); $ips = false; $used = ''; $servfail = 0; $silent = 0;
+    Club_Log_Event('debug', 'resolver_query_started', ['sapi' => PHP_SAPI, 'slot' => Club_Worker_Slot(), 'pid' => getmypid(), 'host' => $host, 'query_ref' => $ref]);
+    // 按顺序问，只有「没答上来」和 SERVFAIL 才换下一家；答了 NXDOMAIN 是答案，再问一家等于拿第二家的意见推翻第一家
+    foreach (Club_Resolver_List() as $resolver) {
+        // A 和 AAAA 都要，理由见 Club_Url_Resolve：只查一种的话，对端摆个公网 A 配一条 ::1 的 AAAA 就绕过了内网检查
+        // 两族一律各问一次，A 的结果不作为跳过 AAAA 的理由：SERVFAIL 本来就是按查询类型给的（A 的记录集验不过签、权威只在 A 上出故障都可能），
+        // 而 false 里除了「连不上」还混着 500、REFUSED、报文坏，这些都证明不了下一次 AAAA 也会失败 —— 漏掉的正是只有 v6 的对端。
+        // 代价只是对着一家坏掉的 resolver 多等一个超时，而刷新窗口的预算（Club_Resolver_Budget）从一开始就是按每家两次算的，收得住
+        $a = Club_Resolver_DoH($resolver, $host, 'A');
+        if ($a === null) { $servfail++; $a = false; }
+        elseif ($a === false) $silent++;
+        $aaaa = Club_Resolver_DoH($resolver, $host, 'AAAA');
+        if ($aaaa === null) { $servfail++; $aaaa = false; }
+        elseif ($aaaa === false) $silent++;
+        $found = array_values(array_unique(array_merge(is_array($a) ? $a : [], is_array($aaaa) ? $aaaa : [])));
+        // 拿到地址就用，哪怕另一族没答上来 —— 钉给 curl 的只有查到的这些，少钉一族不会给内网检查开口子。
+        // 一个地址都没有的时候，只有两族都给出了明确答复才算「这个域名没有地址」；有一族没结论就换下一家，否则一次 A 或 AAAA 的抖动就能把好域名写进负缓存
+        if (!$found && ($a === false || $aaaa === false)) continue;
+        $ips = $found; $used = $resolver['url'];
+        break;
+    }
+    // 判给对端要两个条件同时成立：有人明确答了 SERVFAIL，而且没有任何一家是「没问成」。
+    // 少一家没答上话就等于少一票复核，拿仅剩的一票定罪的话，本站到另一家的网络不通就足以让一个好端端的对端被记成解析失败，持续下去还会进黑名单。
+    // 全票 SERVFAIL 才落成空数组，走 NXDOMAIN 那条路：写负缓存、投递记 unresolved，该退避退避该拉黑拉黑。
+    // 反过来也不能一律算本站的：那条 local-dns 路既不记失败也不放弃，每 300 秒重投一次，而新活动还在往 queues 里进，永远清不掉
+    if ($ips === false && $servfail && !$silent) { $ips = []; Club_Stat('dns_servfail'); }
     $ms = (microtime(true) - $start) * 1000;
     Club_Stat('dns_queries'); Club_Stat_Sample('resolver_query_ms', $ms);
-    Club_Log_Event('debug', 'resolver_query_finished', ['query_ref' => $ref, 'ms' => round($ms), 'found' => count($ips)]);
+    Club_Log_Event('debug', 'resolver_query_finished', ['query_ref' => $ref, 'ms' => round($ms), 'resolver' => $used, 'found' => $ips === false ? -1 : count($ips)]);
     return $ips;
 }
 

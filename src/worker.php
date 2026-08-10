@@ -44,7 +44,7 @@ function worker_delivery($now) {
     return ($lease = Club_Endpoint_Claim($now)) ? worker_endpoint($lease, $now) : false;
 }
 
-// 一条 endpoint 的完整投递。所有权在 DNS 之前就拿到了，出网之前还要再换一次 token：系统 resolver 没有硬期限，一次解析卡过 120 秒租约之后这条 endpoint 已经易主
+// 一条 endpoint 的完整投递。所有权在 DNS 之前就拿到了，出网之前还要再换一次 token：解析和 curl 各有超时但合起来没有上界，跨过 120 秒租约之后这条 endpoint 已经易主
 function worker_endpoint($lease, $now) {
     $url = $lease['url']; $token = $lease['token']; $start = microtime(true);
     if (!($task = Club_Endpoint_Queue($url, $token, $now))) {

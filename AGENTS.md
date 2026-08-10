@@ -66,7 +66,7 @@ The easiest part to get wrong. Read this through before touching `Club_Endpoint_
 
 1. Read candidates without locking, so no row lock is carried into DNS and HTTP.
 2. Claim by primary-key CAS; the affected row count decides the winner.
-3. Swap the token again right before going out (`Club_Endpoint_Authorize`) — the system resolver has no hard deadline, and a resolve that outlives the lease means the endpoint already changed hands.
+3. Swap the token again right before going out (`Club_Endpoint_Authorize`) — resolution, signing and cURL each have their own timeout but no combined bound, and going out after the lease expired means the endpoint already changed hands.
 4. Results land only through `Club_Endpoint_Complete`, which locks the row by token, so a stale owner cannot write a single field.
 
 **Always take locks by primary key.** An UPDATE that scans a secondary index locks the index record first and then the row, while every completion path locks the row first and rewrites index columns last; the two directions form a cycle, which is error 1213. `Club_Lease_Pick` exists for this reason.
