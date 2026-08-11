@@ -110,6 +110,13 @@ function t_ap_seed($fixtures) {
         t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values (:name, :actor, :inbox, :public, :shared, :now, :now)',
             [':name' => basename($actor).'@'.$host, ':actor' => $actor, ':inbox' => $actor.'/inbox', ':public' => $public, ':shared' => 'https://'.$host.'/inbox', ':now' => time()]);
     }
+    // 另一家实例上的一个关注者，预置好不经过任何 fixture。透传转发会把来源实例整条 shared_inbox 排掉 ——
+    // 那一包本来就是它发来的 —— 所以只有投稿者自己那一家关注的话，扇出目标是空的，转发入没入队根本看不出来
+    t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values (:name, :actor, :inbox, :public, :shared, :now, :now)',
+        [':name' => 'bob@other.example', ':actor' => 'https://other.example/users/bob', ':inbox' => 'https://other.example/users/bob/inbox',
+            ':public' => $public, ':shared' => 'https://other.example/inbox', ':now' => time()]);
+    t_exec('insert into `followers`(`cid`,`uid`,`timestamp`) select `c`.`cid`, `u`.`uid`, :now from `clubs` `c`, `users` `u` where `c`.`name` = \'test\' and `u`.`actor` = :actor',
+        [':actor' => 'https://other.example/users/bob', ':now' => time()]);
 }
 
 /* ---- 子进程：一条 fixture ---- */

@@ -53,6 +53,19 @@ function t_schema_merge() {
     return [$version, ''];
 }
 
+// 把库推到某一个中间版本。合并框架只认 DB_VERSION 这一个终点，想停在半路只能照它那几步自己走一遍
+function t_schema_upto($version) {
+    ob_start();
+    Club_Migrate_Ensure_Meta();
+    for ($step = 1; $step <= $version; $step++) {
+        require_once(APP_ROOT.'/src/migrate/'.$step.'.php');
+        call_user_func('Club_Migrate_'.$step);
+        call_user_func('Club_Migrate_'.$step.'_Validate');
+        Club_DB_Version($step);
+    }
+    ob_end_clean();
+}
+
 function t_schema_sql($file) {
     global $db;
     t_db_reset();
@@ -86,15 +99,15 @@ t_group('schema / upgrade from a legacy database');
 
 // 每份夹具都是某次历史提交里 tools/wxwclub.sql 的原样拷贝。自动合并是后来才有的，那之前线上结构就以提交里的快照为准，
 // 所以夹具不是照着 src/migrate/ 反推出来的合成结构，而是那一天真实装出来的库。按文件名从旧到新排，后面几组接着最新那份跑
-foreach (glob(TEST_ROOT.'/fixtures/schema/*.sql') as $fixture) {
+$fixtures = glob(TEST_ROOT.'/fixtures/schema/*.sql');
+foreach ($fixtures as $fixture) {
     $from = basename($fixture, '.sql');
     t_schema_sql($fixture);
     t_is(Club_DB_Version(), 0, $from.': a database without meta reads as version 0');
     list($version, $error) = t_schema_merge();
     t_is($version, DB_VERSION, $from.': merges all the way up'.$error);
-    $merged = t_schema_dump();
     // 这一条就是快照漂移的闸门。差别出现在这里，说明改结构时漏了 tools/wxwclub.sql 那一半
-    t_is(t_schema_diff($snapshot, $merged), [], $from.': ends at exactly what tools/wxwclub.sql installs');
+    t_is(t_schema_diff($snapshot, t_schema_dump()), [], $from.': ends at exactly what tools/wxwclub.sql installs');
     // 回填真的搬过东西，不是在空表上跑了一遍
     t_ok((int)t_one('select `timestamp` from `clubs` where `name` = \'test\'') > 0, $from.': the club survives with an epoch timestamp');
     t_is(t_one('select `clubs` from `activities` where `id` = 1'), '["test"]', $from.': the activity keeps its club');
@@ -135,20 +148,24 @@ function t_schema_scheduling($from) {
 
 t_group('schema / resume after an interrupted merge');
 
-// 崩在 DDL 之后、写版本号之前是最坏的一种：结构已经是新的，meta 还停在旧版本，重启后那一步会从头再跑一遍。
-// 每一步都要能在「已经做完」的库上重跑，而且不能把已经合并好的部分改坏
-for ($version = 1; $version <= DB_VERSION; $version++) {
-    Club_DB_Version($version - 1);
+// 崩在 DDL 之后、写版本号之前是最坏的一种：这一步的结构已经落库，meta 还停在上一版，重启之后它会整个再跑一遍。
+// 能出现的组合只有「结构在第 N 版、meta 停在 N-1」这一种 —— 版本号只在一步跑完之后才写，而且只往前走。
+// 所以不能拿已经合并到底的库把 meta 倒回 0 充数：那种状态现实里不存在，倒回去只是让第 1 版对着第 4 版的结构瞎判，
+// 报出来的错跟真正的中断恢复没有关系。每一轮都从最老的那份夹具重新装起，手工推到第 N 版，再把版本号退一格
+for ($step = 1; $step <= DB_VERSION; $step++) {
+    t_schema_sql($fixtures[0]);
+    t_schema_upto($step);
+    Club_DB_Version($step - 1);
     list($result, $error) = t_schema_merge();
-    t_is($result, DB_VERSION, 'a merge restarted at version '.($version - 1).' finishes'.$error);
-    t_is(t_schema_diff($merged, t_schema_dump()), [], 'a merge restarted at version '.($version - 1).' changes nothing');
+    t_is($result, DB_VERSION, 'step '.$step.' re-runs on a database that already has it'.$error);
+    t_is(t_schema_diff($snapshot, t_schema_dump()), [], 'step '.$step.' re-run still ends at the snapshot');
 }
 
 t_group('schema / second run');
 
 list($version, $error) = t_schema_merge();
 t_is($version, DB_VERSION, 'a second merge is a no-op'.$error);
-t_is(t_schema_diff($merged, t_schema_dump()), [], 'a second merge changes nothing');
+t_is(t_schema_diff($snapshot, t_schema_dump()), [], 'a second merge changes nothing');
 // checkpoint 的生命周期不能超出它那一版，留下来的话下一次合并会读到上一次的半截状态
 t_is((int)t_one('select count(*) from `meta` where `name` like \'migration.%\''), 0, 'no migration checkpoint outlives its own version');
 
@@ -156,5 +173,5 @@ t_is((int)t_one('select count(*) from `meta` where `name` like \'migration.%\'')
 Club_DB_Version(DB_VERSION + 1);
 list($version, $error) = t_schema_merge();
 t_is($version, null, 'a database newer than the code is refused outright');
-t_is(t_schema_diff($merged, t_schema_dump()), [], 'a refused merge changes nothing');
+t_is(t_schema_diff($snapshot, t_schema_dump()), [], 'a refused merge changes nothing');
 Club_DB_Version(DB_VERSION);
