@@ -199,3 +199,19 @@ t_is(Club_Endpoint_Prune($t_url, time()), false, 'an endpoint inside the grace p
 t_exec('update `endpoints` set `idle_since` = 0, `next_at` = :next where `url` = :url', [':next' => $now + 99999, ':url' => $t_url]);
 t_is(Club_Endpoint_Prune($t_url, time()), 'idled', 'a row with no idle clock gets one instead of being removed');
 t_is(t_state_endpoint($t_url)['next_at'], null, 'idling also clears the stale schedule');
+
+t_group('state / maintenance leader');
+
+require_once(APP_ROOT.'/src/worker.php');
+
+// 另一个 master 拿着锁的样子：另开一条连接占住它，落选的这个必须一个维护单元都不做
+t_state_reset();
+$t_rival = new PDO('mysql:host='.$config['mysql']['host'].';dbname='.$config['mysql']['database'].';charset=utf8mb4', $config['mysql']['username'], $config['mysql']['password'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+// 锁名照抄一份而不是从被测代码里读：它是两个 master 之间的约定，改了名字就是选举失效，这几条断言正是要在那时候红
+$t_lock = 'wxwclub_maintain:'.md5($config['mysql']['database']);
+$t_take = $t_rival->prepare('select get_lock(:lock, 0)'); $t_take->execute([':lock' => $t_lock]);
+t_is((int)$t_take->fetch(PDO::FETCH_COLUMN, 0), 1, 'a rival master can take the maintenance lock');
+t_is(worker_maintain(time(), $config), false, 'a master that loses the lock runs no maintenance');
+// 对面走了就得接手，否则整站的维护随着那个 master 一起没了
+$t_free = $t_rival->prepare('select release_lock(:lock)'); $t_free->execute([':lock' => $t_lock]);
+t_is(worker_maintain(time(), $config), true, 'the lock going free hands maintenance over');

@@ -125,9 +125,25 @@ function worker_probe($now) {
     return true;
 }
 
-// 维护队列的一轮：按 deadline 轮转，每次最多做一个有界工作单元，做完立刻回来重新判
+// 维护队列的一轮：按 deadline 轮转，每次最多做一个有界工作单元，做完立刻回来重新判。
+// 维护是全站一份的活，起了第二个 master 就得选一个来做，命名锁跟连接绑定，master 没了锁自然掉，落选的那个下一轮就接手，不需要外部编排。
+// 每轮都重新问一次而不是记住结果：worker_loop 撞上 PDOException 会重连，换了连接锁就不在手上了。timeout 传 0，拿不到立刻走，绝不能让连接挂在那儿等锁。
+// 锁名带库是因为命名锁在整个 MySQL 实例共享，同一台机器上的另一套部署不该被挤掉 —— migrate 那把锁只在合并期间存在，这把是长期持有的，撞上就是永久停摆。
+// 摘要在 PHP 这边算：锁名上限 64 字符而库名本身就能占满 64，拼上前缀直接越界，哈希则恒定 49 字符；用服务端的 md5() 还要看它脸色 —— FIPS 模式下那个函数返回 NULL，锁名会整个变成 NULL
 function worker_maintain($now, $config) {
-    static $due = [], $cursor = 0;
+    global $db;
+    static $leader = null, $due = [], $cursor = 0;
+    $pdo = $db->prepare('select get_lock(:lock, 0)');
+    $pdo->execute([':lock' => 'wxwclub_maintain:'.md5($config['mysql']['database'])]);
+    $lock = $pdo->fetch(PDO::FETCH_COLUMN, 0);
+    // 1 是拿到、0 是被别人拿着，NULL 是服务端出错。三者合并成 bool 的话，出错就伪装成正常待命：维护一直不跑，日志上却只有开头那一行 info。
+    // 交给 worker_loop 的数据库错误路径，那里本来就负责记错、探连接、退避一秒，比在这里另起一套状态机诚实
+    if ($lock === null) throw new PDOException('maintenance lock returned null');
+    $held = (bool)$lock;
+    // 初值是 null，所以进程起来的第一轮必写一行：待命的 master 什么也不做，没有这行就完全看不出它是在待命还是维护队列压根没起来。之后只有易主才写，不会跟着轮次刷
+    if ($held !== $leader) Club_Log_Event('info', $held ? 'maintenance leader acquired' : 'maintenance standby, another master holds the lock', ['pid' => getmypid()]);
+    // 落选就退化成空转，由 worker_idle 退避到 2 秒再问一次，对面一挂这边最多 2 秒接手
+    if (!($leader = $held)) return false;
     // rotate 自己带 1 小时节流，这里的间隔只决定多久去问它一次
     $every = ['rotate' => 300, 'reconcile' => 60, 'cleanup' => 30,
         'dns' => 600, 'tasks' => 60, 'monitor' => 60];

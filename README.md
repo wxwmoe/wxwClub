@@ -56,7 +56,7 @@ A simple social groups compatible with ActivityPub.
     3. docker run -d --restart always --stop-timeout 30 -v $(pwd):/wxwClub \
     --name wxwclub_worker wxwclub:worker php /wxwClub/cli.php worker
 ```
-5. （可选）调整 `config.php` 里 `worker` 的各类队列数，worker 只能运行一个。
+5. （可选）调整 `config.php` 里 `worker` 的各类队列数；worker 可以多开，队列翻倍。
 
 ### 升级步骤
 1. `git pull` 拉取新代码
