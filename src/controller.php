@@ -25,7 +25,8 @@ function controller() {
                     case 'inbox':
                         if ($_SERVER['REQUEST_METHOD'] == 'POST')
                             Club_Inbox_Process($club);
-                        else header('Content-type: application/activity+json'); break;
+                        // actor 里 inbox 是公开地址，抓取方跟过来时得拿到能解析的集合，不能是空响应体
+                        else Club_Get_OrderedCollection($club_url.'/inbox'); break;
 
                     case 'outbox':
                         if (isset($_GET['page'])) {
@@ -88,11 +89,11 @@ function controller() {
                         $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
                         Club_Get_OrderedCollection($club_url.'/followers', ['totalItems' => $count]); break;
                     case 'collections':
-                        if (isset($uri[4])) switch ($uri[4]) {
+                        switch ($uri[4] ?? '') {
                             case 'featured': Club_Get_OrderedCollection($club_url.'/collections/featured'); break;
                             case 'tags': Club_Get_OrderedCollection($club_url.'/collections/tags', ['type' => 'Collection']); break;
                             case 'devices': Club_Get_OrderedCollection($club_url.'/collections/devices', ['type' => 'Collection']); break;
-                            default: break;
+                            default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
                         } break;
                     default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
                 } else {
@@ -148,7 +149,7 @@ function controller() {
         case 'inbox':
             if ($_SERVER['REQUEST_METHOD'] == 'POST')
                 Club_Inbox_Process();
-            else header('Content-type: application/activity+json'); break;
+            else Club_Get_OrderedCollection($base.'/inbox'); break;
 
         case 'nodeinfo':
             Club_Json_Output(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;

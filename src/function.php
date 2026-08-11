@@ -1737,6 +1737,8 @@ function Club_Undo_Process($jsonld) {
 
 function Club_Get_OrderedCollection($id, $arr = []) {
     $arr = array_merge(['@context' => 'https://www.w3.org/ns/activitystreams', 'id' => $id, 'type' => 'OrderedCollection', 'totalItems' => 0], $arr);
+    // Pleroma 2.5.5 解析 featured 时缺 orderedItems 会 FunctionClauseError，把拉取 actor 的请求整个变成 500，空集合一律显式带上空数组；有分页的交给 first 那一页
+    if (!$arr['totalItems'] && !isset($arr['first'])) $arr[$arr['type'] === 'Collection' ? 'items' : 'orderedItems'] = [];
     Club_Json_Output($arr, 2);
 }
 
