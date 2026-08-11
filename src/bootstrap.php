@@ -5,6 +5,18 @@ define('APP_ROOT', dirname(__DIR__));
 require(APP_ROOT.'/config.php');
 require_once(APP_ROOT.'/src/function.php');
 
+// 配置校验排在最前面：下面这几行起就在无遮拦地读 $config，缺项在那里的表现是一串对不上号的 PHP warning，而真正的原因要到几小时后才从队列里反推出来。
+// 只有 fatal 挡住启动，它挡的本来也就起不来；warning 那半只在 CLI 上报一次 —— 那几项都有回退，跑得起来，而 web 每个请求一份的话就成了刷屏
+list($config_fatal, $config_warn) = Club_Config_Check();
+if ($config_fatal) {
+    Club_Log_Event('error', 'startup blocked, configuration is invalid', ['problems' => $config_fatal, 'sapi' => PHP_SAPI]);
+    if (PHP_SAPI == 'cli') {
+        fwrite(STDERR, "Error: config.php is invalid\n  ".implode("\n  ", $config_fatal)."\n");
+        exit(1);
+    }
+    http_response_code(500); exit('Error: config.php is invalid');
+}
+
 $ver = '0.0.6'; $base = 'https://'.$config['base'];
 $public_streams = 'https://www.w3.org/ns/activitystreams#Public';
 date_default_timezone_set($config['node']['timezone']);

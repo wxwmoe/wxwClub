@@ -75,9 +75,13 @@ function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
     if (isset($authorize) && !$authorize()) return 'lease-lost';
     Club_Stat('http_requests');
     ActivityPub_CURL($url, $date, $head, $jsonld, $public);
-    // 收下了只认 2xx，跟 Mastodon 的 response_successful? 一样。
-    // 不能照 Curl 的返回值判：它只把 4xx / 5xx 算错误，而 POST 是不跟跳转的，对端回一个 301 就会被当成投递成功、这一行当场删掉，那条活动其实谁都没收到。3xx 归 failed，照常重试
-    $code = isset($curl) ? $curl->httpStatusCode : 0;
+    return ActivityPub_Push_Result(isset($curl) ? $curl->httpStatusCode : 0);
+}
+
+// 状态码到结果码的那条线，单拎出来是为了能不出网地验：它是一个状态码的纯函数，而划错一档的代价是整家实例被误判成挂了、或者一条谁都不收的活动无限重投。
+// 收下了只认 2xx，跟 Mastodon 的 response_successful? 一样。
+// 不能照 Curl 的返回值判：它只把 4xx / 5xx 算错误，而 POST 是不跟跳转的，对端回一个 301 就会被当成投递成功、这一行当场删掉，那条活动其实谁都没收到。3xx 归 failed，照常重试
+function ActivityPub_Push_Result($code) {
     if ($code >= 200 && $code < 300) return 'ok';
     // 这三个说的是这个 inbox 不在了，不是这一条活动不被收。实例关站之后域名往往还解析得动、还有个静态站或空路由在应答，归进 rejected 就等于每条新活动都再打它一次，是唯一一条没有出口的失败路径。
     // 交给退避阶梯管的正是「以后可能回来」这件事；endpoint 的身份是 URL 本身，个人 inbox 没了只拉黑那一个，同实例的 shared inbox 不受牵连
@@ -294,6 +298,68 @@ function Club_I18n($key, $locale, $vars = []) {
             return $text;
         }
     } return '';
+}
+
+// 启动时把 config.php 整个过一遍。缺一项现在的表现取决于它被怎么读：无遮拦的那几个是一串对不上号的 PHP warning 加一句 PDO 报错，有回退的则一声不吭按默认值跑几个小时，
+// 最后从队列的异常反推回配置。两档正是照着这个区别划的 —— fatal 是本来就起不来的，把说不清楚的崩溃换成一句话；warning 是跑得起来但跑的不是配置里写的那套。
+// 判据只看键本身，不碰数据库也不出网：它排在建连接之前，而配置错的时候连接八成也连不上。返回 [fatal, warning] 两个字符串列表
+function Club_Config_Check() {
+    global $config; $fatal = []; $warn = [];
+    if (!is_array($config)) return [['config.php did not define $config as an array'], []];
+    // 以下每一项都在代码里被无遮拦地读：$base 的拼接、PDO 的 DSN、date_default_timezone_set、Club_Create 里的 in_array
+    if (!is_string($config['base'] ?? null) || $config['base'] === '') $fatal[] = 'config.base must be a non-empty host name';
+    foreach (['host', 'database', 'username', 'password'] as $key)
+        if (!is_string($config['mysql'][$key] ?? null)) $fatal[] = 'config.mysql.'.$key.' must be a string';
+    // 时区不合法时 date_default_timezone_set 只发一条 warning 就退回 UTC，日志时间和对外的 published 会整体偏几个小时，而这两处谁都不会当场发现
+    if (!is_string($tz = $config['node']['timezone'] ?? null) || !in_array($tz, timezone_identifiers_list(DateTimeZone::ALL_WITH_BC), true))
+        $fatal[] = 'config.node.timezone must be a valid timezone identifier';
+    if (!is_array($config['club']['suspended-names'] ?? null)) $fatal[] = 'config.club.suspended-names must be an array, Club_Create passes it to in_array unguarded';
+    // 缺扩展的报错发生在第一次真正用到它的地方：pdo_mysql 是启动，curl 和 openssl 要等到第一次出网或第一次建群，那时候看到的是一句 undefined function
+    foreach (['pdo_mysql', 'curl', 'openssl', 'json'] as $ext)
+        if (!extension_loaded($ext)) $fatal[] = 'ext-'.$ext.' is required but not loaded';
+
+    if (!is_string($level = $config['node']['log-level'] ?? 'info') || !in_array(strtolower($level), ['silent', 'error', 'warning', 'info', 'debug'], true))
+        $warn[] = 'config.node.log-level is not one of silent/error/warning/info/debug, falling back to info';
+    if (!Club_I18n_Match($config['node']['language'] ?? 'en')) $warn[] = 'config.node.language is not a locale under src/i18n/, falling back to en';
+    // 模板和 actor 文档无遮拦地读这几项，缺了不影响队列，但对端拉到的是一份带空字段的 actor
+    foreach (['node' => ['name', 'description'], 'default' => ['avatar', 'banner', 'summary', 'nickname', 'infoname']] as $section => $keys)
+        foreach ($keys as $key) if (!isset($config[$section][$key])) $warn[] = 'config.'.$section.'.'.$key.' is missing, pages and the actor document read it unguarded';
+    foreach (['name', 'email'] as $key) if (!isset($config['node']['maintainer'][$key])) $warn[] = 'config.node.maintainer.'.$key.' is missing, the home page reads it unguarded';
+    if (!isset($config['club']['open-registrations'])) $warn[] = 'config.club.open-registrations is missing, no new club can be created';
+    if (Club_Config_Number($config['node']['log-retention'] ?? 30, 0) === false) $warn[] = 'config.node.log-retention must be a non-negative integer, 0 disables cleanup';
+    // 一个投递进程都没有等于什么都发不出去。cli.php 起 master 时会再判一次并拒绝启动，这里只是把它提前到部署那一刻
+    if (Club_Config_Number($config['worker']['delivery'] ?? 8, 1) === false) $warn[] = 'config.worker.delivery must be at least 1, nothing would ever be sent';
+    if (Club_Config_Number($config['worker']['probe'] ?? 1, 0) === false) $warn[] = 'config.worker.probe must be a non-negative integer, 0 means blacklisted endpoints are never restored';
+    // resolver 是唯一的解析出口，列表坏掉的表现是每一次投递都 local-dns：不记失败、不退避、每五分钟原地重投
+    if (!is_array($resolvers = $config['dns']['resolver'] ?? []) || !$resolvers) $warn[] = 'config.dns.resolver is empty or not a list, falling back to the built-in defaults';
+    else foreach (array_values($resolvers) as $i => $resolver) {
+        if (!is_array($resolver) || !is_string($url = $resolver['url'] ?? null) || !preg_match('#^https://#i', $url)) $warn[] = 'config.dns.resolver['.$i.'].url must be an https URL';
+        foreach (is_array($resolver['ip'] ?? []) ? $resolver['ip'] : [$resolver['ip'] ?? null] as $ip)
+            if (isset($ip) && !filter_var($ip, FILTER_VALIDATE_IP)) $warn[] = 'config.dns.resolver['.$i.'].ip contains something that is not an IP address: '.substr((string)$ip, 0, 60);
+    }
+    // 两个超时在 Club_Resolver_DoH 里被夹到 1 以上，配 0 的本意多半是「不限」，而 libcurl 的 0 正是永不超时，夹一下反而与本意相反
+    foreach (['timeout', 'connect-timeout'] as $key)
+        if (Club_Config_Number($config['dns'][$key] ?? 5, 1) === false) $warn[] = 'config.dns.'.$key.' must be at least 1 second, it is clamped to 1 at query time';
+    if (Club_Config_Number($config['club']['relay-limit'] ?? 512, 1) === false) $warn[] = 'config.club.relay-limit must be at least 1 KB, edits and deletes would never be relayed';
+    if (Club_Config_Number($config['club']['create-limit'] ?? 10, 0) === false) $warn[] = 'config.club.create-limit must be a non-negative integer, 0 disables the hourly cap';
+    if (Club_Config_Number($config['notice']['limit'] ?? 20, 0) === false) $warn[] = 'config.notice.limit must be a non-negative integer';
+    if (Club_Config_Number($config['notice']['retention'] ?? 30, 0) === false) $warn[] = 'config.notice.retention must be a non-negative integer, 0 disables cleanup';
+    // 系统群组名要过得了建群那道正则，否则每次 Club_System() 都建不出来，私信、拉取 actor 和转发签名一起停摆
+    if (!is_string($system = Club_System_Name()) || strlen($system) > 30 || !preg_match('/^[a-zA-Z_][a-zA-Z0-9_]+$/u', $system))
+        $warn[] = 'config.club.system-name is not a valid club name, notices and actor fetches would have no signer';
+    // 规则形状写错时 Club_Limit_Check 会静默跳过（hours/limit 无效）或按 user 计数（type 拼错），两种都让人以为限流生效了
+    foreach (array_keys(is_array($limits = $config['club']['limits'] ?? []) ? $limits : []) as $club)
+        foreach (Club_Limit_Rules($club) as $i => $rule) {
+            if (!in_array(strtolower(is_string($t = $rule['type'] ?? null) ? $t : ''), ['user', 'club', 'site', 'dupl'], true)) $warn[] = 'config.club.limits.'.$club.'['.$i.'].type is not one of user/club/site/dupl, it counts per user';
+            if (Club_Config_Number($rule['hours'] ?? 0, 1) === false || Club_Config_Number($rule['limit'] ?? 0, 1) === false) $warn[] = 'config.club.limits.'.$club.'['.$i.'] needs hours and limit to be at least 1, the rule is skipped';
+        }
+    return [$fatal, $warn];
+}
+
+// 配置里的数值项：只接受整数或整数字符串，且不小于下限。true / '10 条' / 空数组这类都会被 (int) 悄悄变成一个能用的数
+function Club_Config_Number($value, $min) {
+    if (!is_int($value) && (!is_string($value) || !preg_match('/^-?[0-9]+$/D', $value))) return false;
+    return (int)$value >= $min ? (int)$value : false;
 }
 
 // 建库连接。worker 开多进程时，每个子进程 fork 完都要自己调一次重新建：fork 继承的是父进程那条连接的 socket，而 last_insert_id() 和会话隔离级别都是连接级状态，共用一条就是两个子进程互相串。
@@ -1282,12 +1348,13 @@ class Club_Inbox_Rejected extends RuntimeException {}
 
 // inbox 的对外入口。请求体在这里读：那是对端完全可控的字节，先看 Content-Length 再决定要不要读进来，读完再判等于把本进程的内存占用交给对方。
 // DB 抛异常必须在 event 里也留一行，否则那边是「inbox in」之后戛然而止，判断不出是没匹配到分支还是中途挂了
-function Club_Inbox_Process($club = null) {
+function Club_Inbox_Process($club = null, $input = null) {
     // 上限跟 Mastodon 的 ActivityPub::Activity::MAX_JSON_SIZE 取同一个数，它那边也是写死的常量。一条活动多大是协议决定的，不是每站不一样的东西
     $limit = 1024 * 1024;
     // Content-Length 可以缺失（分块传输）也可以撒谎，所以多读一个字节再复核一次，两处都拦住才算真的封顶
     $long = (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > $limit;
-    $input = $long ? '' : file_get_contents('php://input', false, null, 0, $limit + 1);
+    // 请求体正常在这里读。传进来的那条口子只有 tests/activitypub.php 的重放在用：CLI 下 php://input 读不出东西，而下面这一整段应答分类正是重放要验的
+    if (!isset($input)) $input = $long ? '' : file_get_contents('php://input', false, null, 0, $limit + 1);
     // 读不出来是本站这边的输入流故障，不是对端发了个空包。当成空正文的话下面会因为解不出 type 回一个终局 400，那条活动就再也不会重投了
     if ($input === false) {
         Club_Log_Event('error', 'inbox aborted, cannot read the request body', ['club' => $club ?? 'shared', 'length' => $_SERVER['CONTENT_LENGTH'] ?? '-']);
@@ -2262,10 +2329,53 @@ function Club_Endpoint_Backoff($reason, $age, $fails) {
         $age > 604800 && $fails >= 7];
 }
 
+// 投递结果 -> 目标状态的全部决定。抽成纯函数是因为这几档的边界就是整套调度的不变量：什么时候清故障段、什么时候只推这一行、什么时候整条 endpoint 一起退、什么时候放弃。
+// 入参是已经在行锁里读到的当前状态，出参是要写回去的目标状态，锁行、按 token 改写和日志留在 Club_Endpoint_Complete。
+// $jitter 传 null 表示按退避档位随机抖动 —— 不抖的话一家恢复的那一秒几十个进程会一起扑上去，对端更容易限流，然后所有行齐步走向放弃
+function Club_Endpoint_Decide($result, $fails, $since, $retry_at, $retries, $now, $jitter = null) {
+    $fails = (int)$fails; $since = (int)$since; $retry_at = (int)$retry_at; $retries = (int)$retries;
+    $plan = ['queue' => 'keep', 'due_at' => null, 'retries' => $retries, 'fails' => $fails, 'fail_since' => $since,
+        'retry_at' => $retry_at, 'endpoint' => false, 'blacklist' => false, 'state' => '', 'age' => 0];
+    switch ($result) {
+        // 2xx，或者对端应用层给的终局拒绝。
+        // 后者说明 DNS、TCP、TLS 到应用层全通，它只是永远不会收这一条，故障段照样该结束 —— 让一条谁都不收的活动去推整个 endpoint 的退避，就成了一行毒 payload 把好端端一家实例拉黑
+        case 'ok':
+        case 'rejected':
+            $plan['queue'] = 'delete';
+            if ($fails || $since || $retry_at) {
+                $plan['fails'] = 0; $plan['fail_since'] = 0; $plan['retry_at'] = 0;
+                $plan['age'] = $since ? $now - $since : 0; $plan['endpoint'] = true; $plan['state'] = 'recovered';
+            } return $plan;
+        // 本地就处理不掉的一行，一个字节都没出网。删掉它，但绝不能顺手清故障段：上面那两种清零的依据是「已经通到远端应用层」，这里什么都没证明，一条脏 queue 就能把一家真在挂的实例从退避里放出来
+        case 'dropped':
+            $plan['queue'] = 'delete'; return $plan;
+        // 本站自己解析不动，什么都没证明：retries 和 fails 都不加，只把这行往后推。记在对端头上的话，本站 DNS 挂几天就能把关注的实例全拉黑一遍
+        case 'local-dns':
+            $plan['queue'] = 'defer'; $plan['due_at'] = $now + 300; $plan['state'] = 'deferred';
+            // 同 target 的其他 queue 立刻重判也是同一个结论，整条 endpoint 一起推
+            if ($retry_at < $now + 300) { $plan['retry_at'] = $now + 300; $plan['endpoint'] = true; }
+            return $plan;
+    }
+    $begin = $since === 0; if ($begin) $since = $now;
+    $plan['fails'] = ++$fails; $plan['fail_since'] = $since; $plan['age'] = $age = $now - $since;
+    list($wait, $drop) = Club_Endpoint_Backoff($result, $age, $fails);
+    $plan['retry_at'] = $now + $wait + (isset($jitter) ? (int)$jitter : mt_rand(0, (int)($wait / 4)));
+    $plan['endpoint'] = true;
+    // 单条 retries 每个故障段只加一次：连续宕机由 endpoint 的时长阶梯管，期间任何一条投成功都会清掉故障段，下一次失败才再算这条一笔
+    if ($begin) $plan['retries'] = $retries + 1;
+    // 判死刑只写黑名单和控制行。它名下可能有几千条 queue，一个事务里全删会把复制和锁等待一起拖下水，交给维护队列分批清
+    if ($drop) { $plan['blacklist'] = true; $plan['state'] = 'blacklisted'; }
+    // 对端在正常收别的行，就这一条一直过不去：签名它认不下来、或者只有这个 inbox 在 500。按行放弃，不牵连这家的其他投递
+    elseif ($plan['retries'] >= 8) { $plan['queue'] = 'delete'; $plan['state'] = 'exhausted'; }
+    // 行也要跟着推到解禁之后。只靠 retry_at 拦的话这几千行一直是「到期可领」，领到手才发现要退回来，白占一次租约
+    else { $plan['queue'] = 'retry'; $plan['due_at'] = $plan['retry_at']; $plan['state'] = $begin ? 'failing' : 'still-failing'; }
+    return $plan;
+}
+
 // 投递结果落库的唯一路径。先按 token 锁住控制行：租约过期且已被接管的旧 worker 回来时，它手上的 token 已经不是当前那个，这里一个字都写不进去，删不掉新 owner 的 queue。
 // 已经发出去的 HTTP 收不回来，重复投递由远端按 Activity ID 去重
 function Club_Endpoint_Complete($url, $token, $task, $result) {
-    global $db, $curl; $now = time(); $state = ''; $retry_at = 0; $fails = 0; $age = 0;
+    global $db, $curl; $now = time(); $plan = [];
     try {
         $db->beginTransaction();
         $pdo = $db->prepare('select `fails`, `fail_since`, `retry_at` from `endpoints` where `url` = :url and `lease_token` = unhex(:token) for update');
@@ -2275,7 +2385,6 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
             Club_Log_Event('debug', 'stale lease result discarded', ['endpoint' => $url, 'token' => $token, 'result' => $result]);
             return false;
         }
-        $fails = (int)$row['fails']; $since = (int)$row['fail_since']; $retry_at = (int)$row['retry_at'];
         // 放弃分支要写 blacklist，而清理批次是先锁 blacklist 再删 queues。不在这里按同一顺序先取一次，两边就各持一半互相等：清理拿着 blacklist 等 queue 行，这边拿着 queue 行等 blacklist。
         // 行不存在时 RC 下不留 gap 锁，等于零成本
         $pdo = $db->prepare('select `target` from `blacklist` where `target` = :url for update');
@@ -2284,69 +2393,36 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
         $pdo = $db->prepare('select `tid`, `retries` from `queues` where `id` = :id and `target` = :url for update');
         $pdo->execute([':id' => $task['id'], ':url' => $url]); Club_Stat('scheduler_db_ops');
         if (!($queue = $pdo->fetch(PDO::FETCH_ASSOC))) {
-            Club_Endpoint_Reschedule($url, $token, $retry_at);
+            Club_Endpoint_Reschedule($url, $token, (int)$row['retry_at']);
             $db->commit(); Club_Stat('stale_queues');
             Club_Log_Event('debug', 'queue result discarded, row is no longer owned by endpoint', ['endpoint' => $url, 'token' => $token, 'queue' => $task['id'], 'result' => $result]);
             return false;
         }
-        $task['tid'] = $queue['tid']; $task['retries'] = (int)$queue['retries'];
-        switch ($result) {
-            // 2xx，或者对端应用层给的终局拒绝。
-            // 后者说明 DNS、TCP、TLS 到应用层全通，它只是永远不会收这一条，故障段照样该结束 —— 让一条谁都不收的活动去推整个 endpoint 的退避，就成了一行毒 payload 把好端端一家实例拉黑
-            case 'ok':
-            case 'rejected':
-                Club_Queue_Delete($task['id'], $task['tid']);
-                if ($fails || $since || $retry_at) {
-                    $pdo = $db->prepare('update `endpoints` set `fails` = 0, `fail_since` = 0, `retry_at` = 0 where `url` = :url and `lease_token` = unhex(:token)');
-                    $pdo->execute([':url' => $url, ':token' => $token]);
-                    $age = $since ? $now - $since : 0; $retry_at = 0; $state = 'recovered';
-                } break;
-            // 本地就处理不掉的一行，一个字节都没出网。删掉它，但绝不能顺手清故障段：上面那两种清零的依据是「已经通到远端应用层」，这里什么都没证明，一条脏 queue 就能把一家真在挂的实例从退避里放出来
-            case 'dropped':
-                Club_Queue_Delete($task['id'], $task['tid']); break;
-            // 本站自己解析不动，什么都没证明：retries 和 fails 都不加，只把这行往后推。记在对端头上的话，本站 DNS 挂几天就能把关注的实例全拉黑一遍
-            case 'local-dns':
-                Club_Queue_Defer($task['id'], $now + 300);
-                // 同 target 的其他 queue 立刻重判也是同一个结论，整条 endpoint 一起推
-                if ($retry_at < $now + 300) {
-                    $retry_at = $now + 300;
-                    $pdo = $db->prepare('update `endpoints` set `retry_at` = :retry_at where `url` = :url and `lease_token` = unhex(:token)');
-                    $pdo->execute([':url' => $url, ':token' => $token, ':retry_at' => $retry_at]);
-                } $state = 'deferred'; break;
-            default:
-                $begin = $since === 0; if ($begin) $since = $now;
-                $fails++; $age = $now - $since;
-                list($wait, $drop) = Club_Endpoint_Backoff($result, $age, $fails);
-                // 不抖的话一家恢复的那一秒几十个进程会一起扑上去，对端更容易限流，然后所有行齐步走向放弃
-                $retry_at = $now + $wait + mt_rand(0, (int)($wait / 4));
-                $pdo = $db->prepare('update `endpoints` set `fails` = :fails, `fail_since` = :since, `retry_at` = :retry_at where `url` = :url and `lease_token` = unhex(:token)');
-                $pdo->execute([':url' => $url, ':token' => $token, ':fails' => $fails, ':since' => $since, ':retry_at' => $retry_at]);
-                // 单条 retries 每个故障段只加一次：连续宕机由 endpoint 的时长阶梯管，期间任何一条投成功都会清掉故障段，下一次失败才再算这条一笔
-                $task['retries'] = $begin ? (int)$task['retries'] + 1 : (int)$task['retries'];
-                if ($drop) {
-                    // 判死刑只写黑名单和控制行。它名下可能有几千条 queue，一个事务里全删会把复制和锁等待一起拖下水，交给维护队列分批清
-                    Club_Blacklist_Add($url, $now); $state = 'blacklisted';
-                } elseif ($task['retries'] >= 8) {
-                    // 对端在正常收别的行，就这一条一直过不去：签名它认不下来、或者只有这个 inbox 在 500。按行放弃，不牵连这家的其他投递
-                    Club_Queue_Delete($task['id'], $task['tid']); $state = 'exhausted';
-                } else {
-                    // 行也要跟着推到解禁之后。只靠 retry_at 拦的话这几千行一直是「到期可领」，领到手才发现要退回来，白占一次租约
-                    Club_Queue_Retry($task['id'], $task['retries'], $retry_at);
-                    $state = $begin ? 'failing' : 'still-failing';
-                } break;
+        $task['tid'] = $queue['tid'];
+        $plan = Club_Endpoint_Decide($result, $row['fails'], $row['fail_since'], $row['retry_at'], $queue['retries'], $now);
+        $task['retries'] = $plan['retries'];
+        if ($plan['endpoint']) {
+            $pdo = $db->prepare('update `endpoints` set `fails` = :fails, `fail_since` = :since, `retry_at` = :retry_at where `url` = :url and `lease_token` = unhex(:token)');
+            $pdo->execute([':url' => $url, ':token' => $token, ':fails' => $plan['fails'], ':since' => $plan['fail_since'], ':retry_at' => $plan['retry_at']]);
         }
-        Club_Endpoint_Reschedule($url, $token, $retry_at);
+        if ($plan['queue'] === 'delete') Club_Queue_Delete($task['id'], $task['tid']);
+        elseif ($plan['queue'] === 'defer') Club_Queue_Defer($task['id'], $plan['due_at']);
+        elseif ($plan['queue'] === 'retry') Club_Queue_Retry($task['id'], $plan['retries'], $plan['due_at']);
+        if ($plan['blacklist']) Club_Blacklist_Add($url, $now);
+        // queue 动完之后才重算：它照 min(due_at) 取值，删掉或推后的那一行必须已经落在这个事务里
+        Club_Endpoint_Reschedule($url, $token, $plan['retry_at']);
         $db->commit();
     } catch (PDOException $e) {
         if ($db->inTransaction()) $db->rollback();
         throw $e;
     }
     Club_Stat('endpoint_done');
+    $state = $plan['state'];
     // endpoint 这一层只记状态变化：开始挂、恢复、被放弃。中间那些重复失败，一家大实例挂一天就是几万行，全记等于把 event 日志冲掉
     if ($state == 'recovered')
-        Club_Log_Event('info', 'endpoint recovered: '.$url, ['fails' => $fails, 'age' => $age, 'via' => $result == 'ok' ? 'delivery' : 'transport']);
-    elseif ($state == 'failing') Club_Log_Event('info', 'endpoint started failing: '.$url, ['reason' => $result, 'wait' => $retry_at - $now]);
-    elseif ($state == 'blacklisted') Club_Log_Event('info', 'endpoint blacklisted: '.$url, ['reason' => $result, 'fails' => $fails, 'age' => $age]);
+        Club_Log_Event('info', 'endpoint recovered: '.$url, ['fails' => $plan['fails'], 'age' => $plan['age'], 'via' => $result == 'ok' ? 'delivery' : 'transport']);
+    elseif ($state == 'failing') Club_Log_Event('info', 'endpoint started failing: '.$url, ['reason' => $result, 'wait' => $plan['retry_at'] - $now]);
+    elseif ($state == 'blacklisted') Club_Log_Event('info', 'endpoint blacklisted: '.$url, ['reason' => $result, 'fails' => $plan['fails'], 'age' => $plan['age']]);
     // 这一条 payload 自己的去向，跟 endpoint 是两回事
     if ($result == 'ok')
         Club_Log_Event('debug', 'push delivered', ['club' => $task['club'], 'target' => $url, 'retries' => (int)$task['retries']]);
@@ -2445,6 +2521,16 @@ function Club_Blacklist_Defer($target, $token, $reason) {
     return (bool)$pdo->rowCount();
 }
 
+// 探活结果 -> 目标状态。$queued 是它名下还有没有历史 backlog，$jitter 同 Club_Endpoint_Decide
+function Club_Blacklist_Decide($alive, $checks, $queued, $now, $jitter = null) {
+    // 活过来了但历史 backlog 还在。先只记状态：blacklist 行留着继续挡住入队和出网，等维护队列分批清干净再真正解禁，不然几千条陈年活动会一起复活
+    if ($alive) return ['state' => $queued ? 'pending' : 'restored', 'checks' => (int)$checks, 'check_at' => null];
+    // 敲了一个月还是没人应的实例不必天天再敲，间隔跟着 checks 拉开，一周封顶。拉长不会推迟恢复：对端只要有一条活动发得进来，Club_Blacklist_Sooner 就把 check_at 拉回一小时内，
+    // 而一条活动都发不进来的实例，本来就只能靠这个周期慢慢试
+    $checks = (int)$checks + 1; $wait = 86400 * min($checks, 7);
+    return ['state' => 'dead', 'checks' => $checks, 'check_at' => $now + $wait + (isset($jitter) ? (int)$jitter : mt_rand(0, (int)($wait / 4)))];
+}
+
 // 探活结果落库。跨表短事务统一按 endpoint -> blacklist -> queues 的顺序取锁
 function Club_Blacklist_Result($target, $token, $alive) {
     global $db; $now = time(); $state = ''; $checks = 0;
@@ -2460,30 +2546,25 @@ function Club_Blacklist_Result($target, $token, $alive) {
             Club_Log_Event('debug', 'stale probe result discarded', ['target' => $target, 'token' => $token]);
             return '';
         }
-        $checks = (int)$row['checks'];
-        if (!$alive) {
-            // 敲了一个月还是没人应的实例不必天天再敲，间隔跟着 checks 拉开，一周封顶。拉长不会推迟恢复：对端只要有一条活动发得进来，Club_Blacklist_Sooner 就把 check_at 拉回一小时内，
-            // 而一条活动都发不进来的实例，本来就只能靠这个周期慢慢试
-            $checks++; $wait = 86400 * min($checks, 7);
-            $check = $now + $wait + mt_rand(0, (int)($wait / 4));
-            $pdo = $db->prepare('update `blacklist` set `checks` = :checks, `check_at` = :check, `lease_token` = null, `lease_until` = 0 where `target` = :target and `lease_token` = unhex(:token)');
-            $pdo->execute([':target' => $target, ':token' => $token, ':checks' => $checks, ':check' => $check]);
-            $state = 'dead';
-        } else {
+        $queued = false;
+        if ($alive) {
             $pdo = $db->prepare('select 1 from `queues` where `target` = :target limit 1');
             $pdo->execute([':target' => $target]);
-            if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) {
-                // 活过来了但历史 backlog 还在。先只记状态：blacklist 行留着继续挡住入队和出网，等维护队列分批清干净再真正解禁，不然几千条陈年活动会一起复活
-                $pdo = $db->prepare('update `blacklist` set `restore_pending_at` = :now, `lease_token` = null, `lease_until` = 0 where `target` = :target and `lease_token` = unhex(:token)');
-                $pdo->execute([':target' => $target, ':token' => $token, ':now' => $now]);
-                $state = 'pending';
-            } else {
-                $pdo = $db->prepare('delete from `endpoints` where `url` = :target');
-                $pdo->execute([':target' => $target]);
-                $pdo = $db->prepare('delete from `blacklist` where `target` = :target and `lease_token` = unhex(:token)');
-                $pdo->execute([':target' => $target, ':token' => $token]);
-                $state = 'restored';
-            }
+            $queued = (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
+        }
+        $plan = Club_Blacklist_Decide($alive, $row['checks'], $queued, $now);
+        $checks = $plan['checks']; $state = $plan['state'];
+        if ($state === 'dead') {
+            $pdo = $db->prepare('update `blacklist` set `checks` = :checks, `check_at` = :check, `lease_token` = null, `lease_until` = 0 where `target` = :target and `lease_token` = unhex(:token)');
+            $pdo->execute([':target' => $target, ':token' => $token, ':checks' => $checks, ':check' => $plan['check_at']]);
+        } elseif ($state === 'pending') {
+            $pdo = $db->prepare('update `blacklist` set `restore_pending_at` = :now, `lease_token` = null, `lease_until` = 0 where `target` = :target and `lease_token` = unhex(:token)');
+            $pdo->execute([':target' => $target, ':token' => $token, ':now' => $now]);
+        } else {
+            $pdo = $db->prepare('delete from `endpoints` where `url` = :target');
+            $pdo->execute([':target' => $target]);
+            $pdo = $db->prepare('delete from `blacklist` where `target` = :target and `lease_token` = unhex(:token)');
+            $pdo->execute([':target' => $target, ':token' => $token]);
         }
         $db->commit();
     } catch (PDOException $e) {
@@ -2611,6 +2692,21 @@ function Club_Reconcile_Step($limit = 200) {
     return $seen;
 }
 
+// 这一行的调度状态跟 queues/blacklist 算出来的目标对不对得上。无锁预筛和锁内重判是同一条判据，各写一份的话两边会慢慢漂开，而漂出来的行恰好是「预筛说不用修、锁内说要修」那种，永远修不掉。
+// idle_since 和 next_at 必须同进同出：只比 next_at 的话，一行两者不一致的记录没有任何路径会去修 —— 回收只认 idle_since，而它错了这行就永远等不到宽限期
+function Club_Endpoint_Drifted($next, $row) {
+    return $next !== (isset($row['next_at']) ? (int)$row['next_at'] : null) || ((int)$row['idle_since'] > 0) !== !isset($next);
+}
+
+// 一条空置控制行此刻该怎么处置，同样是预筛和锁内共用的判据。'prune' 删掉、'idle' 就地补上起算点、false 留着不动。
+// 不判 fails：它只在投成功时清零，而一条没有 queue 的 endpoint 永远等不到下一次投递，要求 fails 为零等于让带过故障的空行永久留下
+function Club_Endpoint_Prune_Decide($lease, $idle, $retry, $queued, $blocked, $now, $before) {
+    if (!isset($lease) || (int)$lease > $now || (int)$queued || (int)$blocked) return false;
+    // 起算点缺失的无主行就地转成空闲态而不是删掉：它们通常由领取路径自愈（领到手发现没有 queue 就重排），但 next_at 若损坏成未来时间就永远领不到，而这一段是唯一还会扫到它的地方
+    if (!(int)$idle) return 'idle';
+    return (int)$idle <= $before && (int)$retry <= $now ? 'prune' : false;
+}
+
 // 单条 endpoint 的修复。缺行先按健康默认值补出来，再在短事务里锁行重算 next_at 和 idle_since。
 // 只写这两列 —— fails/fail_since/retry_at 是 endpoint 自己的故障历史，queues 里恢复不出来，被这里覆盖掉就等于把一家挂了一个月的实例重新当成健康的
 function Club_Reconcile_Endpoint($url, $now) {
@@ -2621,10 +2717,7 @@ function Club_Reconcile_Endpoint($url, $now) {
     $pdo->execute([':url' => $url]); Club_Stat('scheduler_db_ops');
     if (($peek = $pdo->fetch(PDO::FETCH_ASSOC)) !== false) {
         if ((int)$peek['lease_until'] > $now) return false;
-        // idle_since 和 next_at 必须同进同出。next_at 本身对得上就跳过的话，一行两者不一致的记录没有任何路径会去修：回收只认 idle_since，而它错了这行就永远等不到宽限期
-        if (Club_Endpoint_Desired($url, (int)$peek['retry_at'])
-            === (isset($peek['next_at']) ? (int)$peek['next_at'] : null)
-            && ((int)$peek['idle_since'] > 0) === !isset($peek['next_at'])) return false;
+        if (!Club_Endpoint_Drifted(Club_Endpoint_Desired($url, (int)$peek['retry_at']), $peek)) return false;
     }
     try {
         $db->beginTransaction();
@@ -2644,8 +2737,7 @@ function Club_Reconcile_Endpoint($url, $now) {
         // 租约还在有效期内：这一行归当前 owner，它完成时自己会重算
         if ($row !== false && (int)$row['lease_until'] <= $now) {
             $next = Club_Endpoint_Desired($url, (int)$row['retry_at']);
-            $current = isset($row['next_at']) ? (int)$row['next_at'] : null;
-            if ($next !== $current || ((int)$row['idle_since'] > 0) !== !isset($next)) {
+            if (Club_Endpoint_Drifted($next, $row)) {
                 $pdo = $db->prepare('update `endpoints` set `next_at` = :next,'.
                     ' `idle_since` = if(:next is null, if(`idle_since` > 0, `idle_since`, :now), 0) where `url` = :url and `lease_until` <= :now');
                 $pdo->execute([':url' => $url, ':next' => $next, ':now' => $now]);
@@ -2676,28 +2768,26 @@ function Club_Endpoint_Prune($url, $now, $idle = 604800) {
         ' (select count(*) from `blacklist` where `target` = :url) as `blocked` from `endpoints` as `e` where `e`.`url` = :url');
     $pdo->execute([':url' => $url]); Club_Stat('scheduler_db_ops');
     $peek = $pdo->fetch(PDO::FETCH_ASSOC) ?: [];
-    if (!isset($peek['lease']) || (int)$peek['lease'] > $now || (int)$peek['queued'] || (int)$peek['blocked']) return false;
-    // 稳态下没有 queue 的行必然已经起算过，所以放这一类进事务不会加成本
-    if ((int)$peek['idle'] && ((int)$peek['idle'] > $before || (int)$peek['retry'] > $now)) return false;
+    // 稳态下没有 queue 的行必然已经起算过，所以 'idle' 那一类进事务不会加成本
+    if (!Club_Endpoint_Prune_Decide($peek['lease'] ?? null, $peek['idle'] ?? 0, $peek['retry'] ?? 0, $peek['queued'] ?? 0, $peek['blocked'] ?? 0, $now, $before)) return false;
     try {
         $db->beginTransaction();
         $pdo = $db->prepare('select `idle_since`, `retry_at`, `lease_until` from `endpoints` where `url` = :url for update');
         $pdo->execute([':url' => $url]);
         $row = $pdo->fetch(PDO::FETCH_ASSOC);
-        if ($row !== false && (int)$row['lease_until'] <= $now) {
+        if ($row !== false) {
             $pdo = $db->prepare('select (select count(*) from `queues` where `target` = :url) as `queued`, (select count(*) from `blacklist` where `target` = :url) as `blocked`');
             $pdo->execute([':url' => $url]);
             $keep = $pdo->fetch(PDO::FETCH_ASSOC);
-            if (!(int)$keep['queued'] && !(int)$keep['blocked']) {
-                if (!(int)$row['idle_since']) {
-                    $pdo = $db->prepare('update `endpoints` set `next_at` = null, `idle_since` = :now where `url` = :url and `lease_until` <= :now and `idle_since` = 0');
-                    $pdo->execute([':url' => $url, ':now' => $now]);
-                    $idled = (bool)$pdo->rowCount();
-                } elseif ((int)$row['idle_since'] <= $before && (int)$row['retry_at'] <= $now) {
-                    $pdo = $db->prepare('delete from `endpoints` where `url` = :url and `lease_until` <= :now and `retry_at` <= :now and `idle_since` > 0 and `idle_since` <= :before');
-                    $pdo->execute([':url' => $url, ':now' => $now, ':before' => $before]);
-                    $pruned = (bool)$pdo->rowCount();
-                }
+            $take = Club_Endpoint_Prune_Decide($row['lease_until'], $row['idle_since'], $row['retry_at'], $keep['queued'], $keep['blocked'], $now, $before);
+            if ($take === 'idle') {
+                $pdo = $db->prepare('update `endpoints` set `next_at` = null, `idle_since` = :now where `url` = :url and `lease_until` <= :now and `idle_since` = 0');
+                $pdo->execute([':url' => $url, ':now' => $now]);
+                $idled = (bool)$pdo->rowCount();
+            } elseif ($take === 'prune') {
+                $pdo = $db->prepare('delete from `endpoints` where `url` = :url and `lease_until` <= :now and `retry_at` <= :now and `idle_since` > 0 and `idle_since` <= :before');
+                $pdo->execute([':url' => $url, ':now' => $now, ':before' => $before]);
+                $pruned = (bool)$pdo->rowCount();
             }
         }
         $db->commit();

@@ -21,3 +21,41 @@ jobs:
           coverage: none
       - name: syntax check
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
+      # 纯函数这一组不碰数据库也不出网，整个版本矩阵都跑得动。抓的正是 php -l 看不见、又跟版本相关的东西：
+      # parse_url 对空 query 的形状、inet_pton 的写法归一、7.3 上不存在的那些函数
+      - name: unit tests
+        run: php tests/run.php pure
+
+  database:
+    runs-on: ubuntu-latest
+    name: mysql ${{ matrix.mysql }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 5.7 和 8.0 对整数显示宽度、默认排序规则的处理不一样，而结构比对正是要盯住这些
+        mysql: ['5.7', '8.0']
+    services:
+      mysql:
+        image: mysql:${{ matrix.mysql }}
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: wxwclub_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, curl, openssl
+          coverage: none
+      # 结构合并、租约和黑名单的落库、以及 fixtures 的重放，全都只有对着真库才验得出来
+      - name: integration tests
+        env:
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_DATABASE: wxwclub_test
+          MYSQL_USER: root
+          MYSQL_PASSWORD: ''
+        run: php tests/run.php
