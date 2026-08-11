@@ -2496,23 +2496,38 @@ function Club_Blacklist_Result($target, $token, $alive) {
     return $state;
 }
 
-// 分批清掉黑名单目标的历史 queues。每批都是独立的有界事务，而且必须先锁住 blacklist 行确认它还在：只凭事务外读到的旧 target 删，会在它刚恢复的那一刻把新入队的活动一起清掉
+// 分批清掉黑名单目标的历史 queues，backlog 见底之后连它的控制行一起删掉。每批都是独立的有界事务，而且必须先锁住 blacklist 行确认它还在：只凭事务外读到的旧 target 删，会在它刚恢复的那一刻把新入队的活动一起清掉
 function Club_Blacklist_Cleanup($limit = 500) {
     global $db; $now = time(); $rows = 0; $state = '';
-    // 已确认恢复的排在前面，而且哪怕它的 queues 早就清光了也要选中：最后一步删 blacklist 行只在这条路径上，漏掉它这个 target 就永远解禁不了
+    // 三个条件各接一次收尾：已确认恢复的排在前面，而且哪怕它的 queues 早就清光了也要选中，最后一步删 blacklist 行只在这条路径上，漏掉它这个 target 就永远解禁不了；
+    // 控制行还在的同样要选中，否则 queue 数正好是批大小的整数倍时，删空的那一批之后这个 target 就再也匹配不上，控制行会永远留着。
+    // 有 backlog 的排在只剩控制行的前面：一次调用只处理一个 target，而删控制行那一批删掉 0 条 queue，拿不到 worker 「删满一批就立刻再来」的重排，只能等满一个 cleanup 间隔。
+    // 单按 created_at 排的话，积压的几百条陈年收尾会一条一小格地把新拉黑目标的 backlog 连同它的 task 顶到几小时之后
     $pdo = $db->query('select `target`, `restore_pending_at` from `blacklist` where `restore_pending_at` is not null'.
-        ' or exists (select 1 from `queues` where `queues`.`target` = `blacklist`.`target`) order by `restore_pending_at` is null, `created_at` limit 1');
+        ' or exists (select 1 from `queues` where `queues`.`target` = `blacklist`.`target`)'.
+        ' or exists (select 1 from `endpoints` where `endpoints`.`url` = `blacklist`.`target`)'.
+        ' order by `restore_pending_at` is null, exists (select 1 from `queues` where `queues`.`target` = `blacklist`.`target`) desc, `created_at` limit 1');
     Club_Stat('scheduler_db_ops');
     if (!($row = $pdo->fetch(PDO::FETCH_ASSOC))) return 0;
     $target = $row['target'];
     try {
         $db->beginTransaction();
+        // 取锁顺序跟 Complete、Result、Restore 一致：endpoint -> blacklist -> queues。控制行早就删掉的目标在这里不留 gap 锁，等于零成本
+        $pdo = $db->prepare('select `url` from `endpoints` where `url` = :target for update');
+        $pdo->execute([':target' => $target]);
         $pdo = $db->prepare('select `restore_pending_at` from `blacklist` where `target` = :target for update');
         $pdo->execute([':target' => $target]);
         if (($row = $pdo->fetch(PDO::FETCH_ASSOC)) !== false) {
             $pdo = $db->prepare('delete from `queues` where `target` = :target limit '.(int)$limit);
             $pdo->execute([':target' => $target]);
             $rows = $pdo->rowCount();
+            // backlog 见底、又不是在等解禁：这个 target 以后不会再有活动入队，控制行从此没有读者，删掉它 endpoints 就只剩活跃对端。
+            // 不判租约：拉黑之后 next_at 为空、领不到新租约，而拖到这一刻才回来的旧 owner 在 Complete 里查不到行，走的正是「陈旧结果丢弃」那条出口
+            if ($rows < $limit && !isset($row['restore_pending_at'])) {
+                $pdo = $db->prepare('delete from `endpoints` where `url` = :target');
+                $pdo->execute([':target' => $target]);
+                if ($pdo->rowCount()) $state = 'detached';
+            }
         } else $state = 'gone';
         $db->commit();
     } catch (PDOException $e) {
@@ -2559,7 +2574,8 @@ function Club_Blacklist_Restore($target, $now) {
 }
 
 // 以 queues 为投递真相、blacklist 为 disabled 真相，分页把 endpoints 补齐、修正。不做整表 group by：queues 上百万行时那一条语句就够把唯一的维护 slot 卡到超时。
-// 三段各自留一个稳定游标，每次只走一页，中途被打断下次接着走
+// 不扫 blacklist：拉黑目标的控制行在 backlog 清完时就由 Club_Blacklist_Cleanup 删掉了，缺行是它的终态而不是待修的破损，补出来只会跟清理来回拉锯。
+// 两段各自留一个稳定游标，每次只走一页，中途被打断下次接着走
 function Club_Reconcile_Step($limit = 200) {
     global $db; static $phase = 0, $cursor = '';
     $now = time(); $seen = 0; $repairs = 0; $pruned = 0;
@@ -2567,14 +2583,6 @@ function Club_Reconcile_Step($limit = 200) {
         // 等着被清理的黑名单 queue 不能算数，否则刚拉黑的 endpoint 会被重新排上
         $pdo = $db->prepare('select `q`.`target` from `queues` `q` left join `blacklist` `b` on `q`.`target` = `b`.`target`'.
             ' where `b`.`target` is null and `q`.`target` > :cursor group by `q`.`target` order by `q`.`target` limit '.(int)$limit);
-        $pdo->execute([':cursor' => $cursor]);
-        foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $target) {
-            $cursor = $target; $seen++;
-            if (Club_Reconcile_Endpoint($target, $now)) $repairs++;
-        }
-    } elseif ($phase === 1) {
-        // 每条 blacklist 都必须有一行 next_at 为空的控制行，探活和最终解禁都依赖它
-        $pdo = $db->prepare('select `target` from `blacklist` where `target` > :cursor order by `target` limit '.(int)$limit);
         $pdo->execute([':cursor' => $cursor]);
         foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $target) {
             $cursor = $target; $seen++;
@@ -2596,7 +2604,7 @@ function Club_Reconcile_Step($limit = 200) {
     Club_Monitor_Count('reconciliation_repairs', $repairs);
     Club_Monitor_Count('endpoints_pruned', $pruned);
     // 这一页没走满就是走到头了，换下一段重新开始
-    if ($seen < $limit) { $phase = ($phase + 1) % 3; $cursor = ''; }
+    if ($seen < $limit) { $phase = ($phase + 1) % 2; $cursor = ''; }
     return $seen;
 }
 
@@ -2719,7 +2727,8 @@ function Club_Monitor_Snapshot($interval = 300) {
     if (!$last) { $last = $now; return false; }
     if ($last > $now - $interval) return false;
     $window = $now - $last;
-    // total 含着待回收的空行，单看它读不出「有多少 endpoint 在排队投递」。idle 减去同一行日志里的 blacklist 就是等着被回收的那部分，卡住了它只会单调涨；
+    // total 含着待回收的空行，单看它读不出「有多少 endpoint 在排队投递」。idle 本身就是等着被回收的那部分，卡住了它只会单调涨。
+    // 不必拿它减 blacklist：拉黑目标的控制行在 backlog 清完那一批就删了，落在 idle 里的只剩正在清的那几条，同一行的 blacklisted_queues 非零就是它们还在的信号。
     // due/leased/oldest 都带 next_at 非空或租约条件，空行本来就进不去
     $pdo = $db->prepare('select count(*) as `total`, sum(`next_at` is not null and `next_at` <= :now and `retry_at` <= :now'.
         ' and `lease_until` <= :now) as `due`, sum(`lease_until` > :now) as `leased`, sum(`idle_since` > 0) as `idle`,'.

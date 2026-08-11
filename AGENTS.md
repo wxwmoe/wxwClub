@@ -77,10 +77,10 @@ The easiest part to get wrong. Read this through before touching `Club_Endpoint_
 
 ## Invariants
 
-- Every `blacklist` target must have an `endpoints` row with `next_at IS NULL` for its entire lifetime — probing and eventual restoration both depend on that row existing.
-- `next_at IS NULL` is permitted in exactly two cases: blacklisted, or no queues left.
+- **`endpoints` holds active targets only.** A blacklisted target keeps its control row while its backlog drains; the `Club_Blacklist_Cleanup` batch that empties the last queues drops the row in the same transaction, and nothing recreates it — probing and restoration read `blacklist` alone. Reconciliation therefore never walks `blacklist`: a missing control row there is the terminal state, not damage to repair.
+- `next_at IS NULL` is permitted in exactly two cases: blacklisted and not yet drained, or no queues left.
 - `next_at IS NULL` and `idle_since > 0` move together — every path writing one writes the other. `idle_since` is the moment the row went empty and must not be refreshed while it stays empty, or the grace period never elapses and nothing is ever reclaimed.
-- A control row is never deleted the moment it goes empty: one delivery round leaves a large group's several thousand rows empty at once, and the next round rebuilds them identically. It has to sit out the grace period, and the reclaim re-tests queues, blacklist, lease and backoff under the primary-key lock — everything read outside the transaction may already be stale.
+- **A still-deliverable control row is never deleted the moment it goes empty**: one delivery round leaves a large group's several thousand rows empty at once, and the next round rebuilds them identically. It has to sit out the grace period, and the reclaim re-tests queues, blacklist, lease and backoff under the primary-key lock — everything read outside the transaction may already be stale. The grace period buys nothing for a blacklisted target, because the blacklist is what stops the rebuild: `Club_Blacklist_Cleanup` drops that row as soon as the backlog is gone, and `Club_Endpoint_Prune` still refuses every blacklisted row so the two never race for it.
 - `tasks` are deleted only when `NOT EXISTS queues`.
 - **An HTTP request that already went out must never be replayed by a database retry.** `Club_DB_Retry` wraps the database segment only. Actor fetches, DNS and HTTP all happen outside any transaction.
 - Bulk deletes are always batched into independent bounded transactions. Never delete a target's several thousand queue rows in one transaction.
