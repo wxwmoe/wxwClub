@@ -90,8 +90,11 @@ t_is((int)t_state_endpoint($t_url)['fails'], 1, 'the endpoint still records the 
 t_state_reset();
 $id = t_state_queue($t_url, ['fails' => 2, 'fail_since' => $now - 100]);
 $token = t_state_lease($t_url);
+// 被测代码自己取一次 time()，跟这个文件开头那次差几秒，绝对值对不上是必然的，比区间
+$started = time();
 Club_Endpoint_Complete($t_url, $token, ['id' => $id, 'club' => 'test'], 'local-dns');
-t_is((int)t_one('select `due_at` from `queues` where `id` = :id', [':id' => $id]), $now + 300, 'local-dns defers the row five minutes');
+$due = (int)t_one('select `due_at` from `queues` where `id` = :id', [':id' => $id]);
+t_ok($due >= $started + 300 && $due <= time() + 300, 'local-dns defers the row five minutes');
 t_is((int)t_one('select `retries` from `queues` where `id` = :id', [':id' => $id]), 0, 'local-dns does not charge the row');
 t_is((int)t_state_endpoint($t_url)['fails'], 2, 'local-dns does not count against the target');
 

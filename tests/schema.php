@@ -84,17 +84,54 @@ t_is(t_schema_diff($snapshot, t_schema_dump()), [], 'a fresh install is left unt
 
 t_group('schema / upgrade from a legacy database');
 
-t_schema_sql(TEST_ROOT.'/fixtures/schema/legacy.sql');
-t_is(Club_DB_Version(), 0, 'a database without meta reads as version 0');
-list($version, $error) = t_schema_merge();
-t_is($version, DB_VERSION, 'a legacy database merges all the way up'.$error);
-$merged = t_schema_dump();
-// 这一条就是快照漂移的闸门。差别出现在这里，说明改结构时漏了 tools/wxwclub.sql 那一半
-t_is(t_schema_diff($snapshot, $merged), [], 'tools/wxwclub.sql matches the end state of the merge');
-// 回填真的搬过东西：datetime 转成 epoch、cid 变成群组名列表
-t_is((int)t_one('select `timestamp` from `clubs` where `name` = \'test\''), strtotime('2023-01-02 03:04:05 UTC'), 'legacy datetimes are converted to epoch seconds');
-t_is(t_one('select `clubs` from `activities` where `id` = 1'), '["test"]', 'legacy activities keep their club through the cid backfill');
-t_is((int)t_one('select count(*) from `followers`'), 1, 'the merge keeps existing followers');
+// 每份夹具都是某次历史提交里 tools/wxwclub.sql 的原样拷贝。自动合并是后来才有的，那之前线上结构就以提交里的快照为准，
+// 所以夹具不是照着 src/migrate/ 反推出来的合成结构，而是那一天真实装出来的库。按文件名从旧到新排，后面几组接着最新那份跑
+foreach (glob(TEST_ROOT.'/fixtures/schema/*.sql') as $fixture) {
+    $from = basename($fixture, '.sql');
+    t_schema_sql($fixture);
+    t_is(Club_DB_Version(), 0, $from.': a database without meta reads as version 0');
+    list($version, $error) = t_schema_merge();
+    t_is($version, DB_VERSION, $from.': merges all the way up'.$error);
+    $merged = t_schema_dump();
+    // 这一条就是快照漂移的闸门。差别出现在这里，说明改结构时漏了 tools/wxwclub.sql 那一半
+    t_is(t_schema_diff($snapshot, $merged), [], $from.': ends at exactly what tools/wxwclub.sql installs');
+    // 回填真的搬过东西，不是在空表上跑了一遍
+    t_ok((int)t_one('select `timestamp` from `clubs` where `name` = \'test\'') > 0, $from.': the club survives with an epoch timestamp');
+    t_is(t_one('select `clubs` from `activities` where `id` = 1'), '["test"]', $from.': the activity keeps its club');
+    t_is((int)t_one('select count(*) from `followers`'), 1, $from.': existing followers are kept');
+    if ($from === '52f1d01-final') t_schema_scheduling($from);
+}
+
+// 只有 52f1d01 那份带着调度侧的存量行，而它们恰恰是这次合并里最容易整批消失的东西：结构比对看不见行，
+// 第 2 版又把 queues 和 blacklist 的主键和大半列都换掉了。搬丢一张表的表现是队列凭空清空，搬错一列的表现是拉黑目标下一秒就被重新探活
+function t_schema_scheduling($from) {
+    t_is((int)t_one('select count(*) from `announces`'), 1, $from.': the announce survives');
+    t_is(t_one('select `content` from `announces` where `id` = 1'), 'legacy announce', $from.': the announce keeps its content through the widen to mediumtext');
+    t_is((int)t_one('select count(*) from `tasks`'), 1, $from.': the task survives');
+    t_is(t_one('select `jsonld` from `tasks` where `tid` = 1'), '{"type":"Announce"}', $from.': the task keeps its payload');
+
+    // due_at 取自旧的 timestamp，retries 取自旧的 retry
+    $queue = t_row('select `target`, `due_at`, `retries` from `queues` where `id` = 1') ?: [];
+    t_is(isset($queue['target']) ? $queue['target'] : '-', 'https://remote.example/inbox', $from.': the queue row survives with its target');
+    t_is((int)($queue['due_at'] ?? -1), 1666972800, $from.': queues.due_at is backfilled from the old timestamp');
+    t_is((int)($queue['retries'] ?? -1), 0, $from.': queues.retries is backfilled from the old retry');
+
+    // created_at 来自 create 列，check_at 来自 timestamp 列。两个来源不同，写反了这两条就对调
+    $black = t_row('select `created_at`, `check_at`, `checks` from `blacklist` where `target` = :target', [':target' => 'https://dead.example/inbox']) ?: [];
+    t_is((int)($black['created_at'] ?? -1), 1666972800, $from.': blacklist.created_at comes from the old create column');
+    t_is((int)($black['check_at'] ?? -1), 0, $from.': blacklist.check_at comes from the old timestamp column');
+    t_is((int)($black['checks'] ?? -1), 0, $from.': blacklist.checks comes from the old retry column');
+    t_is((int)t_one('select count(*) from `blacklist` where `restore_pending_at` is null'), 1, $from.': a migrated blacklist row is not pending restore');
+
+    // 控制行从 queues 和 blacklist 两边补出来，拉黑的那条不排期，而不排期的行必须带着空置起点
+    t_is((int)t_one('select count(*) from `endpoints`'), 2, $from.': one control row per target');
+    $live = t_row('select `next_at`, `idle_since`, `fails`, `fail_since`, `retry_at` from `endpoints` where `url` = :url', [':url' => 'https://remote.example/inbox']) ?: [];
+    t_is((int)($live['next_at'] ?? -1), 1666972800, $from.': a queued target is scheduled at its earliest due_at');
+    t_is((int)($live['idle_since'] ?? -1), 0, $from.': a scheduled control row carries no idle clock');
+    t_is(((int)($live['fails'] ?? -1)) + ((int)($live['fail_since'] ?? -1)) + ((int)($live['retry_at'] ?? -1)), 0, $from.': a rebuilt control row starts healthy');
+    t_is((int)t_one('select count(*) from `endpoints` where `url` = :url and `next_at` is null and `idle_since` > 0', [':url' => 'https://dead.example/inbox']),
+        1, $from.': a blacklisted target is unscheduled and carries an idle clock');
+}
 
 t_group('schema / resume after an interrupted merge');
 

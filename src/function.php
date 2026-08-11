@@ -2431,7 +2431,7 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
     elseif ($result == 'dropped') Club_Log_Event('debug', 'queue dropped without contacting the target', ['club' => $task['club'], 'target' => $url]);
     elseif ($state == 'exhausted') Club_Log_Event('warning', 'push dropped after '.$task['retries'].' failed attempts', ['club' => $task['club'], 'target' => $url, 'reason' => $result]);
     elseif ($state == 'blacklisted') Club_Log_Event('debug', 'push held, endpoint was blacklisted', ['club' => $task['club'], 'target' => $url, 'reason' => $result]);
-    else Club_Log_Event('debug', 'push failed, will retry', ['club' => $task['club'], 'target' => $url, 'reason' => $result, 'retries' => (int)$task['retries'], 'retry' => $retry_at - $now]);
+    else Club_Log_Event('debug', 'push failed, will retry', ['club' => $task['club'], 'target' => $url, 'reason' => $result, 'retries' => (int)$task['retries'], 'retry' => $plan['retry_at'] - $now]);
     return true;
 }
 

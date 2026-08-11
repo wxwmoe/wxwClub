@@ -41,6 +41,11 @@ $config = [
 require_once(APP_ROOT.'/src/function.php');
 date_default_timezone_set('UTC');
 
+// src/bootstrap.php 里定义的全局，这里得照抄一遍：入站分派靠 $base 认出「投给本站哪个群组」，靠 $public_streams 认出「这是公开投稿」，
+// 两个都是无遮拦读的，缺了不会报错，只会让每一条 Create 静默地不匹配任何群组
+$ver = '0.0.6'; $base = 'https://'.$config['base'];
+$public_streams = 'https://www.w3.org/ns/activitystreams#Public';
+
 $t_pass = 0; $t_fail = 0;
 
 function t_group($name) {
