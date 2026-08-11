@@ -90,14 +90,15 @@ function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
     return 'failed';
 }
 
-// 黑名单探活只问一件事：对端还在不在。空 body 打 inbox 本来就会被 400/401 挡回来，而 Curl 把 4xx 也算进 $error，照投递成功与否来判的话，进了黑名单的实例永远出不来。
+// 黑名单探活只问一件事：对端还在不在。这份最小活动打 inbox 本来就会被 400/401 挡回来，而 Curl 把 4xx 也算进 $error，照投递成功与否来判的话，进了黑名单的实例永远出不来。
+// body 不能是空对象：Pleroma 取不到 actor 会在解析阶段 500，而 5xx 在下面算 dead，活着的实例就永远解不了禁。带上 type 和系统群组的 actor —— 跟签名的 keyId 是同一个 —— 对端才走得完解析、给得出那句应用层的拒绝
 // 判活的门槛照着投递侧划：2xx，或者应用层还在拒的 4xx —— 拿到这些就说明 DNS、TCP、TLS 到应用层全通。5xx 不算，CDN 回源失败也是有状态码的，那种情况对端其实还是死的。
 // 3xx 不算：POST 从不跟跳转，一个只会 301 的旧 inbox 在投递侧永远是 failed。404/405/410 不算，理由同投递侧。
 // 两者误判成活的代价是一样的：解禁之后每条新活动都再打它一次，一周后重新拉黑，来回空转 —— 历史 backlog 在解禁前已经清掉，不是它们复活，是新活动在填
 // HTTP 之后返回 alive/dead；出网授权前的 blocked/unresolved/local-dns/lease-lost 原样返回，让调用方继续用第一阶段 token，本站 DNS 的问题也不会被记成对端探活失败
 function ActivityPub_Probe($url, $club, $authorize = null) {
-    global $curl;
-    $result = ActivityPub_POST($url, $club, '{}', $authorize);
+    global $curl, $base;
+    $result = ActivityPub_POST($url, $club, Club_Json_Encode(['@context' => 'https://www.w3.org/ns/activitystreams', 'type' => 'Activity', 'actor' => $base.'/club/'.$club]), $authorize);
     // 这些结果都发生在授权 callback 之前，调用方必须继续使用第一阶段 token。折叠成 dead 会让 completion 误拿尚未安装的新 token，结果永远被 fencing 丢掉。
     if (in_array($result, ['blocked', 'unresolved', 'local-dns', 'lease-lost'], true)) return $result;
     if (!isset($curl) || $curl->curlError) return 'dead';
