@@ -27,7 +27,7 @@ function t_state_queue($url, $endpoint = [], $due = null, $retries = 0) {
 }
 
 function t_state_lease($url, $lease = 120) {
-    $token = Club_Token();
+    $token = Club_Lease_Token();
     t_exec('update `endpoints` set `lease_token` = unhex(:token), `lease_until` = :until where `url` = :url', [':url' => $url, ':token' => $token, ':until' => time() + $lease]);
     return $token;
 }
@@ -44,7 +44,7 @@ $now = time();
 t_state_reset();
 $id = t_state_queue($t_url, ['fails' => 3, 'fail_since' => $now - 500, 'retry_at' => $now - 10]);
 $token = t_state_lease($t_url);
-t_is(Club_Endpoint_Complete($t_url, $token, ['id' => $id, 'club' => 'test'], 'ok'), true, 'ok is accepted');
+t_is(Club_Endpoint_Result($t_url, $token, ['id' => $id, 'club' => 'test'], 'ok'), true, 'ok is accepted');
 t_is((int)t_one('select count(*) from `queues`'), 0, 'ok removes the queue row');
 $row = t_state_endpoint($t_url);
 t_is((int)$row['fails'], 0, 'ok clears fails in the database');
@@ -58,7 +58,7 @@ t_is($row['lease_token'], null, 'completion releases the lease');
 t_state_reset();
 $id = t_state_queue($t_url);
 $token = t_state_lease($t_url);
-Club_Endpoint_Complete($t_url, $token, ['id' => $id, 'club' => 'test'], 'failed');
+Club_Endpoint_Result($t_url, $token, ['id' => $id, 'club' => 'test'], 'failed');
 $row = t_state_endpoint($t_url);
 $queue = t_row('select `due_at`, `retries` from `queues` where `id` = :id', [':id' => $id]);
 t_is((int)$row['fails'], 1, 'a failure counts on the endpoint');
@@ -72,7 +72,7 @@ t_is((int)$row['idle_since'], 0, 'an endpoint that still has work is not idle');
 t_state_reset();
 $id = t_state_queue($t_url, ['fails' => 6, 'fail_since' => $now - 604801]);
 $token = t_state_lease($t_url);
-Club_Endpoint_Complete($t_url, $token, ['id' => $id, 'club' => 'test'], 'failed');
+Club_Endpoint_Result($t_url, $token, ['id' => $id, 'club' => 'test'], 'failed');
 t_is((int)t_one('select count(*) from `blacklist` where `target` = :url', [':url' => $t_url]), 1, 'a week of failures blacklists the target');
 t_is((int)t_one('select count(*) from `queues`'), 1, 'blacklisting leaves the backlog in place');
 t_is(t_state_endpoint($t_url)['next_at'], null, 'a blacklisted endpoint is unscheduled');
@@ -81,7 +81,7 @@ t_is(t_state_endpoint($t_url)['next_at'], null, 'a blacklisted endpoint is unsch
 t_state_reset();
 $id = t_state_queue($t_url, [], null, 7);
 $token = t_state_lease($t_url);
-Club_Endpoint_Complete($t_url, $token, ['id' => $id, 'club' => 'test'], 'failed');
+Club_Endpoint_Result($t_url, $token, ['id' => $id, 'club' => 'test'], 'failed');
 t_is((int)t_one('select count(*) from `queues`'), 0, 'the eighth attempt drops the row');
 t_is((int)t_one('select count(*) from `blacklist`'), 0, 'dropping a row never blacklists the target');
 t_is((int)t_state_endpoint($t_url)['fails'], 1, 'the endpoint still records the failure');
@@ -92,7 +92,7 @@ $id = t_state_queue($t_url, ['fails' => 2, 'fail_since' => $now - 100]);
 $token = t_state_lease($t_url);
 // 被测代码自己取一次 time()，跟这个文件开头那次差几秒，绝对值对不上是必然的，比区间
 $started = time();
-Club_Endpoint_Complete($t_url, $token, ['id' => $id, 'club' => 'test'], 'local-dns');
+Club_Endpoint_Result($t_url, $token, ['id' => $id, 'club' => 'test'], 'local-dns');
 $due = (int)t_one('select `due_at` from `queues` where `id` = :id', [':id' => $id]);
 t_ok($due >= $started + 300 && $due <= time() + 300, 'local-dns defers the row five minutes');
 t_is((int)t_one('select `retries` from `queues` where `id` = :id', [':id' => $id]), 0, 'local-dns does not charge the row');
@@ -108,19 +108,19 @@ t_ok(isset($claim['token']), 'an available endpoint can be claimed');
 t_is(Club_Endpoint_Claim(time()), null, 'a leased endpoint cannot be claimed again');
 
 // 出网前换 token，旧 owner 醒过来一个字也写不进去
-$next = Club_Token();
+$next = Club_Lease_Token();
 t_is(Club_Endpoint_Authorize($t_url, $claim['token'], $next, $id), true, 'the lease owner is authorized to go out');
-t_is(Club_Endpoint_Authorize($t_url, $claim['token'], Club_Token(), $id), false, 'the superseded token is no longer authorized');
-t_is(Club_Endpoint_Complete($t_url, $claim['token'], ['id' => $id, 'club' => 'test'], 'ok'), false, 'a stale token cannot write a result');
+t_is(Club_Endpoint_Authorize($t_url, $claim['token'], Club_Lease_Token(), $id), false, 'the superseded token is no longer authorized');
+t_is(Club_Endpoint_Result($t_url, $claim['token'], ['id' => $id, 'club' => 'test'], 'ok'), false, 'a stale token cannot write a result');
 t_is((int)t_one('select count(*) from `queues`'), 1, 'a stale result deletes nothing');
-t_is(Club_Endpoint_Complete($t_url, $next, ['id' => $id, 'club' => 'test'], 'ok'), true, 'the current token can write its result');
+t_is(Club_Endpoint_Result($t_url, $next, ['id' => $id, 'club' => 'test'], 'ok'), true, 'the current token can write its result');
 
 // 黑名单在出网前也拦一道，next_at 那个提示不算数
 t_state_reset();
 $id = t_state_queue($t_url);
 $token = t_state_lease($t_url);
 Club_Blacklist_Add($t_url, time());
-t_is(Club_Endpoint_Authorize($t_url, $token, Club_Token(), $id), false, 'a blacklisted target is refused right before the request');
+t_is(Club_Endpoint_Authorize($t_url, $token, Club_Lease_Token(), $id), false, 'a blacklisted target is refused right before the request');
 t_is(Club_Endpoint_Desired($t_url, 0), null, 'a blacklisted target has no desired schedule');
 
 t_group('state / blacklist');
@@ -137,7 +137,7 @@ t_state_reset();
 $id = t_state_queue($t_url);
 Club_Blacklist_Add($t_url, time());
 t_exec('update `blacklist` set `check_at` = :now, `lease_token` = unhex(:token), `lease_until` = :until where `target` = :url',
-    [':now' => time(), ':token' => $token = Club_Token(), ':until' => time() + 120, ':url' => $t_url]);
+    [':now' => time(), ':token' => $token = Club_Lease_Token(), ':until' => time() + 120, ':url' => $t_url]);
 t_is(Club_Blacklist_Result($t_url, $token, true), 'pending', 'a live target with a backlog is only marked');
 t_is((int)t_one('select count(*) from `blacklist` where `target` = :url', [':url' => $t_url]), 1, 'the blacklist row stays until the backlog is gone');
 t_ok(t_one('select `restore_pending_at` from `blacklist` where `target` = :url', [':url' => $t_url]) !== null, 'recovery is recorded');
@@ -152,13 +152,13 @@ t_is((int)t_one('select count(*) from `endpoints` where `url` = :url', [':url' =
 t_state_reset();
 Club_Blacklist_Add($t_url, time());
 t_exec('update `blacklist` set `checks` = 2, `lease_token` = unhex(:token), `lease_until` = :until where `target` = :url',
-    [':token' => $token = Club_Token(), ':until' => time() + 120, ':url' => $t_url]);
+    [':token' => $token = Club_Lease_Token(), ':until' => time() + 120, ':url' => $t_url]);
 t_is(Club_Blacklist_Result($t_url, $token, false), 'dead', 'a silent target stays blacklisted');
 t_is((int)t_one('select `checks` from `blacklist` where `target` = :url', [':url' => $t_url]), 3, 'a failed probe counts');
 t_ok((int)t_one('select `check_at` from `blacklist` where `target` = :url', [':url' => $t_url]) >= time() + 86400 * 3, 'the next probe is pushed out');
 
 // 陈旧 token 的探活结果同样一个字都写不进去
-t_is(Club_Blacklist_Result($t_url, Club_Token(), true), '', 'a stale probe result is discarded');
+t_is(Club_Blacklist_Result($t_url, Club_Lease_Token(), true), '', 'a stale probe result is discarded');
 t_is((int)t_one('select count(*) from `blacklist` where `target` = :url', [':url' => $t_url]), 1, 'a stale probe result restores nothing');
 
 // 领取也是互斥的
@@ -171,19 +171,19 @@ t_group('state / reconcile and prune');
 // next_at 损坏成未来时间：对账照 queues 扶正
 t_state_reset();
 $id = t_state_queue($t_url, ['next_at' => $now + 99999]);
-t_is(Club_Reconcile_Endpoint($t_url, time()), true, 'a wrong next_at is repaired');
+t_is(Club_Endpoint_Repair($t_url, time()), true, 'a wrong next_at is repaired');
 t_is((int)t_state_endpoint($t_url)['next_at'], (int)t_one('select `due_at` from `queues` where `id` = :id', [':id' => $id]), 'next_at is recomputed from queues');
-t_is(Club_Reconcile_Endpoint($t_url, time()), false, 'a correct endpoint is left alone');
+t_is(Club_Endpoint_Repair($t_url, time()), false, 'a correct endpoint is left alone');
 
 // 控制行整个丢了：补出来，但故障历史是补不回来的
 t_exec('delete from `endpoints` where `url` = :url', [':url' => $t_url]);
-t_is(Club_Reconcile_Endpoint($t_url, time()), true, 'a missing control row is rebuilt');
+t_is(Club_Endpoint_Repair($t_url, time()), true, 'a missing control row is rebuilt');
 t_is((int)t_one('select count(*) from `endpoints` where `url` = :url', [':url' => $t_url]), 1, 'the rebuilt row exists');
 
 // 对账绝不能碰故障历史：那三列 queues 里恢复不出来
 t_state_reset();
 t_state_queue($t_url, ['fails' => 9, 'fail_since' => $now - 5000, 'retry_at' => $now + 600, 'next_at' => 1]);
-Club_Reconcile_Endpoint($t_url, time());
+Club_Endpoint_Repair($t_url, time());
 $row = t_state_endpoint($t_url);
 t_is((int)$row['fails'], 9, 'reconciliation keeps fails');
 t_is((int)$row['fail_since'], $now - 5000, 'reconciliation keeps fail_since');

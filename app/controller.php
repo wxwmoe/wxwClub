@@ -18,21 +18,21 @@ function controller() {
     switch ($to) {
 
         case 'club':
-            if ($club = Club_Exist(($uri = explode('/', $uri))[2] ?? '')) {
+            if ($club = Club_Group_Ensure(($uri = explode('/', $uri))[2] ?? '')) {
                 $club_url = $base.'/club/'.$club;
-                $system = Club_System_Name($club);
+                $system = Club_Group_System($club);
                 if (isset($uri[3])) switch ($uri[3]) {
                     case 'inbox':
-                        if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Process($club);
+                        if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Receive($club);
                         // actor 里 inbox 是公开地址，抓取方跟过来时得拿到能解析的集合，不能是空响应体
-                        else Club_Get_OrderedCollection($club_url.'/inbox'); break;
+                        else ActivityPub_Collection($club_url.'/inbox'); break;
 
                     case 'outbox':
                         if (isset($_GET['page'])) {
                             // 游标分页，page 只表示「这是一页」，方向由 max / min 决定
                             $tail = ($_GET['page'] ?? '') === 'last';
-                            $max = Club_Cursor_Parse($_GET['max'] ?? '');
-                            $min = Club_Cursor_Parse($_GET['min'] ?? '');
+                            $max = Club_HTTP_Cursor($_GET['max'] ?? '');
+                            $min = Club_HTTP_Cursor($_GET['min'] ?? '');
                             // 往新翻要先升序取够再倒回来，页内顺序始终是新到旧
                             $asc = $tail || $min;
                             $where = ''; $params = [':club' => $club];
@@ -72,39 +72,39 @@ function controller() {
                                     'cc' => [$announce['actor'], $public_streams],
                                     'object' => $announce['object']
                                 ];
-                            } Club_Json_Output($arr, 'activity+json');
+                            } Club_HTTP_Respond($arr, 'activity+json');
                         } else {
                             $pdo = $db->prepare('select count(a.id) from `announces` `a` join `clubs` `c` on a.cid = c.cid where c.name = :club');
                             $pdo->execute([':club' => $club]);
                             $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
-                            Club_Get_OrderedCollection($club_url.'/outbox', ['totalItems' => $count, 'first' => $club_url.'/outbox?page=true', 'last' => $club_url.'/outbox?page=last']);
+                            ActivityPub_Collection($club_url.'/outbox', ['totalItems' => $count, 'first' => $club_url.'/outbox?page=true', 'last' => $club_url.'/outbox?page=last']);
                         } break;
 
-                    case 'following': Club_Get_OrderedCollection($club_url.'/following'); break;
+                    case 'following': ActivityPub_Collection($club_url.'/following'); break;
                     case 'followers':
                         $pdo = $db->prepare('select count(f.id) from `followers` `f` left join `clubs` `c` on f.cid = c.cid where c.name = :club');
                         $pdo->execute([':club' => $club]);
                         $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
-                        Club_Get_OrderedCollection($club_url.'/followers', ['totalItems' => $count]); break;
+                        ActivityPub_Collection($club_url.'/followers', ['totalItems' => $count]); break;
                     case 'collections':
                         switch ($uri[4] ?? '') {
-                            case 'featured': Club_Get_OrderedCollection($club_url.'/collections/featured'); break;
-                            case 'tags': Club_Get_OrderedCollection($club_url.'/collections/tags', ['type' => 'Collection']); break;
-                            case 'devices': Club_Get_OrderedCollection($club_url.'/collections/devices', ['type' => 'Collection']); break;
-                            default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 'json', 404); break;
+                            case 'featured': ActivityPub_Collection($club_url.'/collections/featured'); break;
+                            case 'tags': ActivityPub_Collection($club_url.'/collections/tags', ['type' => 'Collection']); break;
+                            case 'devices': ActivityPub_Collection($club_url.'/collections/devices', ['type' => 'Collection']); break;
+                            default: Club_HTTP_Respond(['message' => 'Error: Route Not Found!'], 'json', 404); break;
                         } break;
-                    default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 'json', 404); break;
+                    default: Club_HTTP_Respond(['message' => 'Error: Route Not Found!'], 'json', 404); break;
                 } else {
                     $pdo = $db->prepare('select `cid`,`nickname`,`infoname`,`summary`,`avatar`,`banner`,`public_key`,`timestamp` from `clubs` where `name` = :club');
                     $pdo->execute([':club' => $club]);
                     $pdo = $pdo->fetch(PDO::FETCH_ASSOC);
                     $nametag = array_merge($config['default']['infoname'], json_decode($pdo['infoname'], 1) ?: []);
-                    $summary = $pdo['summary'] ?: Club_NameTag_Render($club, $config['default']['summary'], $nametag);
-                    $nickname = $pdo['nickname'] ?: Club_NameTag_Render($club, $config['default']['nickname'], $nametag);
+                    $summary = $pdo['summary'] ?: Club_Template_NameTag($club, $config['default']['summary'], $nametag);
+                    $nickname = $pdo['nickname'] ?: Club_Template_NameTag($club, $config['default']['nickname'], $nametag);
                     // 系统群组没有主页，浏览器访问也只给 actor
                     if ($system || (isset($_SERVER['HTTP_ACCEPT']) && strpos($_SERVER['HTTP_ACCEPT'], 'json'))) {
-                        Club_Json_Output([
-                            '@context' => Club_Template('context'),
+                        Club_HTTP_Respond([
+                            '@context' => Club_Template_Render('context'),
                             'id' => $club_url,
                             'type' => $system ? 'Service' : 'Group',
                             'following' => $club_url.'/following',
@@ -138,20 +138,20 @@ function controller() {
                                 'url' => $pdo['banner'] ?: $config['default']['banner']
                             ]
                         ], 'activity+json');
-                    } else Club_Template('profile', ['club' => $club, 'nickname' => $nickname, 'summary' => $summary, 'row' => $pdo]);
+                    } else Club_Template_Render('profile', ['club' => $club, 'nickname' => $nickname, 'summary' => $summary, 'row' => $pdo]);
                 }
-            } else Club_Json_Output(['message' => 'User not found'], 'json', 404); break;
+            } else Club_HTTP_Respond(['message' => 'User not found'], 'json', 404); break;
 
-        case 'inbox': if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Process(); else Club_Get_OrderedCollection($base.'/inbox'); break;
+        case 'inbox': if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Receive(); else ActivityPub_Collection($base.'/inbox'); break;
 
-        case 'nodeinfo': Club_Json_Output(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;
+        case 'nodeinfo': Club_HTTP_Respond(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;
 
         case 'nodeinfo2':
             $pdo = $db->prepare('select (select count(cid) from clubs) as clubs, (select count(id) from announces) as announces, (select count(distinct cid) from announces'.
                 ' where timestamp >= :month) as activeMonth, (select count(distinct cid) from announces where timestamp >= :halfyear) as activeHalfyear');
             $pdo->execute([':month' => time()-86400*30, ':halfyear' => time()-86400*30*6]);
             $usage = $pdo->fetch(PDO::FETCH_ASSOC);
-            Club_Json_Output([
+            Club_HTTP_Respond([
                 'version' => '2.0',
                 'software' => ['name' => 'wxwClub', 'version' => $ver],
                 'protocols' => ['activitypub'],
@@ -181,21 +181,21 @@ function controller() {
             if (preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches)) {
                 $resource_identifier = $matches[1];
                 if (($resource_host = $matches[2]) != $config['base']) {
-                    Club_Json_Output(['message' => 'Resource host does not match'], 'json', 404);
+                    Club_HTTP_Respond(['message' => 'Resource host does not match'], 'json', 404);
                     break;
                 }
             } elseif (preg_match('/^acct:([a-zA-Z_][a-zA-Z0-9_]+)$/', $resource, $matches)) {
                 $resource_host = $config['base'];
                 $resource_identifier = $matches[1];
             } else {
-                Club_Json_Output(['message' => 'Resource is invalid'], 'json', 400);
+                Club_HTTP_Respond(['message' => 'Resource is invalid'], 'json', 400);
                 break;
             }
 
             // 系统群组也要应答，对端验签时会拿 keyId 反查 WebFinger，404 会让私信被回 401；不进目录靠 actor 的 discoverable = false，不靠这里藏
-            if ($club = Club_Exist($resource_identifier)) {
+            if ($club = Club_Group_Ensure($resource_identifier)) {
                 $club_url = $base.'/club/'.$club;
-                Club_Json_Output([
+                Club_HTTP_Respond([
                     'subject' => 'acct:'.$club.'@'.$config['base'],
                     'links' => [
                         [
@@ -209,10 +209,10 @@ function controller() {
                             'href' => $club_url
                         ]
                 ]]);
-            } else Club_Json_Output(['message' => 'User not found'], 'json', 404); break;
+            } else Club_HTTP_Respond(['message' => 'User not found'], 'json', 404); break;
 
-        case 'index': Club_Template('index'); break;
+        case 'index': Club_Template_Render('index'); break;
 
-        default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 'json', 404); break;
+        default: Club_HTTP_Respond(['message' => 'Error: Route Not Found!'], 'json', 404); break;
     }
 }

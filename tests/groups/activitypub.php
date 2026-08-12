@@ -49,8 +49,8 @@ function t_ap_club($fixture) {
 function t_ap_target($fixture, $activity) {
     if (($club = t_ap_club($fixture)) !== null) return $club;
     $object = isset($activity['object']) ? $activity['object'] : '';
-    $name = Club_Object_Name($object);
-    if ($name === false && is_array($object) && isset($object['object'])) $name = Club_Object_Name($object['object']);
+    $name = Club_Group_From_Object($object);
+    if ($name === false && is_array($object) && isset($object['object'])) $name = Club_Group_From_Object($object['object']);
     return $name === false ? '' : $name;
 }
 
@@ -86,7 +86,7 @@ function t_ap_spawn($software, $name) {
     return [rtrim($output, "\r\n"), proc_close($process)];
 }
 
-// 一个软件一份干净的库。群组和 actor 都预置好：Club_Get_Actor 查不到就会去拉远端，而测试不出网
+// 一个软件一份干净的库。群组和 actor 都预置好：Club_Actor_Get 查不到就会去拉远端，而测试不出网
 function t_ap_seed($fixtures) {
     global $config;
     t_db_import();
@@ -96,7 +96,7 @@ function t_ap_seed($fixtures) {
         ' values (:name, :public, :private, :now)', [':name' => $club, ':public' => $public, ':private' => $private, ':now' => time()]);
     $actors = [];
     foreach ($fixtures as $fixture) {
-        $actor = Club_Object_Id(t_ap_activity($fixture)['actor'] ?? '');
+        $actor = ActivityPub_Object_Id(t_ap_activity($fixture)['actor'] ?? '');
         if ($actor !== '') $actors[$actor] = true;
     }
     foreach (array_keys($actors) as $actor) {
@@ -122,22 +122,22 @@ function t_ap_replay($software, $name) {
     $body = t_ap_body($fixture);
     $club = t_ap_club($fixture);
     $activity = t_ap_activity($fixture);
-    $actor = Club_Object_Id($activity['actor'] ?? '');
-    $object = Club_Object_Id(isset($activity['object']) ? $activity['object'] : '');
+    $actor = ActivityPub_Object_Id($activity['actor'] ?? '');
+    $object = ActivityPub_Object_Id(isset($activity['object']) ? $activity['object'] : '');
     $label = $software.'/'.$name;
 
     $target = t_ap_target($fixture, $activity);
     $_SERVER = t_ap_server($fixture, $body, $actor);
     $before = t_ap_state($actor, $target, $object, $body);
     ob_start();
-    Club_Inbox_Process($club, $body);
+    Club_Inbox_Receive($club, $body);
     $reply = json_decode(ob_get_clean(), 1);
     $after = t_ap_state($actor, $target, $object, $body);
 
     foreach ($fixture['expect'] as $key => $want) switch ($key) {
         // 200 不带 code，而 inbox 从不回 200，所以取不到就是压根没应答
         case 'status': t_is(isset($reply['code']) ? (int)$reply['code'] : 0, $want, $label.' status'); break;
-        // 新落一行 activities，而且类型对得上。不比 id 也不比 object：去重键的拼法各实现不同，那是 Club_Tombstone_Process 自己的事
+        // 新落一行 activities，而且类型对得上。不比 id 也不比 object：去重键的拼法各实现不同，那是 Club_Inbox_Delete 自己的事
         case 'stored':
             if ($want === false) { t_is($after['activities'], $before['activities'], $label.' stores no activity'); break; }
             t_is($after['activities'] - $before['activities'], 1, $label.' stores one activity');

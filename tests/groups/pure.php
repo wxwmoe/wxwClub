@@ -63,7 +63,7 @@ t_is(Club_IP_Matches(inet_pton('100.128.0.1'), '100.64.0.0', 10), false, 'Club_I
 // 长度不同的两族不能互相匹配
 t_is(Club_IP_Matches(inet_pton('::1'), '10.0.0.0', 8), false, 'Club_IP_Matches across address families');
 
-// 只测 IP 字面量：域名要走 Club_Url_Resolve，那是数据库和 DoH 的事
+// 只测 IP 字面量：域名要走 Club_Resolver_Get，那是数据库和 DoH 的事
 t_is(Club_Url_Public('https://1.1.1.1/inbox'), ['1.1.1.1'], 'Club_Url_Public keeps a public literal');
 t_is(Club_Url_Public('http://127.0.0.1/inbox'), false, 'Club_Url_Public blocks loopback');
 t_is(Club_Url_Public('https://[::1]/inbox'), false, 'Club_Url_Public blocks IPv6 loopback');
@@ -72,7 +72,7 @@ t_is(Club_Url_Public('file:///etc/passwd'), false, 'Club_Url_Public blocks non-h
 
 t_group('pure / http and json shapes');
 
-t_table('ActivityPub_Signature_Fields', 'ActivityPub_Signature_Fields', [
+t_table('ActivityPub_Sign_Fields', 'ActivityPub_Sign_Fields', [
     ['https://a.example/inbox', ['authority' => 'a.example', 'target' => '/inbox']],
     ['https://a.example:443/inbox', ['authority' => 'a.example', 'target' => '/inbox']],
     ['https://a.example:8443/inbox', ['authority' => 'a.example:8443', 'target' => '/inbox']],
@@ -94,12 +94,12 @@ t_table('Club_Url_Absolute', 'Club_Url_Absolute', [
     ['/x', 'mailto:someone@a.example', '']
 ]);
 
-t_is(Club_Header_Get(['Location' => 'a'], 'location'), 'a', 'Club_Header_Get is case insensitive');
-t_is(Club_Header_Get(['location' => 'a'], 'Location'), 'a', 'Club_Header_Get matches lowercase HTTP/2 headers');
-t_is(Club_Header_Get([], 'Location'), '', 'Club_Header_Get on an empty header set');
-t_is(Club_Header_Get(null, 'Location'), '', 'Club_Header_Get on no headers at all');
+t_is(Club_HTTP_Header(['Location' => 'a'], 'location'), 'a', 'Club_HTTP_Header is case insensitive');
+t_is(Club_HTTP_Header(['location' => 'a'], 'Location'), 'a', 'Club_HTTP_Header matches lowercase HTTP/2 headers');
+t_is(Club_HTTP_Header([], 'Location'), '', 'Club_HTTP_Header on an empty header set');
+t_is(Club_HTTP_Header(null, 'Location'), '', 'Club_HTTP_Header on no headers at all');
 
-t_table('Club_Cursor_Parse', 'Club_Cursor_Parse', [
+t_table('Club_HTTP_Cursor', 'Club_HTTP_Cursor', [
     ['123.45', [123, 45]],
     ['0.0', [0, 0]],
     ['01.02', [1, 2]],
@@ -111,7 +111,7 @@ t_table('Club_Cursor_Parse', 'Club_Cursor_Parse', [
     [['1'], false]
 ]);
 
-t_table('Club_Object_Id', 'Club_Object_Id', [
+t_table('ActivityPub_Object_Id', 'ActivityPub_Object_Id', [
     ['https://a.example/s/1', 'https://a.example/s/1'],
     [['id' => 'https://a.example/s/1'], 'https://a.example/s/1'],
     [['id' => ['nested']], ''],
@@ -120,7 +120,7 @@ t_table('Club_Object_Id', 'Club_Object_Id', [
     [null, '']
 ]);
 
-t_table('Club_Object_Name', 'Club_Object_Name', [
+t_table('Club_Group_From_Object', 'Club_Group_From_Object', [
     ['https://a.example/club/test', 'test'],
     ['https://a.example/club/test/followers', 'test'],
     [['id' => 'https://a.example/club/test'], 'test'],
@@ -137,27 +137,27 @@ t_table('Club_Log_Slug', 'Club_Log_Slug', [['a/b', 'aⳆb'], ['a\\b', 'aⳆb'], 
 
 t_group('pure / date and digest');
 
-t_is(ActivityPub_Date_Verify(gmdate('D, d M Y H:i:s T')), true, 'ActivityPub_Date_Verify accepts now');
-t_is(ActivityPub_Date_Verify(gmdate('D, d M Y H:i:s T', time() - 299)), true, 'ActivityPub_Date_Verify accepts the edge of the window');
-t_is(ActivityPub_Date_Verify(gmdate('D, d M Y H:i:s T', time() - 400)), false, 'ActivityPub_Date_Verify rejects a stale date');
-t_is(ActivityPub_Date_Verify(gmdate('D, d M Y H:i:s T', time() + 400)), false, 'ActivityPub_Date_Verify rejects a future date');
+t_is(ActivityPub_Verify_Date(gmdate('D, d M Y H:i:s T')), true, 'ActivityPub_Verify_Date accepts now');
+t_is(ActivityPub_Verify_Date(gmdate('D, d M Y H:i:s T', time() - 299)), true, 'ActivityPub_Verify_Date accepts the edge of the window');
+t_is(ActivityPub_Verify_Date(gmdate('D, d M Y H:i:s T', time() - 400)), false, 'ActivityPub_Verify_Date rejects a stale date');
+t_is(ActivityPub_Verify_Date(gmdate('D, d M Y H:i:s T', time() + 400)), false, 'ActivityPub_Verify_Date rejects a future date');
 // (created) 是 unix 时间戳，不是 HTTP 日期
-t_is(ActivityPub_Date_Verify((string)time()), true, 'ActivityPub_Date_Verify accepts a unix timestamp');
-t_is(ActivityPub_Date_Verify((string)(time() - 1000)), false, 'ActivityPub_Date_Verify rejects a stale unix timestamp');
-t_is(ActivityPub_Date_Verify(''), false, 'ActivityPub_Date_Verify rejects an empty date');
-t_is(ActivityPub_Date_Verify('garbage'), false, 'ActivityPub_Date_Verify rejects an unparsable date');
+t_is(ActivityPub_Verify_Date((string)time()), true, 'ActivityPub_Verify_Date accepts a unix timestamp');
+t_is(ActivityPub_Verify_Date((string)(time() - 1000)), false, 'ActivityPub_Verify_Date rejects a stale unix timestamp');
+t_is(ActivityPub_Verify_Date(''), false, 'ActivityPub_Verify_Date rejects an empty date');
+t_is(ActivityPub_Verify_Date('garbage'), false, 'ActivityPub_Verify_Date rejects an unparsable date');
 
 $body = '{"type":"Follow"}';
 $_SERVER['HTTP_DIGEST'] = 'SHA-256='.base64_encode(hash('sha256', $body, true));
-t_is(ActivityPub_Digest_Verify($body), true, 'ActivityPub_Digest_Verify accepts a matching sha-256');
-t_is(ActivityPub_Digest_Verify($body.' '), false, 'ActivityPub_Digest_Verify rejects a modified body');
+t_is(ActivityPub_Verify_Digest($body), true, 'ActivityPub_Verify_Digest accepts a matching sha-256');
+t_is(ActivityPub_Verify_Digest($body.' '), false, 'ActivityPub_Verify_Digest rejects a modified body');
 $_SERVER['HTTP_DIGEST'] = 'SHA-512='.base64_encode(hash('sha512', $body, true));
-t_is(ActivityPub_Digest_Verify($body), true, 'ActivityPub_Digest_Verify accepts sha-512');
+t_is(ActivityPub_Verify_Digest($body), true, 'ActivityPub_Verify_Digest accepts sha-512');
 // algorithm 是对端给的，不能直接透传给 hash()
 $_SERVER['HTTP_DIGEST'] = 'MD5='.base64_encode(hash('md5', $body, true));
-t_is(ActivityPub_Digest_Verify($body), false, 'ActivityPub_Digest_Verify rejects an unsupported algorithm');
+t_is(ActivityPub_Verify_Digest($body), false, 'ActivityPub_Verify_Digest rejects an unsupported algorithm');
 $_SERVER['HTTP_DIGEST'] = 'garbage';
-t_is(ActivityPub_Digest_Verify($body), false, 'ActivityPub_Digest_Verify rejects a malformed header');
+t_is(ActivityPub_Verify_Digest($body), false, 'ActivityPub_Verify_Digest rejects a malformed header');
 unset($_SERVER['HTTP_DIGEST']);
 
 t_group('pure / doh answers');
@@ -188,7 +188,7 @@ t_table('Club_Resolver_Answer', 'Club_Resolver_Answer', [
 t_group('decide / http result');
 
 // 划错一档的代价：整家实例被误判成挂了，或者一条谁都不收的活动无限重投
-t_table('ActivityPub_Push_Result', 'ActivityPub_Push_Result', [
+t_table('ActivityPub_Push_State', 'ActivityPub_Push_State', [
     [200, 'ok'], [202, 'ok'], [299, 'ok'],
     // POST 从不跟跳转，3xx 当成功就是这一行当场被删掉而谁都没收到
     [301, 'failed'], [302, 'failed'],
@@ -341,20 +341,20 @@ t_is(Club_Endpoint_Prune_Decide(0, $before - 1, $now + 60, 0, 0, $now, $before),
 t_group('decide / relay gate');
 
 $signed = ['signature' => ['signatureValue' => 'x']];
-t_is(Club_Relay_Allow($signed, str_repeat('x', 100), 'https://a.example/s/1', 'Update'), true, 'a signed payload under the limit is relayed');
-t_is(Club_Relay_Allow([], str_repeat('x', 100), 'https://a.example/s/1', 'Update'), false, 'an unsigned payload is never relayed');
-t_is(Club_Relay_Allow($signed, str_repeat('x', 512 * 1024 + 1), 'https://a.example/s/1', 'Delete'), false, 'an oversized payload is never relayed');
+t_is(Club_Inbox_Relayable($signed, str_repeat('x', 100), 'https://a.example/s/1', 'Update'), true, 'a signed payload under the limit is relayed');
+t_is(Club_Inbox_Relayable([], str_repeat('x', 100), 'https://a.example/s/1', 'Update'), false, 'an unsigned payload is never relayed');
+t_is(Club_Inbox_Relayable($signed, str_repeat('x', 512 * 1024 + 1), 'https://a.example/s/1', 'Delete'), false, 'an oversized payload is never relayed');
 
 // 计票包按形状认，不拿库里的 updated 反推
 $question = ['type' => 'Question', 'oneOf' => [[]]];
-t_is(Club_Poll_Revision(['id' => 'https://a.example/s/1#updates/1700000000'], $question), 1700000000, 'a tally carries its revision in the id');
-t_is(Club_Poll_Revision(['id' => 'https://a.example/s/1#updates/1700000000', 'published' => 'x'], $question), 0, 'an edit is not a tally');
-t_is(Club_Poll_Revision(['id' => 'https://a.example/s/1#updates/1700000000'], ['type' => ['Question'], 'anyOf' => [[]]]), 1700000000, 'type may be a list');
-t_is(Club_Poll_Revision(['id' => 'https://a.example/s/1#updates/1700000000'], ['type' => 'Note']), 0, 'a note is not a tally');
-t_is(Club_Poll_Revision(['id' => 'https://a.example/s/1#updates/1700000000'], ['type' => 'Question']), 0, 'a question without options is not a tally');
-t_is(Club_Poll_Revision(['id' => 'https://a.example/s/1'], $question), 0, 'a tally without a revision suffix is ignored');
+t_is(Club_Inbox_Poll(['id' => 'https://a.example/s/1#updates/1700000000'], $question), 1700000000, 'a tally carries its revision in the id');
+t_is(Club_Inbox_Poll(['id' => 'https://a.example/s/1#updates/1700000000', 'published' => 'x'], $question), 0, 'an edit is not a tally');
+t_is(Club_Inbox_Poll(['id' => 'https://a.example/s/1#updates/1700000000'], ['type' => ['Question'], 'anyOf' => [[]]]), 1700000000, 'type may be a list');
+t_is(Club_Inbox_Poll(['id' => 'https://a.example/s/1#updates/1700000000'], ['type' => 'Note']), 0, 'a note is not a tally');
+t_is(Club_Inbox_Poll(['id' => 'https://a.example/s/1#updates/1700000000'], ['type' => 'Question']), 0, 'a question without options is not a tally');
+t_is(Club_Inbox_Poll(['id' => 'https://a.example/s/1'], $question), 0, 'a tally without a revision suffix is ignored');
 // 放一个远期值进去等于把这条帖子后面的计票全挡在门外
-t_is(Club_Poll_Revision(['id' => 'https://a.example/s/1#updates/'.(time() + 200000)], $question), 0, 'a far-future revision is ignored');
+t_is(Club_Inbox_Poll(['id' => 'https://a.example/s/1#updates/'.(time() + 200000)], $question), 0, 'a far-future revision is ignored');
 
 t_group('decide / lease pick');
 
@@ -374,7 +374,7 @@ function t_config_problems($override) {
     global $config;
     $saved = $config;
     $config = t_config_merge($config, $override);
-    list($fatal, $warn) = Club_Config_Check();
+    list($fatal, $warn) = Club_Config_Validate();
     $config = $saved;
     return [array_values(array_filter($fatal, function ($problem) { return strpos($problem, 'ext-') !== 0; })), $warn];
 }

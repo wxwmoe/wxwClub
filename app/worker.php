@@ -7,7 +7,7 @@ function worker($type) {
     $now = time(); $worked = false;
     try {
         // 长期进程要自己换天，rotate 也可能刚把当前这个文件清掉。ini_set 的作用范围是本进程，这条不能跟着类型一起跳过
-        Club_Log_Error_Path();
+        Club_Log_Sync_Error();
         switch ($type) {
             case 'maintain': $worked = worker_maintain($now, $config); break;
             case 'probe': $worked = worker_probe($now); break;
@@ -58,12 +58,12 @@ function worker_endpoint($lease, $now) {
     if ($task['type'] != 'push') {
         // 认不出来的类型永远处理不掉，留着只会被反复领取。丢掉这一条，但不能当成终局拒绝：那条路会连带清掉 endpoint 的故障段，而这里根本没跟对端说过话
         Club_Log_Event('warning', 'queue dropped, unknown task type', ['id' => $task['id'], 'type' => $task['type'], 'target' => $url]);
-        worker_finish('endpoint completion', function () use ($url, $token, $task) { Club_Endpoint_Complete($url, $token, $task, 'dropped'); });
+        worker_finish('endpoint completion', function () use ($url, $token, $task) { Club_Endpoint_Result($url, $token, $task, 'dropped'); });
         Club_Stat('endpoint_ms', (int)((microtime(true) - $start) * 1000));
         return true;
     }
-    $next = Club_Token(); $active = $token;
-    $result = ActivityPub_POST($task['target'], $task['club'], $task['jsonld'], function () use ($url, $token, $next, $task, &$active) {
+    $next = Club_Lease_Token(); $active = $token;
+    $result = ActivityPub_Push($task['target'], $task['club'], $task['jsonld'], function () use ($url, $token, $next, $task, &$active) {
             if (!Club_Endpoint_Authorize($url, $token, $next, $task['id'])) return false;
             $active = $next;
             return true;
@@ -72,7 +72,7 @@ function worker_endpoint($lease, $now) {
         // 没拿到发送权：这次一个字节都没出网，旧 token 还能不能放掉由数据库说了算
         if ($result == 'lease-lost') Club_Endpoint_Release($url, $token);
         // authorize 之前返回时仍认领取 token，出网闸门通过后只认新 token
-        else Club_Endpoint_Complete($url, $active, $task, $result);
+        else Club_Endpoint_Result($url, $active, $task, $result);
     });
     Club_Stat('endpoint_ms', (int)((microtime(true) - $start) * 1000));
     return true;
@@ -92,14 +92,14 @@ function worker_finish($what, $run) {
 function worker_probe($now) {
     if (!($lease = Club_Blacklist_Claim($now))) return false;
     $target = $lease['target']; $token = $lease['token'];
-    if (!($club = Club_System())) {
+    if (!($club = Club_Group_Signer())) {
         // 没有系统群组就签不了名，这次探活发不出去，别把 checks 记在对端头上
         worker_finish('probe defer', function () use ($target, $token) { Club_Blacklist_Defer($target, $token, 'no system club'); });
         return true;
     }
     $start = microtime(true);
     Club_Log_Ref('probe '.$target);
-    $next = Club_Token(); $active = $token;
+    $next = Club_Lease_Token(); $active = $token;
     $result = ActivityPub_Probe($target, $club, function () use ($target, $token, $next, &$active) {
         if (!Club_Blacklist_Authorize($target, $token, $next)) return false;
         $active = $next;
@@ -151,7 +151,7 @@ function worker_maintain($now, $config) {
                 switch ($unit) {
                     case 'rotate': Club_Log_Rotate($config['node']['log-retention'] ?? 30); break;
                     case 'monitor': Club_Monitor_Snapshot(); break;
-                    case 'reconcile': Club_Reconcile_Step(); break;
+                    case 'reconcile': Club_Endpoint_Sweep(); break;
                     case 'cleanup': if (Club_Blacklist_Cleanup($batch = 500) >= $batch) $due[$unit] = $now; break;  // 删满一批说明可能还有 backlog，下轮继续或确认收尾
                     case 'dns': Club_Resolver_Cleanup(); break;
                     case 'tasks': if (worker_expire()) $due[$unit] = $now; break;

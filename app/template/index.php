@@ -14,17 +14,17 @@ $maintainer_url = count($maintainer) == 3 ? 'https://'.$maintainer[2].'/@'.$main
 ?>
 <title><?= $config['node']['name'] ?></title>
 <style>a{color:#000;text-decoration:none}</style>
-<h3><?= $config['node']['name'] ?> (<a href="https://github.com/wxwmoe/wxwClub" target="_blank">wxwClub/<?= Club_Html($ver) ?></a>)</h3>
+<h3><?= $config['node']['name'] ?> (<a href="https://github.com/wxwmoe/wxwClub" target="_blank">wxwClub/<?= Club_Template_Escape($ver) ?></a>)</h3>
 <p><?= $config['node']['description'] ?></p>
 <p><b><br>热门群组</b></p>
 <?php if (!$clubs): ?>
 <p>最近还没有群组冒泡，快去 @ 一个把它叫醒吧 ~</p>
-<?php else: foreach ($clubs as $club): $name = Club_Html($club['name']); ?>
-<p><a href="<?= $base ?>/club/<?= $name ?>" target="_blank"><?= Club_Html($club['nickname'] ?: $club['name']) ?> (@<?= $name ?>@<?= Club_Html($config['base']) ?>)</a></p>
+<?php else: foreach ($clubs as $club): $name = Club_Template_Escape($club['name']); ?>
+<p><a href="<?= $base ?>/club/<?= $name ?>" target="_blank"><?= Club_Template_Escape($club['nickname'] ?: $club['name']) ?> (@<?= $name ?>@<?= Club_Template_Escape($config['base']) ?>)</a></p>
 <?php endforeach; endif; ?>
 <br>
 <p style="font-size:14px">Maintainer:
-    <?php if ($maintainer_url): ?><a rel="me" href="<?= Club_Html($maintainer_url) ?>" target="_blank"><?= $config['node']['maintainer']['name'] ?></a>
+    <?php if ($maintainer_url): ?><a rel="me" href="<?= Club_Template_Escape($maintainer_url) ?>" target="_blank"><?= $config['node']['maintainer']['name'] ?></a>
     <?php else: ?><?= $config['node']['maintainer']['name'] ?><?php endif; ?>
     (mail: <?= $config['node']['maintainer']['email'] ?>)
 </p>
