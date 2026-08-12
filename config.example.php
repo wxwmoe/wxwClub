@@ -18,14 +18,14 @@
         'avatar' => 'https://fp1.fghrsh.net/2021/11/03/1568571d1ed0bfaef26acdf6d5664826.png',
         // 横幅外链
         'banner' => 'https://fp1.fghrsh.net/2021/10/25/86dbef8672928e061a5ce1e5722e8056.png',
-        
+
         /****************************
          *      预  设  标  签      *
          * ------------------------ *
          * :club_name: => 群组名    *
          * :local_domain: => 主域名 *
          ****************************/
-         
+
         // 简介模板
         'summary' => '<p>这是一个关于 :infoname_cn: 的群组，关注以获取群组推送，引用可以分享到群组。</p><p>I\'m a group about :infoname_en:. Follow me to get all the group posts. Tag me to share with the group.</p><p>创建新群组可以 搜索 或 引用 @新群组名@:local_domain:。</p><p>Create other groups by searching for or tagging @yourGroupName@:local_domain:</p>',
         // 默认昵称
@@ -88,7 +88,7 @@
         // 转发原始报文（编辑、删除）的体积上限，KB
         // 参考：2 万字的中文投稿约 118 KB
         'relay-limit' => 512,
-        
+
         /********************************
          *        限  流  规  则        *
          * ---------------------------- *

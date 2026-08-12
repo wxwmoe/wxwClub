@@ -1,6 +1,5 @@
 <?php return [
 
-    // 群组 actor 的 JSON-LD 词汇表
     'https://www.w3.org/ns/activitystreams',
     'https://w3id.org/security/v1',
     [

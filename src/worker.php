@@ -23,8 +23,7 @@ function worker($type) {
     if (($usage = memory_get_usage(1)) > 10 * 1024 * 1024) {
         global $stop; $stop = true;
         // 退出后 master 会补一个回来，手上那条投递的租约到期由别人重领
-        Club_Log_Console('error', 'memory limit exceeded, stopping',
-            ['bytes' => $usage, 'pid' => getmypid()]);
+        Club_Log_Console('error', 'memory limit exceeded, stopping', ['bytes' => $usage, 'pid' => getmypid()]);
     }
 }
 
@@ -50,9 +49,7 @@ function worker_endpoint($lease, $now) {
     if (!($task = Club_Endpoint_Queue($url, $token, $now))) {
         // 领取后的 token、退避、黑名单或 queue 已经变化，按当前状态重排后放手
         Club_Log_Event('debug', 'endpoint claim has no eligible queue', ['endpoint' => $url]);
-        worker_finish('endpoint release', function () use ($url, $token) {
-            Club_Endpoint_Release($url, $token);
-        });
+        worker_finish('endpoint release', function () use ($url, $token) { Club_Endpoint_Release($url, $token); });
         Club_Stat('endpoint_ms', (int)((microtime(true) - $start) * 1000));
         return true;
     }
@@ -61,15 +58,12 @@ function worker_endpoint($lease, $now) {
     if ($task['type'] != 'push') {
         // 认不出来的类型永远处理不掉，留着只会被反复领取。丢掉这一条，但不能当成终局拒绝：那条路会连带清掉 endpoint 的故障段，而这里根本没跟对端说过话
         Club_Log_Event('warning', 'queue dropped, unknown task type', ['id' => $task['id'], 'type' => $task['type'], 'target' => $url]);
-        worker_finish('endpoint completion', function () use ($url, $token, $task) {
-            Club_Endpoint_Complete($url, $token, $task, 'dropped');
-        });
+        worker_finish('endpoint completion', function () use ($url, $token, $task) { Club_Endpoint_Complete($url, $token, $task, 'dropped'); });
         Club_Stat('endpoint_ms', (int)((microtime(true) - $start) * 1000));
         return true;
     }
     $next = Club_Token(); $active = $token;
-    $result = ActivityPub_POST($task['target'], $task['club'], $task['jsonld'],
-        function () use ($url, $token, $next, $task, &$active) {
+    $result = ActivityPub_POST($task['target'], $task['club'], $task['jsonld'], function () use ($url, $token, $next, $task, &$active) {
             if (!Club_Endpoint_Authorize($url, $token, $next, $task['id'])) return false;
             $active = $next;
             return true;
@@ -100,9 +94,7 @@ function worker_probe($now) {
     $target = $lease['target']; $token = $lease['token'];
     if (!($club = Club_System())) {
         // 没有系统群组就签不了名，这次探活发不出去，别把 checks 记在对端头上
-        worker_finish('probe defer', function () use ($target, $token) {
-            Club_Blacklist_Defer($target, $token, 'no system club');
-        });
+        worker_finish('probe defer', function () use ($target, $token) { Club_Blacklist_Defer($target, $token, 'no system club'); });
         return true;
     }
     $start = microtime(true);
@@ -115,8 +107,7 @@ function worker_probe($now) {
     });
     worker_finish('probe completion', function () use ($target, $token, $active, $result) {
         // 本站 DNS 的事，对端一个字都没说过：checks 不动，只短推 check_at，也不能把租约留到自然过期 —— 那 120 秒里这一行谁都探不了
-        if ($result == 'local-dns' || $result == 'lease-lost')
-            Club_Blacklist_Defer($target, $token, $result);
+        if ($result == 'local-dns' || $result == 'lease-lost') Club_Blacklist_Defer($target, $token, $result);
         else Club_Blacklist_Result($target, $active, $result == 'alive');
     });
     // 只有总时长的话，看不出这批探活是真在问对端还是一直卡在本站 DNS 上，而这两种「慢」要加的是完全不同的东西
@@ -145,8 +136,7 @@ function worker_maintain($now, $config) {
     // 落选就退化成空转，由 worker_idle 退避到 2 秒再问一次，对面一挂这边最多 2 秒接手
     if (!($leader = $held)) return false;
     // rotate 自己带 1 小时节流，这里的间隔只决定多久去问它一次
-    $every = ['rotate' => 300, 'reconcile' => 60, 'cleanup' => 30,
-        'dns' => 600, 'tasks' => 60, 'monitor' => 60];
+    $every = ['rotate' => 300, 'reconcile' => 60, 'cleanup' => 30, 'dns' => 600, 'tasks' => 60, 'monitor' => 60];
     foreach ($every as $unit => $interval) if (!isset($due[$unit])) $due[$unit] = 0;
     $units = array_keys($every); $count = count($units);
     for ($offset = 0; $offset < $count; $offset++) {
@@ -157,20 +147,16 @@ function worker_maintain($now, $config) {
         try {
             Club_DB_Retry('maintenance '.$unit, function () use ($unit, $config, $now, &$due) {
                 switch ($unit) {
-                    case 'rotate':
-                        Club_Log_Rotate($config['node']['log-retention'] ?? 30); break;
+                    case 'rotate': Club_Log_Rotate($config['node']['log-retention'] ?? 30); break;
                     case 'monitor':
                         // 自己按 5 分钟节流，这里只保证有人足够频繁地去问它一次
                         Club_Monitor_Snapshot(); break;
-                    case 'reconcile':
-                        Club_Reconcile_Step(); break;
+                    case 'reconcile': Club_Reconcile_Step(); break;
                     case 'cleanup':
                         // 清完一整批就说明还有 backlog，下一轮立刻接着清
                         if (Club_Blacklist_Cleanup($batch = 500) >= $batch) $due[$unit] = $now; break;
-                    case 'dns':
-                        Club_Resolver_Cleanup(); break;
-                    case 'tasks':
-                        if (worker_expire()) $due[$unit] = $now; break;
+                    case 'dns': Club_Resolver_Cleanup(); break;
+                    case 'tasks': if (worker_expire()) $due[$unit] = $now; break;
                 }
             });
         } catch (PDOException $e) {

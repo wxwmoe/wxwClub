@@ -88,8 +88,7 @@ function t_table($what, $call, $rows) {
 // 库名不带 test 直接拒绝：下面每一组都会先把所有表删掉重建
 function t_db() {
     global $config;
-    if (strpos($config['mysql']['database'], 'test') === false)
-        exit("Refusing to run: MYSQL_DATABASE '".$config['mysql']['database']."' does not look like a test database\n");
+    if (strpos($config['mysql']['database'], 'test') === false) exit("Refusing to run: MYSQL_DATABASE '".$config['mysql']['database']."' does not look like a test database\n");
     return Club_DB_Connect();
 }
 
@@ -105,8 +104,7 @@ function t_db_reset() {
 function t_db_import() {
     global $db;
     t_db_reset();
-    foreach (explode(';', file_get_contents(APP_ROOT.'/tools/wxwclub.sql')) as $statement)
-        if (trim(preg_replace('/^\s*--.*$/m', '', $statement)) !== '') $db->exec($statement);
+    foreach (explode(';', file_get_contents(APP_ROOT.'/tools/wxwclub.sql')) as $statement) if (trim(preg_replace('/^\s*--.*$/m', '', $statement)) !== '') $db->exec($statement);
 }
 
 function t_row($sql, $params = []) {

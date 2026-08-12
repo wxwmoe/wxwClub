@@ -10,8 +10,7 @@
  * 一个软件目录共用一个库，按 seq 从小到大跑：关注 -> 投稿 -> 编辑 -> 删除 -> 取关本来就是一条链，announce 要有关注者才扇得出去，update 要先有被转发过的帖子。 */
 
 // expect 里认得的键。写错一个字的话那条断言会一声不吭地不生效，所以未知键当失败处理
-$t_ap_keys = ['status', 'stored', 'follower_created', 'follower_removed', 'announce_created', 'announce_revoked',
-    'content_updated', 'poll_updated', 'delivery_enqueued', 'relayed', 'actor_deleted'];
+$t_ap_keys = ['status', 'stored', 'follower_created', 'follower_removed', 'announce_created', 'announce_revoked', 'content_updated', 'poll_updated', 'delivery_enqueued', 'relayed', 'actor_deleted'];
 
 function t_ap_dir() {
     return TEST_ROOT.'/fixtures/activitypub';
@@ -24,10 +23,7 @@ function t_ap_list() {
         if (basename($dir) === 'keys') continue;
         $fixtures = [];
         foreach (glob($dir.'/*.php') as $file) $fixtures[basename($file, '.php')] = require($file);
-        uksort($fixtures, function ($a, $b) use ($fixtures) {
-            $order = $fixtures[$a]['seq'] - $fixtures[$b]['seq'];
-            return $order ?: strcmp($a, $b);
-        });
+        uksort($fixtures, function ($a, $b) use ($fixtures) { $order = $fixtures[$a]['seq'] - $fixtures[$b]['seq']; return $order ?: strcmp($a, $b); });
         $all[basename($dir)] = $fixtures;
     }
     ksort($all);
@@ -66,8 +62,7 @@ function t_ap_run() {
         t_group('activitypub / '.$software);
         t_ap_seed($fixtures);
         foreach ($fixtures as $name => $fixture) {
-            foreach (array_keys($fixture['expect']) as $key)
-                if (!in_array($key, $t_ap_keys, true)) t_ok(false, $software.'/'.$name.': unknown expect key "'.$key.'"');
+            foreach (array_keys($fixture['expect']) as $key) if (!in_array($key, $t_ap_keys, true)) t_ok(false, $software.'/'.$name.': unknown expect key "'.$key.'"');
             list($output, $code) = t_ap_spawn($software, $name);
             // 子进程把计数打在最后一行，其余原样透出来，失败信息才不会被吞掉
             if (preg_match('/^#counts (\d+) (\d+)$/m', $output, $m)) {
@@ -97,9 +92,8 @@ function t_ap_seed($fixtures) {
     t_db_import();
     $public = file_get_contents(t_ap_dir().'/keys/actor-public.pem');
     $private = file_get_contents(t_ap_dir().'/keys/actor-private.pem');
-    foreach (['test', $config['club']['system-name']] as $club)
-        t_exec('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values (:name, :public, :private, :now)',
-            [':name' => $club, ':public' => $public, ':private' => $private, ':now' => time()]);
+    foreach (['test', $config['club']['system-name']] as $club) t_exec('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`)'.
+        ' values (:name, :public, :private, :now)', [':name' => $club, ':public' => $public, ':private' => $private, ':now' => time()]);
     $actors = [];
     foreach ($fixtures as $fixture) {
         $actor = Club_Object_Id(t_ap_activity($fixture)['actor'] ?? '');
@@ -112,11 +106,11 @@ function t_ap_seed($fixtures) {
     }
     // 另一家实例上的一个关注者，预置好不经过任何 fixture。透传转发会把来源实例整条 shared_inbox 排掉 ——
     // 那一包本来就是它发来的 —— 所以只有投稿者自己那一家关注的话，扇出目标是空的，转发入没入队根本看不出来
-    t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values (:name, :actor, :inbox, :public, :shared, :now, :now)',
-        [':name' => 'bob@other.example', ':actor' => 'https://other.example/users/bob', ':inbox' => 'https://other.example/users/bob/inbox',
-            ':public' => $public, ':shared' => 'https://other.example/inbox', ':now' => time()]);
-    t_exec('insert into `followers`(`cid`,`uid`,`timestamp`) select `c`.`cid`, `u`.`uid`, :now from `clubs` `c`, `users` `u` where `c`.`name` = \'test\' and `u`.`actor` = :actor',
-        [':actor' => 'https://other.example/users/bob', ':now' => time()]);
+    t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`)'.
+        ' values (:name, :actor, :inbox, :public, :shared, :now, :now)', [':name' => 'bob@other.example', ':actor' => 'https://other.example/users/bob',
+            ':inbox' => 'https://other.example/users/bob/inbox', ':public' => $public, ':shared' => 'https://other.example/inbox', ':now' => time()]);
+    t_exec('insert into `followers`(`cid`,`uid`,`timestamp`) select `c`.`cid`, `u`.`uid`, :now from `clubs` `c`, `users` `u`'.
+        ' where `c`.`name` = \'test\' and `u`.`actor` = :actor', [':actor' => 'https://other.example/users/bob', ':now' => time()]);
 }
 
 /* ---- 子进程：一条 fixture ---- */
@@ -166,8 +160,7 @@ function t_ap_replay($software, $name) {
 function t_ap_server($fixture, $body, $actor) {
     global $config;
     $request = $fixture['request'];
-    $server = ['REQUEST_METHOD' => $request['method'], 'REQUEST_URI' => $request['path'],
-        'HTTP_HOST' => $config['base'], 'CONTENT_LENGTH' => (string)strlen($body)];
+    $server = ['REQUEST_METHOD' => $request['method'], 'REQUEST_URI' => $request['path'], 'HTTP_HOST' => $config['base'], 'CONTENT_LENGTH' => (string)strlen($body)];
     foreach (isset($request['headers']) ? $request['headers'] : [] as $key => $value) {
         $key = strtoupper(str_replace('-', '_', $key));
         $server[in_array($key, ['CONTENT_TYPE', 'CONTENT_LENGTH']) ? $key : 'HTTP_'.$key] = $value;
@@ -187,8 +180,8 @@ function t_ap_server($fixture, $body, $actor) {
 // 一次重放前后各取一次。都是计数和版本号，不碰自增 id 和时间戳
 function t_ap_state($actor, $club, $object, $body) {
     return [
-        'followers' => (int)t_one('select count(*) from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid where c.name = :club and u.actor = :actor',
-            [':club' => $club, ':actor' => $actor]),
+        'followers' => (int)t_one('select count(*) from `followers` `f` join `clubs` `c` on f.cid = c.cid join `users` `u` on f.uid = u.uid'.
+            ' where c.name = :club and u.actor = :actor', [':club' => $club, ':actor' => $actor]),
         'queues' => (int)t_one('select count(*) from `queues`'),
         'activities' => (int)t_one('select count(*) from `activities`'),
         'newest' => (string)t_one('select `type` from `activities` order by `id` desc limit 1'),

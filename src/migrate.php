@@ -29,8 +29,7 @@ function Club_Migrate_Run() {
             $step = 'Club_Migrate_'.$version;
             if (!is_file($file)) {
                 // 版本号和步骤文件对不上是部署问题，装了一半的代码继续跑更危险
-                Club_Log_Console('error', 'migration step is missing',
-                    ['version' => $version, 'file' => $file]);
+                Club_Log_Console('error', 'migration step is missing', ['version' => $version, 'file' => $file]);
                 throw new RuntimeException('Migration step '.$version.' is missing');
             }
             require_once($file);
@@ -51,8 +50,7 @@ function Club_Migrate_Run() {
         try { $db->query('select release_lock(\'wxwclub_migrate\')'); }
         catch (PDOException $e) {
             // 命名锁随连接断开自动释放，这里的失败不该覆盖真正的合并结果
-            Club_Log_Console('warning', 'migration lock release failed',
-                ['error' => $e->getMessage()]);
+            Club_Log_Console('warning', 'migration lock release failed', ['error' => $e->getMessage()]);
         }
     }
     return Club_DB_Version();
@@ -108,8 +106,7 @@ function Club_Schema_Column($table, $column) {
     $row = $pdo->fetch(PDO::FETCH_NUM);
     if ($row === false) return false;
     // MySQL 5.7 仍把整数显示宽度写进 column_type，8.0 则已经省略
-    $type = preg_replace('/^(tinyint|smallint|mediumint|int|bigint)\([0-9]+\)/',
-        '$1', strtolower($row[0]));
+    $type = preg_replace('/^(tinyint|smallint|mediumint|int|bigint)\([0-9]+\)/', '$1', strtolower($row[0]));
     return ['type' => $type, 'collation' => $row[1] === null ? null : strtolower($row[1]), 'nullable' => $row[2] === 'YES', 'default' => $row[3], 'extra' => strtolower($row[4])];
 }
 
@@ -204,8 +201,7 @@ function Club_Migrate_Assert($condition, $check, $context = []) {
     throw new RuntimeException('Migration validation failed: '.$check);
 }
 
-function Club_Migrate_Assert_Column($table, $column, $type = null, $collation = null,
-    $nullable = null) {
+function Club_Migrate_Assert_Column($table, $column, $type = null, $collation = null, $nullable = null) {
     $info = Club_Schema_Column($table, $column);
     Club_Migrate_Assert($info !== false, $table.'.'.$column.' exists');
     if ($type !== null) Club_Migrate_Assert($info['type'] === $type, $table.'.'.$column.' type', ['actual' => $info['type'], 'expected' => $type]);
@@ -217,32 +213,27 @@ function Club_Migrate_Assert_Column($table, $column, $type = null, $collation = 
 function Club_Migrate_Assert_Index($table, $index, $unique, $columns) {
     $info = Club_Schema_Index($table, $index);
     Club_Migrate_Assert($info !== false, $table.'.'.$index.' index exists');
-    Club_Migrate_Assert($info['unique'] === $unique && $info['columns'] === $columns,
-        $table.'.'.$index.' index definition',
+    Club_Migrate_Assert($info['unique'] === $unique && $info['columns'] === $columns, $table.'.'.$index.' index definition',
         ['actual' => $info, 'expected' => ['unique' => $unique, 'columns' => $columns]]);
     return $info;
 }
 
-function Club_Migrate_Assert_Foreign($table, $column, $referencedTable, $referencedColumn,
-    $update = 'CASCADE', $delete = 'CASCADE') {
+function Club_Migrate_Assert_Foreign($table, $column, $referencedTable, $referencedColumn, $update = 'CASCADE', $delete = 'CASCADE') {
     $actual = Club_Schema_Foreign_Info($table, $column);
     $expected = ['table' => $referencedTable, 'column' => $referencedColumn, 'update' => strtoupper($update), 'delete' => strtoupper($delete)];
-    $matches = count($actual) === 1 && $actual[0]['table'] === $expected['table'] &&
-        $actual[0]['column'] === $expected['column'] && $actual[0]['update'] === $expected['update'] &&
-        $actual[0]['delete'] === $expected['delete'];
+    $matches = count($actual) === 1 && $actual[0]['table'] === $expected['table'] && $actual[0]['column'] === $expected['column'] &&
+        $actual[0]['update'] === $expected['update'] && $actual[0]['delete'] === $expected['delete'];
     Club_Migrate_Assert($matches, $table.'.'.$column.' foreign key definition', ['actual' => $actual, 'expected' => $expected]);
     return $actual[0];
 }
 
-function Club_Migrate_Ensure_Foreign($table, $column, $name, $referencedTable,
-    $referencedColumn, $update = 'CASCADE', $delete = 'CASCADE') {
+function Club_Migrate_Ensure_Foreign($table, $column, $name, $referencedTable, $referencedColumn, $update = 'CASCADE', $delete = 'CASCADE') {
     $actual = Club_Schema_Foreign_Info($table, $column);
-    if (count($actual) === 1 && $actual[0]['table'] === $referencedTable &&
-        $actual[0]['column'] === $referencedColumn && $actual[0]['update'] === strtoupper($update) &&
-        $actual[0]['delete'] === strtoupper($delete)) return false;
+    if (count($actual) === 1 && $actual[0]['table'] === $referencedTable && $actual[0]['column'] === $referencedColumn &&
+        $actual[0]['update'] === strtoupper($update) && $actual[0]['delete'] === strtoupper($delete)) return false;
     foreach ($actual as $foreign) Club_Migrate_Exec($table.' drop foreign key '.$foreign['name'], 'alter table `'.$table.'` drop foreign key `'.$foreign['name'].'`');
-    Club_Migrate_Exec($table.' add foreign key '.$name, 'alter table `'.$table.'` add constraint `'.$name.'` foreign key (`'.$column.'`) references `'.
-        $referencedTable.'` (`'.$referencedColumn.'`) on delete '.$delete.' on update '.$update);
+    Club_Migrate_Exec($table.' add foreign key '.$name, 'alter table `'.$table.'` add constraint `'.$name.'` foreign key (`'.$column.'`)'.
+        ' references `'.$referencedTable.'` (`'.$referencedColumn.'`) on delete '.$delete.' on update '.$update);
     return true;
 }
 

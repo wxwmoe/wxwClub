@@ -12,11 +12,13 @@ function t_schema_dump() {
     foreach ($db->query('select `table_name`, `table_collation` from `information_schema`.`tables` where `table_schema` = database()')->fetchAll(PDO::FETCH_NUM) as $row)
         $out['table'][$row[0]] = strtolower((string)$row[1]);
     // 5.7 仍把整数显示宽度写进 column_type，8.0 已经省略，跟 Club_Schema_Column 用同一条正则抹平
-    foreach ($db->query('select `table_name`, `column_name`, `column_type`, `collation_name`, `is_nullable`, `column_default`, `extra` from `information_schema`.`columns` where `table_schema` = database()')->fetchAll(PDO::FETCH_NUM) as $row)
+    foreach ($db->query('select `table_name`, `column_name`, `column_type`, `collation_name`, `is_nullable`, `column_default`, `extra`'.
+        ' from `information_schema`.`columns` where `table_schema` = database()')->fetchAll(PDO::FETCH_NUM) as $row)
         $out['column'][$row[0].'.'.$row[1]] = implode(' ', [preg_replace('/^(tinyint|smallint|mediumint|int|bigint)\([0-9]+\)/', '$1', strtolower($row[2])),
             strtolower((string)$row[3]), $row[4] === 'YES' ? 'null' : 'not-null', 'default='.($row[5] === null ? '-' : $row[5]), strtolower((string)$row[6])]);
     $columns = [];
-    foreach ($db->query('select `table_name`, `index_name`, `non_unique`, `column_name` from `information_schema`.`statistics` where `table_schema` = database() order by `seq_in_index`')->fetchAll(PDO::FETCH_NUM) as $row) {
+    foreach ($db->query('select `table_name`, `index_name`, `non_unique`, `column_name` from `information_schema`.`statistics`'.
+        ' where `table_schema` = database() order by `seq_in_index`')->fetchAll(PDO::FETCH_NUM) as $row) {
         $key = $row[0].'.'.$row[1];
         $out['index'][$key] = $row[2] ? '' : 'unique ';
         $columns[$key][] = $row[3];
@@ -69,8 +71,7 @@ function t_schema_upto($version) {
 function t_schema_sql($file) {
     global $db;
     t_db_reset();
-    foreach (explode(';', file_get_contents($file)) as $statement)
-        if (trim(preg_replace('/^\s*--.*$/m', '', $statement)) !== '') $db->exec($statement);
+    foreach (explode(';', file_get_contents($file)) as $statement) if (trim(preg_replace('/^\s*--.*$/m', '', $statement)) !== '') $db->exec($statement);
 }
 
 t_group('schema / migration steps');
@@ -142,8 +143,8 @@ function t_schema_scheduling($from) {
     t_is((int)($live['next_at'] ?? -1), 1666972800, $from.': a queued target is scheduled at its earliest due_at');
     t_is((int)($live['idle_since'] ?? -1), 0, $from.': a scheduled control row carries no idle clock');
     t_is(((int)($live['fails'] ?? -1)) + ((int)($live['fail_since'] ?? -1)) + ((int)($live['retry_at'] ?? -1)), 0, $from.': a rebuilt control row starts healthy');
-    t_is((int)t_one('select count(*) from `endpoints` where `url` = :url and `next_at` is null and `idle_since` > 0', [':url' => 'https://dead.example/inbox']),
-        1, $from.': a blacklisted target is unscheduled and carries an idle clock');
+    t_is((int)t_one('select count(*) from `endpoints` where `url` = :url and `next_at` is null and `idle_since` > 0',
+        [':url' => 'https://dead.example/inbox']), 1, $from.': a blacklisted target is unscheduled and carries an idle clock');
 }
 
 t_group('schema / resume after an interrupted merge');

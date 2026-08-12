@@ -133,13 +133,7 @@ t_table('Club_I18n_Match', 'Club_I18n_Match', [
     ['yue', 'zh-HK'], ['en-GB', 'en'], ['ja-JP', 'ja'], ['fr', false], ['', false]
 ]);
 
-t_table('Club_Log_Slug', 'Club_Log_Slug', [
-    ['a/b', 'aⳆb'],
-    ['a\\b', 'aⳆb'],
-    ["a\tb", 'a_b'],
-    ['a*b?[c]', 'abc'],
-    ["a\x00b", 'ab']
-]);
+t_table('Club_Log_Slug', 'Club_Log_Slug', [['a/b', 'aⳆb'], ['a\\b', 'aⳆb'], ["a\tb", 'a_b'], ['a*b?[c]', 'abc'], ["a\x00b", 'ab']]);
 
 t_group('pure / date and digest');
 

@@ -1,5 +1,4 @@
 <?php
-// 站点首页
 global $db, $ver, $base, $config;
 
 // 限定最近 30 天，否则每次都要全表扫 announces 再整体排序；group by 取 clubs 主键，name / nickname 才满足 ONLY_FULL_GROUP_BY

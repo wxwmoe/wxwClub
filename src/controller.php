@@ -2,7 +2,7 @@
 
 function controller() {
     global $db, $ver, $base, $config, $public_streams;
-    
+
     $router = [
         '/' => ['to' => 'index', 'strict' => 1],
         '/club' => ['to' => 'club', 'strict' => 0],
@@ -11,20 +11,19 @@ function controller() {
         '/.well-known/nodeinfo' => ['to' => 'nodeinfo', 'strict' => 1],
         '/.well-known/webfinger' => ['to' => 'webfinger', 'strict' => 1]
     ];
-    
+
     $to = ''; $uri = explode('?', $_SERVER['REQUEST_URI'])[0];
     foreach ($router as $k => $v) if ($k == ($v['strict'] ? $uri : substr($uri, 0, strlen($k)))) $to = $v['to'];
-    
+
     switch ($to) {
-        
+
         case 'club':
             if ($club = Club_Exist(($uri = explode('/', $uri))[2] ?? '')) {
                 $club_url = $base.'/club/'.$club;
                 $system = Club_System_Name($club);
                 if (isset($uri[3])) switch ($uri[3]) {
                     case 'inbox':
-                        if ($_SERVER['REQUEST_METHOD'] == 'POST')
-                            Club_Inbox_Process($club);
+                        if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Process($club);
                         // actor 里 inbox 是公开地址，抓取方跟过来时得拿到能解析的集合，不能是空响应体
                         else Club_Get_OrderedCollection($club_url.'/inbox'); break;
 
@@ -59,8 +58,7 @@ function controller() {
                             if ($rows) {
                                 $head = $rows[0]; $foot = $rows[count($rows) - 1];
                                 // 取满一页才给 next，抓取方据此判断到底了
-                                if (!$tail && count($rows) == 20)
-                                    $arr['next'] = $club_url.'/outbox?page=true&max='.$foot['timestamp'].'.'.$foot['id'];
+                                if (!$tail && count($rows) == 20) $arr['next'] = $club_url.'/outbox?page=true&max='.$foot['timestamp'].'.'.$foot['id'];
                                 $arr['prev'] = $club_url.'/outbox?page=true&min='.$head['timestamp'].'.'.$head['id'];
                             }
                             foreach ($rows as $announce) {
@@ -81,7 +79,7 @@ function controller() {
                             $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
                             Club_Get_OrderedCollection($club_url.'/outbox', ['totalItems' => $count, 'first' => $club_url.'/outbox?page=true', 'last' => $club_url.'/outbox?page=last']);
                         } break;
-                    
+
                     case 'following': Club_Get_OrderedCollection($club_url.'/following'); break;
                     case 'followers':
                         $pdo = $db->prepare('select count(f.id) from `followers` `f` left join `clubs` `c` on f.cid = c.cid where c.name = :club');
@@ -140,23 +138,17 @@ function controller() {
                                 'url' => $pdo['banner'] ?: $config['default']['banner']
                             ]
                         ], 2);
-                    } else Club_Template('profile', [
-                        'club' => $club, 'nickname' => $nickname, 'summary' => $summary, 'row' => $pdo
-                    ]);
+                    } else Club_Template('profile', ['club' => $club, 'nickname' => $nickname, 'summary' => $summary, 'row' => $pdo]);
                 }
             } else Club_Json_Output(['message' => 'User not found'], 0, 404); break;
-        
-        case 'inbox':
-            if ($_SERVER['REQUEST_METHOD'] == 'POST')
-                Club_Inbox_Process();
-            else Club_Get_OrderedCollection($base.'/inbox'); break;
 
-        case 'nodeinfo':
-            Club_Json_Output(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;
-        
+        case 'inbox': if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Process(); else Club_Get_OrderedCollection($base.'/inbox'); break;
+
+        case 'nodeinfo': Club_Json_Output(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;
+
         case 'nodeinfo2':
-            $pdo = $db->prepare('select (select count(cid) from clubs) as clubs, (select count(id) from announces) as announces,'.
-            ' (select count(distinct cid) from announces where timestamp >= :month) as activeMonth, (select count(distinct cid) from announces where timestamp >= :halfyear) as activeHalfyear');
+            $pdo = $db->prepare('select (select count(cid) from clubs) as clubs, (select count(id) from announces) as announces, (select count(distinct cid) from announces'.
+                ' where timestamp >= :month) as activeMonth, (select count(distinct cid) from announces where timestamp >= :halfyear) as activeHalfyear');
             $pdo->execute([':month' => time()-86400*30, ':halfyear' => time()-86400*30*6]);
             $usage = $pdo->fetch(PDO::FETCH_ASSOC);
             Club_Json_Output([
@@ -181,7 +173,7 @@ function controller() {
                     'feedbackUrl' => 'https://github.com/wxwmoe/wxwClub/issues/new'
                 ]
             ]); break;
-        
+
         case 'webfinger':
             // ?resource[]=x 这种数组参数直接当空处理，否则 preg_match 会收到数组报错
             $resource = is_scalar($_GET['resource'] ?? null) ? (string)$_GET['resource'] : '';
@@ -218,9 +210,9 @@ function controller() {
                         ]
                 ]]);
             } else Club_Json_Output(['message' => 'User not found'], 0, 404); break;
-        
+
         case 'index': Club_Template('index'); break;
-        
+
         default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
     }
 }

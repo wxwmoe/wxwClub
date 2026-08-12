@@ -1,6 +1,6 @@
 <?php
 
-/* Modified from PHP-Curl-Class/9.4.0
+/* 裁剪自 PHP-Curl-Class/9.4.0
 https://github.com/php-curl-class/php-curl-class */
 
 class Curl {
@@ -37,19 +37,19 @@ class Curl {
     public $retryDecider = null;
     public $remainingRetries = 0;
 
-    // 上游 9.12.6 的修复：不声明的话 PHP 8.2+ 会报动态属性 deprecated
+    // 回调数据挂在实例上，不声明的话 PHP 8.2+ 把它算成动态属性，每次请求都报一条 deprecated
     public $headerCallbackData = null;
 
     private $cookies = [];
     private $headers = [];
     private $options = [];
-    
+
     public function __construct($base_url = null) {
         if (!extension_loaded('curl')) throw new \ErrorException('cURL library is not loaded');
         $this->curl = curl_init();
         $this->initialize($base_url);
     }
-    
+
     public function call() {
         $args = func_get_args();
         $function = array_shift($args);
@@ -58,14 +58,14 @@ class Curl {
             call_user_func_array($function, $args);
         }
     }
-    
+
     public function get($url) {
         $this->setUrl($url);
         $this->setOpt(CURLOPT_CUSTOMREQUEST, 'GET');
         $this->setOpt(CURLOPT_HTTPGET, true);
         return $this->exec();
     }
-    
+
     public function post($url, $data = '') {
         $this->setUrl($url);
         $this->setOpt(CURLOPT_POST, true);
@@ -73,7 +73,7 @@ class Curl {
         $this->setOpt(CURLOPT_CUSTOMREQUEST, 'POST');
         return $this->exec();
     }
-    
+
     public function exec($ch = null) {
         $this->attempts += 1;
 
@@ -111,7 +111,7 @@ class Curl {
                 $this->httpErrorMessage = $this->responseHeaders['Status-Line'];
             }
         } $this->errorMessage = $this->curlError ? $this->curlErrorMessage : $this->httpErrorMessage;
-        
+
         unset($this->effectiveUrl);
         unset($this->totalTime);
 
@@ -120,51 +120,51 @@ class Curl {
         $this->execDone();
         return $this->response;
     }
-    
+
     public function execDone() {
         if ($this->error) $this->call($this->errorCallback);
         else $this->call($this->successCallback);
         $this->call($this->completeCallback);
     }
-    
+
     public function close() {
         if (is_resource($this->curl) || $this->curl instanceof \CurlHandle) curl_close($this->curl);
         $this->curl = null;
         $this->options = null;
     }
-    
+
     public function getOpt($option) { return isset($this->options[$option]) ? $this->options[$option] : null; }
-    
+
     public function getInfo($opt = null) {
         $args[] = $this->curl;
         if (func_num_args()) $args[] = $opt;
         return call_user_func_array('curl_getinfo', $args);
     }
-    
+
     public function setUrl($url) {
-        $this->url = $url; 
+        $this->url = $url;
         $this->setOpt(CURLOPT_URL, $this->url);
     }
-    
+
     public function setOpt($option, $value) {
         $required_options = [CURLOPT_RETURNTRANSFER => 'CURLOPT_RETURNTRANSFER'];
         if (in_array($option, array_keys($required_options), true) && $value !== true) trigger_error($required_options[$option] . ' is a required option', E_USER_WARNING);
         if ($success = curl_setopt($this->curl, $option, $value)) $this->options[$option] = $value;
         return $success;
     }
-    
+
     public function setHeader($key, $value) {
         $this->headers[$key] = $value;
         foreach ($this->headers as $key => $value) $headers[] = $key . ': ' . $value;
         $this->setOpt(CURLOPT_HTTPHEADER, $headers);
     }
-    
+
     public function setTimeout($seconds) { $this->setOpt(CURLOPT_TIMEOUT, $seconds); }
     public function setUserAgent($user_agent) { $this->setOpt(CURLOPT_USERAGENT, $user_agent); }
     public function setConnectTimeout($seconds) { $this->setOpt(CURLOPT_CONNECTTIMEOUT, $seconds); }
     public function setMaximumRedirects($maximum_redirects) { $this->setOpt(CURLOPT_MAXREDIRS, $maximum_redirects); }
     public function setFollowLocation($follow_location = true) { $this->setOpt(CURLOPT_FOLLOWLOCATION, $follow_location); }
-    
+
     public function attemptRetry() {
         $attempt_retry = false;
         if ($this->error) {
@@ -175,14 +175,14 @@ class Curl {
             }
         } return $attempt_retry;
     }
-    
+
     public function unsetHeader($key) {
         unset($this->headers[$key]); $headers = [];
         foreach ($this->headers as $key => $value) {
             $headers[] = $key . ': ' . $value;
         } $this->setOpt(CURLOPT_HTTPHEADER, $headers);
     }
-    
+
     private function initialize() {
         $this->headers = [];
         $this->id = uniqid('', true);
@@ -194,7 +194,7 @@ class Curl {
         $this->setOpt(CURLOPT_RETURNTRANSFER, true);
         $this->setOpt(CURLOPT_HEADERFUNCTION, $this->createHeaderCallback($header_callback_data));
     }
-    
+
     private function parseHeaders($raw_headers) {
         $http_headers = [];
         $raw_headers = preg_split('/\r\n/', (string)$raw_headers, -1, PREG_SPLIT_NO_EMPTY);
@@ -203,14 +203,12 @@ class Curl {
             if (strpos($raw_headers[$i], ':') !== false) {
                 list($key, $value) = explode(':', $raw_headers[$i], 2);
                 $key = trim($key); $value = trim($value);
-                // Use isset() as array_key_exists() and ArrayAccess are not compatible.
-                if (isset($http_headers[$key]))
-                    $http_headers[$key] .= ',' . $value;
-                else $http_headers[$key] = $value;
+                // 用 isset() 而不是 array_key_exists()：后者跟 ArrayAccess 不兼容
+                if (isset($http_headers[$key])) $http_headers[$key] .= ',' . $value; else $http_headers[$key] = $value;
             }
         } return [isset($raw_headers['0']) ? $raw_headers['0'] : '', $http_headers];
     }
-    
+
     private function parseRequestHeaders($raw_headers) {
         $first_line = $headers = $request_headers = [];
         list($first_line, $headers) = $this->parseHeaders($raw_headers);
@@ -218,7 +216,7 @@ class Curl {
         foreach ($headers as $key => $value) $request_headers[$key] = $value;
         return $request_headers;
     }
-    
+
     private function parseResponseHeaders($raw_response_headers) {
         $response_header = '';
         $first_line = $headers = $response_headers = [];
@@ -234,7 +232,7 @@ class Curl {
         foreach ($headers as $key => $value) $response_headers[$key] = $value;
         return $response_headers;
     }
-    
+
     private function createHeaderCallback($header_callback_data) {
         return function ($ch, $header) use ($header_callback_data) {
             if (preg_match('/^Set-Cookie:\s*([^=]+)=([^;]+)/mi', $header, $cookie) === 1) $header_callback_data->responseCookies[$cookie[1]] = trim($cookie[2], " \n\r\t\0\x0B");

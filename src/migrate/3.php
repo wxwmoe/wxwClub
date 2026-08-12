@@ -7,10 +7,9 @@
 function Club_Migrate_3() {
     global $db;
     // 定义不对就改过来：默认值是硬要求，Club_Endpoint_Upsert 的 insert 分支根本不写这一列，新排上的 endpoint 全靠它落成 0
-    if (($info = Club_Schema_Column('endpoints', 'idle_since')) === false)
-        Club_Migrate_Exec('endpoints add idle_since', 'alter table `endpoints` add `idle_since` int unsigned not null default 0 after `next_at`');
-    elseif ($info['type'] !== 'int unsigned' || $info['nullable']
-        || (string)$info['default'] !== '0')
+    if (($info = Club_Schema_Column('endpoints', 'idle_since')) === false) Club_Migrate_Exec('endpoints add idle_since',
+        'alter table `endpoints` add `idle_since` int unsigned not null default 0 after `next_at`');
+    elseif ($info['type'] !== 'int unsigned' || $info['nullable'] || (string)$info['default'] !== '0')
         Club_Migrate_Exec('endpoints modify idle_since', 'alter table `endpoints` modify `idle_since` int unsigned not null default 0');
     // 存量的空行一条起点都没有，不回填就永远过不了宽限期，回收从此不工作。条件本身幂等：中途崩了重跑只会命中还没补过的那些
     Club_Migrate_Step('endpoints backfill idle_since', function () use ($db) {
