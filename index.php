@@ -1,5 +1,5 @@
 <?php
-require(__DIR__.'/src/bootstrap.php');
-require_once(APP_ROOT.'/src/controller.php');
+require(__DIR__.'/app/bootstrap.php');
+require_once(APP_ROOT.'/app/controller.php');
 
 controller();

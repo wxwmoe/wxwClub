@@ -1,7 +1,7 @@
 <?php
 
 /* 调度状态真正落到库里那一半：租约的互斥和 fencing、投递结果写成什么行、黑名单的进出、对账和回收。
- * 决策逻辑本身在 tests/pure.php 里表驱动地过一遍，这里只问一件事 —— 决策照原样写进去了没有，以及并发下的那几条边界（陈旧 token、领取互斥）拦不拦得住。 */
+ * 决策逻辑本身在 tests/groups/pure.php 里表驱动地过一遍，这里只问一件事 —— 决策照原样写进去了没有，以及并发下的那几条边界（陈旧 token、领取互斥）拦不拦得住。 */
 
 $t_url = 'https://remote.example/inbox';
 
@@ -202,7 +202,7 @@ t_is(t_state_endpoint($t_url)['next_at'], null, 'idling also clears the stale sc
 
 t_group('state / maintenance leader');
 
-require_once(APP_ROOT.'/src/worker.php');
+require_once(APP_ROOT.'/app/worker.php');
 
 // 另一个 master 拿着锁的样子：另开一条连接占住它，落选的这个必须一个维护单元都不做
 t_state_reset();

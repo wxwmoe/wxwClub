@@ -1,8 +1,8 @@
-<?php require_once(APP_ROOT.'/src/migrate.php');
+<?php require_once(APP_ROOT.'/app/database/migrate.php');
 
 /* 结构合并。这一组要回答的就是 AGENTS.md 里那四问：全新导入、旧版本升上来、中断之后重跑、第二次是不是 no-op。
  *
- * 最要紧的是第一条和第二条的交叉：tools/wxwclub.sql 是全新安装唯一的入口，它不跑合并也不跑 validator，只靠肉眼跟迁移终态对。
+ * 最要紧的是第一条和第二条的交叉：app/database/schema.sql 是全新安装唯一的入口，它不跑合并也不跑 validator，只靠肉眼跟迁移终态对。
  * 这里把两条路各走一遍再逐列逐索引地比 —— 快照漂了的话，漂出来的差别只有全新安装的站会踩到，而那种站恰恰是最没人盯着的。 */
 
 // information_schema 里的完整结构。列顺序不进比较（AGENTS.md 允许它不同，每条 INSERT 都写了列名），外键名也不进（各历史版本叫法不一样，按列反查）
@@ -60,7 +60,7 @@ function t_schema_upto($version) {
     ob_start();
     Club_Migrate_Ensure_Meta();
     for ($step = 1; $step <= $version; $step++) {
-        require_once(APP_ROOT.'/src/migrate/'.$step.'.php');
+        require_once(APP_ROOT.'/app/database/steps/'.$step.'.php');
         call_user_func('Club_Migrate_'.$step);
         call_user_func('Club_Migrate_'.$step.'_Validate');
         Club_DB_Version($step);
@@ -78,19 +78,19 @@ t_group('schema / migration steps');
 
 // 版本号跟步骤文件对不上是部署问题，装了一半的代码继续跑更危险
 for ($version = 1; $version <= DB_VERSION; $version++) {
-    $file = APP_ROOT.'/src/migrate/'.$version.'.php';
-    if (!t_ok(is_file($file), 'src/migrate/'.$version.'.php exists')) continue;
+    $file = APP_ROOT.'/app/database/steps/'.$version.'.php';
+    if (!t_ok(is_file($file), 'app/database/steps/'.$version.'.php exists')) continue;
     require_once($file);
     t_ok(function_exists('Club_Migrate_'.$version), 'Club_Migrate_'.$version.'() is callable');
     t_ok(function_exists('Club_Migrate_'.$version.'_Validate'), 'Club_Migrate_'.$version.'_Validate() asserts the end state');
 }
-t_ok(!is_file(APP_ROOT.'/src/migrate/'.(DB_VERSION + 1).'.php'), 'no step file above DB_VERSION');
+t_ok(!is_file(APP_ROOT.'/app/database/steps/'.(DB_VERSION + 1).'.php'), 'no step file above DB_VERSION');
 
 t_group('schema / fresh install');
 
 t_db_import();
 // 装完就该是终态。meta.schema 忘了改的话，每个全新安装第一次启动都会触发一次空合并
-t_is(Club_DB_Version(), DB_VERSION, 'tools/wxwclub.sql installs at DB_VERSION');
+t_is(Club_DB_Version(), DB_VERSION, 'app/database/schema.sql installs at DB_VERSION');
 $snapshot = t_schema_dump();
 list($version, $error) = t_schema_merge();
 t_is($version, DB_VERSION, 'a fresh install needs no merge'.$error);
@@ -99,7 +99,7 @@ t_is(t_schema_diff($snapshot, t_schema_dump()), [], 'a fresh install is left unt
 t_group('schema / upgrade from a legacy database');
 
 // 每份夹具都是某次历史提交里 tools/wxwclub.sql 的原样拷贝。自动合并是后来才有的，那之前线上结构就以提交里的快照为准，
-// 所以夹具不是照着 src/migrate/ 反推出来的合成结构，而是那一天真实装出来的库。按文件名从旧到新排，后面几组接着最新那份跑
+// 所以夹具不是照着 app/database/steps/ 反推出来的合成结构，而是那一天真实装出来的库。按文件名从旧到新排，后面几组接着最新那份跑
 $fixtures = glob(TEST_ROOT.'/fixtures/schema/*.sql');
 foreach ($fixtures as $fixture) {
     $from = basename($fixture, '.sql');
@@ -107,8 +107,8 @@ foreach ($fixtures as $fixture) {
     t_is(Club_DB_Version(), 0, $from.': a database without meta reads as version 0');
     list($version, $error) = t_schema_merge();
     t_is($version, DB_VERSION, $from.': merges all the way up'.$error);
-    // 这一条就是快照漂移的闸门。差别出现在这里，说明改结构时漏了 tools/wxwclub.sql 那一半
-    t_is(t_schema_diff($snapshot, t_schema_dump()), [], $from.': ends at exactly what tools/wxwclub.sql installs');
+    // 这一条就是快照漂移的闸门。差别出现在这里，说明改结构时漏了 app/database/schema.sql 那一半
+    t_is(t_schema_diff($snapshot, t_schema_dump()), [], $from.': ends at exactly what app/database/schema.sql installs');
     // 回填真的搬过东西，不是在空表上跑了一遍
     t_ok((int)t_one('select `timestamp` from `clubs` where `name` = \'test\'') > 0, $from.': the club survives with an epoch timestamp');
     t_is(t_one('select `clubs` from `activities` where `id` = 1'), '["test"]', $from.': the activity keeps its club');

@@ -1,4 +1,4 @@
-<?php require_once(__DIR__.'/function.php');
+<?php
 
 function controller() {
     global $db, $ver, $base, $config, $public_streams;

@@ -1,8 +1,14 @@
 #!/usr/bin/env php
 <?php if (PHP_SAPI != 'cli') exit("The program runs only in CLI mode!\n");
 
-require(__DIR__.'/src/bootstrap.php');
-require_once(APP_ROOT.'/src/worker.php');
+if (isset($argv[1]) && $argv[1] === 'test') {
+    array_splice($argv, 1, 1);
+    require(__DIR__.'/tests/suite.php');
+    exit;
+}
+
+require(__DIR__.'/app/bootstrap.php');
+require_once(APP_ROOT.'/app/worker.php');
 
 $stop = false;
 declare(ticks = 1);
@@ -57,7 +63,7 @@ function worker_loop($type) {
 }
 
 if (!isset($argv[1])) {
-    fwrite(STDERR, "Usage: php cli.php worker|migrate\n");
+    fwrite(STDERR, "Usage: php cli.php worker|migrate|test [group...]\n");
     exit(1);
 }
 
@@ -71,7 +77,7 @@ switch ($argv[1]) {
             exit(1);
         }
         if ($version !== DB_VERSION) {
-            require_once(APP_ROOT.'/src/migrate.php');
+            require_once(APP_ROOT.'/app/database/migrate.php');
             // 合并中途崩了没有事务能回滚，但每一步都会先问一次 information_schema，重启后接着跑不会把已经合并好的部分改坏。这里只负责把原因记下来
             try { $version = Club_Migrate_Run(); }
             catch (Throwable $e) {
@@ -150,7 +156,7 @@ switch ($argv[1]) {
         Club_Log_Console('info', 'master stopped', ['pid' => getmypid()]); break;
     // 手动合并。worker 启动时会自己判断并合并，这条只是给不方便重启容器的场合留的口子
     case 'migrate':
-        require_once(APP_ROOT.'/src/migrate.php');
+        require_once(APP_ROOT.'/app/database/migrate.php');
         try { $version = Club_Migrate_Run(); }
         catch (Throwable $e) {
             Club_Log_Console('error', 'database merge failed', ['error' => $e->getMessage(), 'pid' => getmypid()]);

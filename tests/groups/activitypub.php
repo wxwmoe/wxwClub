@@ -40,7 +40,7 @@ function t_ap_activity($fixture) {
     return count($jsonld) === 1 && isset($jsonld[0]) && is_array($jsonld[0]) ? $jsonld[0] : $jsonld;
 }
 
-// 路径决定这是群组 inbox 还是 shared inbox，跟 src/controller.php 的路由同形。null 就是 shared inbox
+// 路径决定这是群组 inbox 还是 shared inbox，跟 app/controller.php 的路由同形。null 就是 shared inbox
 function t_ap_club($fixture) {
     return preg_match('#^/club/([^/]+)/inbox$#', $fixture['request']['path'], $m) ? $m[1] : null;
 }
@@ -78,7 +78,7 @@ function t_ap_run() {
 }
 
 function t_ap_spawn($software, $name) {
-    $command = escapeshellarg(PHP_BINARY).' '.escapeshellarg(TEST_ROOT.'/run.php').' replay '.escapeshellarg($software).' '.escapeshellarg($name);
+    $command = escapeshellarg(PHP_BINARY).' '.escapeshellarg(APP_ROOT.'/cli.php').' test replay '.escapeshellarg($software).' '.escapeshellarg($name);
     $process = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
     if (!is_resource($process)) return ['', -1];
     $output = stream_get_contents($pipes[1]).stream_get_contents($pipes[2]);

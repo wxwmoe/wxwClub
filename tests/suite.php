@@ -1,12 +1,11 @@
-#!/usr/bin/env php
 <?php if (PHP_SAPI != 'cli') exit("The program runs only in CLI mode!\n");
 
-/* 测试的唯一命令入口。没有框架也没有 composer，跟 src/ 一样只用 PHP 自带的东西：一个断言函数加一个计数器，失败打印期望和实际，退出码非零。
+/* `php cli.php test` 背后的测试执行器。没有框架也没有 composer，跟 app/ 一样只用 PHP 自带的东西：一个断言函数加一个计数器，失败打印期望和实际，退出码非零。
  * 要验的东西全是「给定输入，函数返回什么」和「给定库状态，跑完之后库里是什么」，两句 if 就够，引入 PHPUnit 只是多一个 vendor 目录和一套 composer 流程。
  *
- *   php tests/run.php                  全部，需要 MySQL
- *   php tests/run.php pure             只跑不碰数据库的那些，7.3 到 8.4 都能跑
- *   php tests/run.php state schema     指定若干组
+ *   php cli.php test                   全部，需要 MySQL
+ *   php cli.php test pure              只跑不碰数据库的那些，7.3 到 8.4 都能跑
+ *   php cli.php test state schema      指定若干组
  *
  * 数据库从环境变量取（MYSQL_HOST / MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD），默认 127.0.0.1 上的 wxwclub_test。
  * 那个库会被反复清空重建，绝不能指向生产库；库名里不带 test 的话下面会直接拒绝跑。
@@ -38,10 +37,10 @@ $config = [
     'notice' => ['enabled' => true, 'limit' => 20, 'retention' => 30]
 ];
 
-require_once(APP_ROOT.'/src/function.php');
+require_once(APP_ROOT.'/app/functions.php');
 date_default_timezone_set('UTC');
 
-// src/bootstrap.php 里定义的全局，这里得照抄一遍：入站分派靠 $base 认出「投给本站哪个群组」，靠 $public_streams 认出「这是公开投稿」，
+// 生产 bootstrap 里定义的全局，这里得照抄一遍：入站分派靠 $base 认出「投给本站哪个群组」，靠 $public_streams 认出「这是公开投稿」，
 // 两个都是无遮拦读的，缺了不会报错，只会让每一条 Create 静默地不匹配任何群组
 $ver = '0.0.6'; $base = 'https://'.$config['base'];
 $public_streams = 'https://www.w3.org/ns/activitystreams#Public';
@@ -100,11 +99,11 @@ function t_db_reset() {
     $db->exec('set foreign_key_checks = 1');
 }
 
-// 按 tools/wxwclub.sql 装一份当前版本的库。按分号切句对这份文件够用：里面没有存储过程，字符串里也没有分号
+// 按 app/database/schema.sql 装一份当前版本的库。按分号切句对这份文件够用：里面没有存储过程，字符串里也没有分号
 function t_db_import() {
     global $db;
     t_db_reset();
-    foreach (explode(';', file_get_contents(APP_ROOT.'/tools/wxwclub.sql')) as $statement) if (trim(preg_replace('/^\s*--.*$/m', '', $statement)) !== '') $db->exec($statement);
+    foreach (explode(';', file_get_contents(APP_ROOT.'/app/database/schema.sql')) as $statement) if (trim(preg_replace('/^\s*--.*$/m', '', $statement)) !== '') $db->exec($statement);
 }
 
 function t_row($sql, $params = []) {
@@ -128,9 +127,9 @@ function t_exec($sql, $params = []) {
 $groups = ['pure' => false, 'state' => true, 'schema' => true, 'activitypub' => true];
 $argv[1] = isset($argv[1]) ? $argv[1] : 'all';
 
-// 每条 fixture 都在自己的进程里重放，这是那个子进程的入口，父进程在 tests/activitypub.php 里
+// 每条 fixture 都在自己的进程里重放，这是那个子进程的入口，父进程在 tests/groups/activitypub.php 里
 if ($argv[1] === 'replay') {
-    require(TEST_ROOT.'/activitypub.php');
+    require(TEST_ROOT.'/groups/activitypub.php');
     t_db();
     t_ap_replay($argv[2], $argv[3]);
     echo '#counts ', $t_pass, ' ', $t_fail, "\n";
@@ -142,7 +141,7 @@ foreach ($run as $name) if (!isset($groups[$name])) exit('Unknown group: '.$name
 
 // 需要库的组先连一次。连不上就是连不上，不能悄悄跳过 —— CI 里那等于测试全绿但一条都没跑
 foreach ($run as $name) if ($groups[$name]) { t_db(); break; }
-foreach ($run as $name) require(TEST_ROOT.'/'.$name.'.php');
+foreach ($run as $name) require(TEST_ROOT.'/groups/'.$name.'.php');
 if (in_array('activitypub', $run, true)) t_ap_run();
 
 echo "\n", $t_fail ? 'FAILED' : 'ok', ': ', $t_pass, ' passed, ', $t_fail, " failed\n";

@@ -1,6 +1,6 @@
-<?php require_once(__DIR__.'/function.php');
+<?php
 
-/* 数据库合并的执行框架。步骤本身在 src/migrate/<版本号>.php 里，一个文件一个版本，函数名固定为 Club_Migrate_<版本号>()。
+/* 数据库合并的执行框架。步骤本身在 app/database/steps/<版本号>.php 里，一个文件一个版本，函数名固定为 Club_Migrate_<版本号>()。
  * 加一次升级就是加一个文件加 DB_VERSION 加一，老库照样能从任何一个历史版本一路跑上来。
  *
  * 只有 worker 会走到这里，而且是在没有任何 web 请求和投递进程的时候：web 见到版本落后就整个入口挡住，worker 见到落后就先合并、合并完直接退出，由容器重启带起队列进程。
@@ -25,7 +25,7 @@ function Club_Migrate_Run() {
         $from = Club_DB_Version();
         Club_Migrate_Reject_Newer($from);
         for ($version = $from + 1; $version <= DB_VERSION; $version++) {
-            $file = APP_ROOT.'/src/migrate/'.$version.'.php';
+            $file = APP_ROOT.'/app/database/steps/'.$version.'.php';
             $step = 'Club_Migrate_'.$version;
             if (!is_file($file)) {
                 // 版本号和步骤文件对不上是部署问题，装了一半的代码继续跑更危险

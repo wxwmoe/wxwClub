@@ -4,32 +4,32 @@ For anyone — human or agent — working in this repository. The design documen
 
 ## What this is
 
-wxwClub: an ActivityPub-compatible group service. Users follow a group actor and tag it in a post; the group relays that post to every follower. PHP + MySQL, no composer, no vendor directory — everything it depends on lives under `src/`.
+wxwClub: an ActivityPub-compatible group service. Users follow a group actor and tag it in a post; the group relays that post to every follower. PHP + MySQL, no composer, no vendor directory — everything it depends on lives under `app/`.
 
-Two entry points share `src/bootstrap.php` (loads config, opens the DB connection, installs the exception handler). The schema check is *not* shared — each side handles a mismatch its own way:
+Two entry points share `app/bootstrap.php` (loads config, opens the DB connection, installs the exception handler). The schema check is *not* shared — each side handles a mismatch its own way:
 
-- `index.php` → `src/controller.php`: the web side — WebFinger, inbox, outbox, profile pages. `bootstrap.php` blocks the entire entry with 503 + `Retry-After` when `meta.schema` is not `DB_VERSION`; that gate is web-only.
-- `cli.php`: two subcommands. `worker` checks the version itself, and when the database is behind it merges and exits so the container restart brings up the queue processes; `migrate` runs the same merge by hand.
+- `index.php` → `app/controller.php`: the web side — WebFinger, inbox, outbox, profile pages. `bootstrap.php` blocks the entire entry with 503 + `Retry-After` when `meta.schema` is not `DB_VERSION`; that gate is web-only.
+- `cli.php`: three subcommands. `worker` checks the version itself, and when the database is behind it merges and exits so the container restart brings up the queue processes; `migrate` runs the same merge by hand; `test` enters the test suite before production bootstrap.
 
 ## Code map
 
 | Path | Contents |
 | --- | --- |
-| `src/function.php` | All business logic, a single 170 KB file, partitioned by function-name prefix |
-| `src/worker.php` | The three queue loops: `worker_delivery` / `worker_probe` / `worker_maintain` |
-| `src/controller.php` | Web routing and HTTP entry |
-| `src/migrate.php` + `src/migrate/N.php` | Merge framework and the per-version steps |
-| `src/template/`, `src/i18n/` | Page templates and localized strings |
-| `tools/wxwclub.sql` | Fresh-install snapshot; must match the merge end state column for column |
-| `tests/` | The whole test layer; `tests/run.php` is the only entry point |
+| `app/functions.php` | All business logic, a single 170 KB file, partitioned by function-name prefix |
+| `app/worker.php` | The three queue loops: `worker_delivery` / `worker_probe` / `worker_maintain` |
+| `app/controller.php` | Web routing and HTTP entry |
+| `app/database/migrate.php` + `app/database/steps/N.php` | Merge framework and the per-version steps |
+| `app/template/`, `app/template/i18n/` | Page templates and localized strings |
+| `app/database/schema.sql` | Fresh-install snapshot; must match the merge end state column for column |
+| `tests/` | The whole test layer; `php cli.php test` is the only entry point and `tests/suite.php` is its internal runner |
 
 Naming is the module boundary: `Club_<domain>_<action>()`, where the domain prefix *is* the partition (`Endpoint`, `Queue`, `Blacklist`, `Resolver`, `Log`, `Stat`, `Notice`, `Limit`, `Config`, `DB`, `Migrate`). `ActivityPub_*` is the protocol side. When adding a function, find the matching prefix rather than starting a new scheme.
 
-**A state decision is a pure function; writing it down is not.** `Club_Endpoint_Decide`, `Club_Blacklist_Decide`, `Club_Endpoint_Drifted`, `Club_Endpoint_Prune_Decide` and `ActivityPub_Push_Result` take the state already read under the row lock and return the state to write; the surrounding `Club_Endpoint_Complete` / `Club_Blacklist_Result` / `Club_Reconcile_Endpoint` / `Club_Endpoint_Prune` keep the locking, the transaction and the logging. That is the whole seam — no classes, no repository, no injection. Two of them exist because the same predicate was needed by both a lockless pre-filter and the re-check inside the transaction; those two copies are exactly the kind that drift apart, and the drift only shows up as rows nothing ever repairs. Randomness stays injectable through the trailing `$jitter` argument: `null` is the real random spread, a fixed value is what the tests pass. When you change a threshold, change it in the decision function and add the row to the table in `tests/pure.php`.
+**A state decision is a pure function; writing it down is not.** `Club_Endpoint_Decide`, `Club_Blacklist_Decide`, `Club_Endpoint_Drifted`, `Club_Endpoint_Prune_Decide` and `ActivityPub_Push_Result` take the state already read under the row lock and return the state to write; the surrounding `Club_Endpoint_Complete` / `Club_Blacklist_Result` / `Club_Reconcile_Endpoint` / `Club_Endpoint_Prune` keep the locking, the transaction and the logging. That is the whole seam — no classes, no repository, no injection. Two of them exist because the same predicate was needed by both a lockless pre-filter and the re-check inside the transaction; those two copies are exactly the kind that drift apart, and the drift only shows up as rows nothing ever repairs. Randomness stays injectable through the trailing `$jitter` argument: `null` is the real random spread, a fixed value is what the tests pass. When you change a threshold, change it in the decision function and add the row to the table in `tests/groups/pure.php`.
 
 ## Running and verifying
 
-**There is no test framework and no composer here** — but there are tests. `tests/run.php` is the only entry point; it is plain PHP with an assert function and a counter, and nothing in `tests/` may grow a dependency. CI runs `php -l` over every `.php` file plus `php tests/run.php pure` across a 7.3 / 7.4 / 8.1 / 8.3 / 8.4 matrix, and the full suite against MySQL 5.7 and 8.0 (`.github/workflows/lint.yml`).
+**There is no test framework and no composer here** — but there are tests. `php cli.php test` is the only entry point; `tests/suite.php` is its internal runner, plain PHP with an assert function and a counter, and nothing in `tests/` may grow a dependency. CI runs `php -l` over every `.php` file plus `php cli.php test pure` across a 7.3 / 7.4 / 8.1 / 8.3 / 8.4 matrix, and the full suite against MySQL 5.7 and 8.0 (`.github/workflows/lint.yml`).
 
 | Group | Needs MySQL | What it holds |
 | --- | --- | --- |
@@ -40,14 +40,14 @@ Naming is the module boundary: `Club_<domain>_<action>()`, where the domain pref
 
 - **The syntax floor is PHP 7.3.** No arrow functions, `??=`, or typed properties (7.4); no `match`, named arguments, `?->`, or constructor promotion (8.0); no enums or `readonly` (8.1). This holds for `tests/` too — the `pure` group runs on the whole matrix.
 - `php -l` checks syntax, not whether a function exists. `str_contains`, `array_is_list` and friends will pass lint and blow up at runtime on old PHP. Guard with `function_exists` or write around them.
-- `config.php` is not in the repo (`.gitignore`) and `tests/run.php` builds its own, so the `pure` group runs anywhere. The other three need a throwaway MySQL (`MYSQL_HOST` / `MYSQL_DATABASE` / `MYSQL_USER` / `MYSQL_PASSWORD`, default `wxwclub_test` on `127.0.0.1`) and they drop every table on the way in — the runner refuses a database whose name does not contain `test`. Without one, say plainly which groups were not run; don't imply you ran them.
+- `config.php` is not in the repo (`.gitignore`) and `tests/suite.php` builds its own, so the `pure` group runs anywhere. The other three need a throwaway MySQL (`MYSQL_HOST` / `MYSQL_DATABASE` / `MYSQL_USER` / `MYSQL_PASSWORD`, default `wxwclub_test` on `127.0.0.1`) and they drop every table on the way in — the runner refuses a database whose name does not contain `test`. Without one, say plainly which groups were not run; don't imply you ran them.
 - A new config key means updating `config.example.php`, adding it to `Club_Config_Check`, *and* an explicit reminder to sync the server's `config.php` by hand. The check's two tiers are the same distinction as before: fatal is a key read unguarded somewhere (`config.base`, `config.mysql.*`, `config.node.timezone`, `config.club.suspended-names`), which blocks startup on both sides; warning is a key with a fallback, which is reported once on the CLI only — a per-request warning on the web side would just flood the log. Say which of the two the new key is.
-- A schema change is verified by running it, not by reading it, and `php tests/run.php schema` is that run: fresh import of `tools/wxwclub.sql`, an upgrade from each old database in `tests/fixtures/schema/`, a restart at every intermediate version, and a second run that must be a no-op. Those fixtures are byte copies of `tools/wxwclub.sql` as it stood at the commit they are named after, plus a few rows. Automatic merging came later, so before it the snapshot in a commit *is* what was installed — never reconstruct an old structure from what `src/migrate/` appears to expect, and add a version by copying its snapshot out of git. It then compares the two end states column by column, index by index, foreign key by foreign key — that comparison is the only thing standing between a snapshot edit you forgot and a fresh install that boots into a structure nobody tests. Without a database to run it on, say plainly it was not run.
+- A schema change is verified by running it, not by reading it, and `php cli.php test schema` is that run: fresh import of `app/database/schema.sql`, an upgrade from each old database in `tests/fixtures/schema/`, a restart at every intermediate version, and a second run that must be a no-op. Those fixtures are byte copies of the snapshot as it stood at the commit they are named after, plus a few rows. Automatic merging came later, so before it the snapshot in a commit *is* what was installed — never reconstruct an old structure from what `app/database/steps/` appears to expect, and add a version by copying its snapshot out of git. It then compares the two end states column by column, index by index, foreign key by foreign key — that comparison is the only thing standing between a snapshot edit you forgot and a fresh install that boots into a structure nobody tests. Without a database to run it on, say plainly it was not run.
 - A protocol change means replaying `tests/fixtures/activitypub/`. Adding a case is adding one file: it returns the raw bytes plus the semantic result they must produce, and the runner discovers it. Keep the payload as the remote actually sent it — only the domains and handles are rewritten — because the shape is the thing under test, and an unknown key in `expect` is a failure, not a no-op.
 
 ## Data model
 
-12 tables (`tools/wxwclub.sql`):
+12 tables (`app/database/schema.sql`):
 
 - Local state: `clubs`, `users`, `activities`, `followers`, `announces`
 - Delivery scheduling: `tasks`, `queues`, `endpoints`, `dns`, `blacklist`
@@ -107,14 +107,14 @@ Levels are `silent` / `error` / `warning` / `info` / `debug` (`config.node.log-l
 
 ## Database schema changes
 
-The version constant is `DB_VERSION` at the top of `src/function.php`; the steps live in `src/migrate/N.php`, one file per version, kept forever — a database at any historical version must be able to merge all the way up. There is no CHANGELOG.md; do not create one.
+The version constant is `DB_VERSION` at the top of `app/functions.php`; the steps live in `app/database/steps/N.php`, one file per version, kept forever — a database at any historical version must be able to merge all the way up. There is no CHANGELOG.md; do not create one.
 
-- **A migration that has already taken effect on a server must never be edited.** Once `meta.schema` equals that version, the file is never executed again (`if ($from === DB_VERSION) return $from;` in `src/migrate.php`), so anything added to it is silently a no-op. Open a new version instead.
+- **A migration that has already taken effect on a server must never be edited.** Once `meta.schema` equals that version, the file is never executed again (`if ($from === DB_VERSION) return $from;` in `app/database/migrate.php`), so anything added to it is silently a no-op. Open a new version instead.
 - The criterion is always *what the database looks like right now*, never *where the last run stopped*. Structural steps ask `information_schema`; a data backfill has nothing there to ask, so it carries an idempotent predicate, a work table, or a checkpoint instead. A crashed merge must be resumable on restart and must not corrupt the parts already merged.
 - High-cardinality data moves page through a keyset cursor. Never `fetchAll()` a full `DISTINCT` result into PHP.
 - Each version's validator asserts the complete end state that version is responsible for, column by column: types, collations, indexes, control rows, and that the work tables are gone. It runs once, inside the merge — `php cli.php migrate` returns before any validator when the version already matches, so it is not a re-runnable health check.
-- Checkpoints live in `meta` as `migration.N.*` and are cleared by version N itself; their lifetime never outlasts that version. Version 2 is the historical exception: it had already taken effect on the server, so its state is dropped by `src/migrate/3.php` instead.
-- **A schema change must also update `tools/wxwclub.sql`**: both the `CREATE TABLE` and the trailing `meta.schema` row. Miss the latter and every fresh install triggers an empty merge on first boot. That file installs *at* the current version, so it never runs a merge and never runs a validator; what checks it is `php tests/run.php schema`, which merges the legacy fixture all the way up and diffs the result against a fresh import — types, collations, defaults, nullability, indexes, foreign keys. Column order is the one thing allowed to differ (every `INSERT` in the codebase names its columns) and foreign key names are compared by column, not by name. Run it before the commit; reading the two files side by side is not the same check.
+- Checkpoints live in `meta` as `migration.N.*` and are cleared by version N itself; their lifetime never outlasts that version. Version 2 is the historical exception: it had already taken effect on the server, so its state is dropped by `app/database/steps/3.php` instead.
+- **A schema change must also update `app/database/schema.sql`**: both the `CREATE TABLE` and the trailing `meta.schema` row. Miss the latter and every fresh install triggers an empty merge on first boot. That file installs *at* the current version, so it never runs a merge and never runs a validator; what checks it is `php cli.php test schema`, which merges the legacy fixture all the way up and diffs the result against a fresh import — types, collations, defaults, nullability, indexes, foreign keys. Column order is the one thing allowed to differ (every `INSERT` in the codebase names its columns) and foreign key names are compared by column, not by name. Run it before the commit; reading the two files side by side is not the same check.
 - **A database newer than the code is refused outright.** Old code never downgrades a schema and never runs a step backwards.
 
 **The upgrade is `git pull` plus a worker restart, and nothing else.** No snapshot, no stopping processes, no blocking the web by hand — the web answers 503 for as long as the schema does not match, the worker merges on start and exits, and `--restart always` brings the queues back up. That convenience is paid for in full *before* the commit, because the merge then runs unattended, on a live database, with nobody watching and nothing to roll back to:
@@ -122,7 +122,7 @@ The version constant is `DB_VERSION` at the top of `src/function.php`; the steps
 - **The merge's runtime is the site's downtime.** The web is 503 from the moment the code lands until the merge finishes. A step that rewrites a large table has to be worth the outage it costs.
 - **A migration that throws becomes a crash loop.** `cli.php` exits 1, the container restarts, the merge is retried, and the site stays at 503 until a human intervenes — the one thing this flow assumes nobody has to do. Anything that can fail must fail *before* it has changed the database.
 - **Neither the schema gate nor the migration named lock is a write lock.** Both stop new work from starting; neither stops what is already running.
-- Never re-import `tools/wxwclub.sql` over a live database, and never repair a failed upgrade by editing `meta.schema` by hand.
+- Never re-import `app/database/schema.sql` over a live database, and never repair a failed upgrade by editing `meta.schema` by hand.
 
 ## Protocol behavior
 

@@ -1,6 +1,6 @@
 <?php
 
-// 这份代码要求的数据库结构版本，对应 src/migrate/ 下最大的那个步骤文件。库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，入站活动会写进本地状态再报错，对端重放就是半处理
+// 这份代码要求的数据库结构版本，对应 app/database/steps/ 下最大的那个步骤文件。库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，入站活动会写进本地状态再报错，对端重放就是半处理
 define('DB_VERSION', 4);
 
 // 跳转自己跟：交给 curl 的话每一跳既过不了内网检查，签名也对不上新 host。跳数与 Mastodon 一致。
@@ -266,7 +266,7 @@ function ActivityPub_Verify_Fail($reason) {
     global $verify_reason; $verify_reason = $reason; return false;
 }
 
-// 把对端给的语言标记归一到 src/i18n/ 下支持的语言，认不出返回 false。
+// 把对端给的语言标记归一到 app/template/i18n/ 下支持的语言，认不出返回 false。
 // 文件名直接用 Mastodon 那套地区写法（它的 config/locales 和前端 locales 也是 zh-CN / zh-TW / zh-HK），这样内部 locale 就是对外发的标记，不用再转一道；script 写法留在下面当输入别名
 function Club_I18n_Match($lang) {
     static $map = [
@@ -298,7 +298,7 @@ function Club_I18n($key, $locale, $vars = []) {
     global $config; static $cache = [];
     foreach (array_unique([$locale, Club_I18n_Locale(null), 'en']) as $try) {
         if (!isset($cache[$try])) {
-            $file = APP_ROOT.'/src/i18n/'.$try.'.php';
+            $file = APP_ROOT.'/app/template/i18n/'.$try.'.php';
             $cache[$try] = is_file($file) ? require($file) : [];
         }
         if (isset($cache[$try][$key])) {
@@ -327,7 +327,7 @@ function Club_Config_Check() {
 
     if (!is_string($level = $config['node']['log-level'] ?? 'info') || !in_array(strtolower($level), ['silent', 'error', 'warning', 'info', 'debug'], true))
         $warn[] = 'config.node.log-level is not one of silent/error/warning/info/debug, falling back to info';
-    if (!Club_I18n_Match($config['node']['language'] ?? 'en')) $warn[] = 'config.node.language is not a locale under src/i18n/, falling back to en';
+    if (!Club_I18n_Match($config['node']['language'] ?? 'en')) $warn[] = 'config.node.language is not a locale under app/template/i18n/, falling back to en';
     // 模板和 actor 文档无遮拦地读这几项，缺了不影响队列，但对端拉到的是一份带空字段的 actor
     foreach (['node' => ['name', 'description'], 'default' => ['avatar', 'banner', 'summary', 'nickname', 'infoname']] as $section => $keys)
         foreach ($keys as $key) if (!isset($config[$section][$key])) $warn[] = 'config.'.$section.'.'.$key.' is missing, pages and the actor document read it unguarded';
@@ -1342,7 +1342,7 @@ function Club_Inbox_Process($club = null, $input = null) {
     $limit = 1024 * 1024;
     // Content-Length 可以缺失（分块传输）也可以撒谎，所以多读一个字节再复核一次，两处都拦住才算真的封顶
     $long = (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > $limit;
-    // 请求体正常在这里读。传进来的那条口子只有 tests/activitypub.php 的重放在用：CLI 下 php://input 读不出东西，而下面这一整段应答分类正是重放要验的
+    // 请求体正常在这里读。传进来的那条口子只有 tests/groups/activitypub.php 的重放在用：CLI 下 php://input 读不出东西，而下面这一整段应答分类正是重放要验的
     if (!isset($input)) $input = $long ? '' : file_get_contents('php://input', false, null, 0, $limit + 1);
     // 读不出来是本站这边的输入流故障，不是对端发了个空包。当成空正文的话下面会因为解不出 type 回一个终局 400，那条活动就再也不会重投了
     if ($input === false) {
@@ -2818,7 +2818,7 @@ function Club_Html_Url($url) {
 }
 
 function Club_Template($name, $vars = []) {
-    return require(APP_ROOT.'/src/template/'.$name.'.php');
+    return require(APP_ROOT.'/app/template/'.$name.'.php');
 }
 
 function Club_Json_Encode($data) {

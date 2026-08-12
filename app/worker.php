@@ -1,4 +1,4 @@
-<?php require_once(__DIR__.'/function.php');
+<?php
 
 // 三种队列各跑各的。维护要 glob 整个 logs/、还要按游标扫表，是全站一份的活，每个进程各跑一遍就是把同样的事做 N 遍；
 // 而投递和探活都会在系统 resolver 和 curl 上一卡十几秒，跟维护混在一起的话，持续的 backlog 会让维护永远轮不上。所以维护队列绝不碰 resolver、curl、endpoint 投递和黑名单探活

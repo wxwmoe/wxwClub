@@ -42,7 +42,7 @@ A simple social groups compatible with ActivityPub.
 
 ### 安装步骤
 1. 编辑 `config.php` 参数
-2. 导入 `tools/wxwclub.sql` 数据表
+2. 导入 `app/database/schema.sql` 数据表
 3. 重写请求至 `index.php`，例如 Nginx：
 ```
     location / {

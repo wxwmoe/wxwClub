@@ -43,7 +43,7 @@
         'timezone' => 'Asia/Shanghai',
         // 管理信息，name 写成 @用户@实例 首页才出得了链接
         'maintainer' => ['name' => '@admin@example.com', 'email' => 'support@example.com'],
-        // 预设语言，识别不出对方语言时使用（对应 src/i18n/ 下的文件名）
+        // 预设语言，识别不出对方语言时使用（对应 app/template/i18n/ 下的文件名）
         'language' => 'en',
         // 安全模式，关掉等于谁都能往 inbox 里塞消息，不建议
         'inbox-verify' => true,
