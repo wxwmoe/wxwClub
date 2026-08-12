@@ -25,6 +25,16 @@ Two entry points share `app/bootstrap.php` (loads config, opens the DB connectio
 
 Naming is the module boundary: `Club_<domain>_<action>()`, where the domain prefix *is* the partition (`Endpoint`, `Queue`, `Blacklist`, `Resolver`, `Log`, `Stat`, `Notice`, `Limit`, `Config`, `DB`, `Migrate`). `ActivityPub_*` is the protocol side. When adding a function, find the matching prefix rather than starting a new scheme.
 
+`app/functions.php` keeps function partitions in this exact order; a bare domain function such as `Club_Stat()` belongs to its `Club_Stat_*` partition, and within each partition sort by the full function name and move the function's preceding comment with it:
+
+- `ActivityPub_*`
+- `Club_Actor_*`, `Club_Group_*`, `Club_Inbox_*`, `Club_Limit_*`, `Club_Notice_*`
+- `Club_Task_*`, `Club_Queue_*`, `Club_Lease_*`, `Club_Endpoint_*`, `Club_Delivery_*`, `Club_Blacklist_*`
+- `Club_DB_*`, `Club_HTTP_*`, `Club_Resolver_*`
+- `Club_Config_*`, `Club_Worker_*`
+- `Club_Log_*`, `Club_Stat_*`, `Club_Monitor_*`
+- `Club_Template_*`, `Club_I18n_*`, `Club_IP_*`, `Club_Url_*`, `Club_Json_*`
+
 **A state decision is a pure function; writing it down is not.** `Club_Endpoint_Decide`, `Club_Blacklist_Decide`, `Club_Endpoint_Drifted`, `Club_Endpoint_Prune_Decide` and `ActivityPub_Push_State` take the state already read under the row lock and return the state to write; the surrounding `Club_Endpoint_Result` / `Club_Blacklist_Result` / `Club_Endpoint_Repair` / `Club_Endpoint_Prune` keep the locking, the transaction and the logging. That is the whole seam — no classes, no repository, no injection. Two of them exist because the same predicate was needed by both a lockless pre-filter and the re-check inside the transaction; those two copies are exactly the kind that drift apart, and the drift only shows up as rows nothing ever repairs. Randomness stays injectable through the trailing `$jitter` argument: `null` is the real random spread, a fixed value is what the tests pass. When you change a threshold, change it in the decision function and add the row to the table in `tests/groups/pure.php`.
 
 ## Running and verifying
