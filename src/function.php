@@ -1,4 +1,4 @@
-<?php require_once(__DIR__.'/class/curl.php');
+<?php
 
 // 这份代码要求的数据库结构版本，对应 src/migrate/ 下最大的那个步骤文件。库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，入站活动会写进本地状态再报错，对端重放就是半处理
 define('DB_VERSION', 4);
@@ -23,12 +23,12 @@ function ActivityPub_GET($url, $club, $hops = 3) {
         $date = gmdate('D, d M Y H:i:s T');
         // 把验过的 IP 一起交下去，别让 curl 自己再解析一遍
         $result = ActivityPub_CURL($url, $date, ['Signature' => ActivityPub_Signature($url, $club, $date)], null, $public);
-        // 有救的只有传输层没通（连不上、超时、TLS，看 curlError）和对端喊等会儿的那几个状态码。不能照 Curl 的返回值判：它把 4xx / 5xx 一律算进 error，
+        // 有救的只有传输层没通（连不上、超时、TLS，看 curl_error）和对端喊等会儿的那几个状态码。不能照 Club_HTTP_Request 的返回值判：它把 4xx / 5xx 一律算进 error，
         // 那样 404、410 这种「这个文档永远不在」的终局答复也成了还有救，对端会一直收到 5xx。这条线与投递侧的 rejected 完全互补（501 同样归终局），只多一个 2xx —— 拿到了文档但它不合法，那也是终局
-        $code = $curl->httpStatusCode;
-        $fetch_retry = $curl->curlError || in_array($code, [401, 408, 429]) || ($code >= 500 && $code != 501);
+        $code = $curl['status'];
+        $fetch_retry = $curl['curl_error'] || in_array($code, [401, 408, 429]) || ($code >= 500 && $code != 501);
         if ($result === false || !in_array($code, [301, 302, 303, 307, 308])) return $result;
-        if (!($location = Club_Header_Get($curl->responseHeaders, 'Location'))) return $result;
+        if (!($location = Club_Header_Get($curl['headers'], 'Location'))) return $result;
         $url = Club_Url_Absolute($location, $url);
     } return false;
 }
@@ -73,7 +73,7 @@ function ActivityPub_POST($url, $club, $jsonld, $authorize = null) {
     if (isset($authorize) && !$authorize()) return 'lease-lost';
     Club_Stat('http_requests');
     ActivityPub_CURL($url, $date, $head, $jsonld, $public);
-    return ActivityPub_Push_Result(isset($curl) ? $curl->httpStatusCode : 0);
+    return ActivityPub_Push_Result(isset($curl) ? $curl['status'] : 0);
 }
 
 // 状态码到结果码的那条线，单拎出来是为了能不出网地验：它是一个状态码的纯函数，而划错一档的代价是整家实例被误判成挂了、或者一条谁都不收的活动无限重投。
@@ -103,16 +103,14 @@ function ActivityPub_Probe($url, $club, $authorize = null) {
     $result = ActivityPub_POST($url, $club, Club_Json_Encode(['@context' => 'https://www.w3.org/ns/activitystreams', 'type' => 'Activity', 'actor' => $base.'/club/'.$club]), $authorize);
     // 这些结果都发生在授权 callback 之前，调用方必须继续使用第一阶段 token。折叠成 dead 会让 completion 误拿尚未安装的新 token，结果永远被 fencing 丢掉。
     if (in_array($result, ['blocked', 'unresolved', 'local-dns', 'lease-lost'], true)) return $result;
-    if (!isset($curl) || $curl->curlError) return 'dead';
-    $code = $curl->httpStatusCode;
+    if (!isset($curl) || $curl['curl_error']) return 'dead';
+    $code = $curl['status'];
     return ($code >= 200 && $code < 300) || ($code >= 400 && $code < 500 && !in_array($code, [404, 405, 410])) ? 'alive' : 'dead';
 }
 
 function ActivityPub_CURL($url, $date, $head, $data = null, $ips = null) {
-    global $ver, $base, $curl, $config; static $last_head = [], $pinned = null;
-    if (!isset($curl)) $curl = new Curl();
-    $curl->setTimeout(10);
-    $curl->setConnectTimeout(3);
+    global $ver, $base, $curl; static $handle = null, $pinned = null;
+    if (!isset($handle)) $handle = curl_init();
     // 内网检查的另一半：Club_Url_Public 只交上来公网地址，私网那些是靠「curl 拿不到就连不上」拦住的。不钉的话 curl 会拿 URL 自己再解析一遍，既把剔掉的地址捡回来，也留下 DNS rebinding 的空子。
     // 钉进去的条目在 curl 自己的 DNS 缓存里是永久的，所以每次先撤掉上一条，否则长期进程会越积越多，还会拿旧地址去连
     $resolve = [];
@@ -124,23 +122,42 @@ function ActivityPub_CURL($url, $date, $head, $data = null, $ips = null) {
         foreach ($ips as $i => $ip) if (strpos($ip, ':') !== false) $ips[$i] = '['.$ip.']';
         $resolve[] = ($pinned = $host.':'.$port).':'.implode(',', $ips);
     }
-    if ($resolve) $curl->setOpt(CURLOPT_RESOLVE, $resolve);
+    $options = [CURLOPT_TIMEOUT => 10, CURLOPT_CONNECTTIMEOUT => 3, CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS, CURLOPT_USERAGENT => 'wxwClub '.$ver.'; '.$base];
+    if ($resolve) $options[CURLOPT_RESOLVE] = $resolve;
     // 跳转由 ActivityPub_GET 自己跟，POST 则完全不跟：curl 会把它降级成 GET
-    $curl->setFollowLocation(false);
     // 只放行 http(s)，否则能把我们带到 file:// 之类的协议上
-    $curl->setOpt(CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
-    $curl->setUserAgent('wxwClub '.$ver.'; '.$base);
-    $curl->setHeader('Accept', 'application/activity+json');
-    $curl->setHeader('Content-Type', 'application/activity+json');
-    $curl->setHeader('Date', $date);
-    // Curl 实例复用，先清掉上次请求独有的头，避免 POST 的 Digest 残留到之后的 GET
-    foreach (array_diff(array_keys($last_head), array_keys($head)) as $k) $curl->unsetHeader($k);
-    foreach ($head as $k => $v) $curl->setHeader($k, $v);
-    $last_head = $head;
-    if (isset($data)) $curl->post($url, $data); else $curl->get($url);
-    Club_Log_Write('debug', 'curl', [isset($data) ? 'post' : 'get', strtolower($curl->responseHeaders['Status-Line'] ?? ''),
-        preg_replace('#^https?://#i', '', $url)], ['header' => $curl->responseHeaders, 'result' => $curl->response, 'error' => $curl->error]);
-    return $curl->error ? false : ($curl->response ?: true);
+    $headers = ['Accept' => 'application/activity+json', 'Content-Type' => 'application/activity+json', 'Date' => $date] + $head;
+    $curl = Club_HTTP_Request($handle, $url, $headers, $options, $data);
+    Club_Log_Write('debug', 'curl', [isset($data) ? 'post' : 'get', strtolower($curl['headers']['Status-Line'] ?? ''),
+        preg_replace('#^https?://#i', '', $url)], ['header' => $curl['headers'], 'result' => $curl['response'], 'error' => $curl['error']]);
+    return $curl['error'] ? false : ($curl['response'] ?: true);
+}
+
+// 两条 HTTP 出口只共用执行和响应头解析；目标校验、协议限制、超时与 DNS pin 仍由各自调用点显式给出。
+function Club_HTTP_Request($handle, $url, $headers, $options, $data = null) {
+    $response_headers = [];
+    $options[CURLOPT_URL] = $url;
+    $options[CURLOPT_RETURNTRANSFER] = true;
+    $options[CURLOPT_HTTPHEADER] = array_map(function ($key, $value) { return $key.': '.$value; }, array_keys($headers), array_values($headers));
+    $options[CURLOPT_HEADERFUNCTION] = function ($ch, $line) use (&$response_headers) {
+        $length = strlen($line);
+        $line = trim($line);
+        if (stripos($line, 'HTTP/') === 0) $response_headers = ['Status-Line' => $line];
+        elseif (strpos($line, ':') !== false) {
+            list($key, $value) = array_map('trim', explode(':', $line, 2));
+            $response_headers[$key] = isset($response_headers[$key]) ? $response_headers[$key].','.$value : $value;
+        }
+        return $length;
+    };
+    $options[CURLOPT_POST] = isset($data);
+    $options[CURLOPT_HTTPGET] = !isset($data);
+    if (isset($data)) $options[CURLOPT_POSTFIELDS] = $data;
+    curl_setopt_array($handle, $options);
+    $response = curl_exec($handle); $curl_error = curl_errno($handle); $status = (int)curl_getinfo($handle, CURLINFO_HTTP_CODE);
+    $http_error = in_array((int)floor($status / 100), [4, 5], true); $error = (bool)$curl_error || $http_error;
+    return ['status' => $status, 'headers' => $response_headers, 'response' => $response, 'curl_error' => (bool)$curl_error,
+        'error' => $error, 'message' => $curl_error ? curl_error($handle) : ($http_error ? ($response_headers['Status-Line'] ?? '') : '')];
 }
 
 // HTTP Signature 真正覆盖的 authority 和 request-target。直接看原始 URL 里的 ?/#，避免不同 PHP 版本的 parse_url 对空 query 返回不同形状。
@@ -472,7 +489,7 @@ function Club_Log_Name($dir, $parts) {
     if (!Club_Log_Level('error') || !($path = Club_Log_Dir($dir))) return '';
     // 时分秒之间用 - 不用 :，冒号在 NTFS 上是非法字符，写文件会直接失败
     $name = date('Y-m-d_H-i-s');
-    foreach (to_array($parts) as $part) if (($part = Club_Log_Slug($part)) !== '') $name .= '_'.$part;
+    foreach ((array)$parts as $part) if (($part = Club_Log_Slug($part)) !== '') $name .= '_'.$part;
     // 文件名上限 255 字节，url 和 resource 能轻松撑爆，留出后缀和序号的余量
     $name = $base = substr($name, 0, 180);
     // 时间戳只到秒，同一秒的同名事件会互相覆盖（撤回提醒成批发出，必然撞），占用了就往后排
@@ -944,7 +961,7 @@ function Club_Queue_Insert($task, $target) {
 function Club_Queue_Insert_Followers($task, $clubs, $inbox = false, $origin = false) {
     global $db;
     $cursor = null; $page = 250; $now = time(); $invalid = []; $invalid_count = 0; $names = []; $binds = [];
-    $clubs = array_values(to_array($clubs));
+    $clubs = array_values((array)$clubs);
     foreach ($clubs as $i => $club) { $key = ':club'.$i; $names[] = $key; $binds[$key] = $club; }
     if ($origin !== false) { $skip = ' and u.shared_inbox collate ascii_bin <> convert(:origin using ascii) collate ascii_bin'; $binds[':origin'] = $origin; } else $skip = '';
     do {
@@ -1026,7 +1043,7 @@ function Club_Push_Enqueue($signer, $clubs, $activity, $direct, $inbox, $origin,
 
 function Club_Push_Activity($club, $activity, $inbox = false, $direct = false, $type = null, $origin = false, &$reason = null) {
     global $db;
-    $reason = null; $clubs = array_values(to_array($club)); $club = $clubs[0];
+    $reason = null; $clubs = array_values((array)$club); $club = $clubs[0];
     // 本站自己组的活动，actor 就是这个群组，对端除了 HTTP 签名没有别的东西能验归属，只能由它自己签。
     // 透传的转发相反：归属由报文自带的 LD 签名认，签名群组不参与判断，改用系统群组签有两个好处 ——
     // 收件实例不必为一条它没关注的群组的转发去拉那个 actor，管理员单独封了其中一个群组时，也不会把整包连同别的群组的关注者一起丢掉
@@ -1302,7 +1319,7 @@ function Club_Inbox_Reply($status, $message, $retry = 0) {
     static $sent = false;
     if ($sent) return; $sent = true;
     if ($retry) header('Retry-After: '.$retry);
-    Club_Json_Output(['message' => $message], 0, $status);
+    Club_Json_Output(['message' => $message], 'json', $status);
 }
 
 // 验签过了，但本站拿不到能用的 actor 文档，没有它就落不了库。拉取失败的原因决定对端该不该再来一次：404、非法文档、非法 endpoint 重投多少遍都是同一个结果，
@@ -1493,7 +1510,7 @@ function Club_Announce_Process($jsonld) {
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
         $prefix = $base.'/club/';
         $lang = Club_I18n_Detect($jsonld['object']);
-        foreach ($to = array_merge(to_array($jsonld['to'] ?? []), to_array($jsonld['cc'] ?? [])) as $cc)
+        foreach ($to = array_merge((array)($jsonld['to'] ?? []), (array)($jsonld['cc'] ?? [])) as $cc)
             if (is_string($cc) && $prefix == substr($cc, 0, strlen($prefix))) {
                 // 系统群组不是投稿目标，被 @ 到也不转发
                 if (Club_System_Name($name = explode('/', substr($cc, strlen($prefix)))[0])) continue;
@@ -1578,7 +1595,7 @@ function Club_Relay_Allow($jsonld, $input, $object, $type) {
 // 类型和选项两项都要，跟 Mastodon 的 PollParser#valid? 对齐；type 可以是数组
 function Club_Poll_Revision($jsonld, $object) {
     if (isset($jsonld['published'])) return 0;
-    if (!in_array('Question', to_array($object['type'] ?? []), true)) return 0;
+    if (!in_array('Question', (array)($object['type'] ?? []), true)) return 0;
     if (!is_array($object['oneOf'] ?? null) && !is_array($object['anyOf'] ?? null)) return 0;
     if (!preg_match('#\#updates/([0-9]{1,10})$#', Club_Object_Id($jsonld['id'] ?? ''), $matches)) return 0;
     // 这个数字是对端随手写的。放一个远期值进去，等于把这条帖子后面的计票全挡在门外
@@ -1762,7 +1779,7 @@ function Club_Get_OrderedCollection($id, $arr = []) {
     $arr = array_merge(['@context' => 'https://www.w3.org/ns/activitystreams', 'id' => $id, 'type' => 'OrderedCollection', 'totalItems' => 0], $arr);
     // Pleroma 2.5.5 解析 featured 时缺 orderedItems 会 FunctionClauseError，把拉取 actor 的请求整个变成 500，空集合一律显式带上空数组；有分页的交给 first 那一页
     if (!$arr['totalItems'] && !isset($arr['first'])) $arr[$arr['type'] === 'Collection' ? 'items' : 'orderedItems'] = [];
-    Club_Json_Output($arr, 2);
+    Club_Json_Output($arr, 'activity+json');
 }
 
 // 游标是「时间戳.自增id」两段，同一秒内有多条也能稳定定位
@@ -2012,28 +2029,29 @@ function Club_Resolver_Budget() {
 //   false  这家没答上来（连不上、4xx/5xx、报文坏、REFUSED），什么都没证明，是本站这一侧的事
 function Club_Resolver_DoH($resolver, $host, $type) {
     global $config;
-    static $curl = null;
-    // 不复用 ActivityPub_CURL 那个全局句柄：那边的调用方在请求之后还要读 responseHeaders 和 httpStatusCode 判跳转，套进同一个句柄会把判断依据冲掉
-    if (!isset($curl)) { $curl = new Curl(); $curl->setHeader('Accept', 'application/dns-json'); $curl->setFollowLocation(false); $curl->setOpt(CURLOPT_PROTOCOLS, CURLPROTO_HTTPS); }
+    static $handle = null;
+    // 不复用 ActivityPub_CURL 那个全局句柄：那边的调用方在请求之后还要读 headers 和 status 判跳转，套进同一个句柄会把判断依据冲掉
+    if (!isset($handle)) $handle = curl_init();
     // 期限由 curl 自己执行，不经过 PHP 的检查点，两个 SAPI 都算数 —— 这正是换掉系统 resolver 的理由。
     // 必须夹到 1 以上：libcurl 把 0 定义成「永不超时」，配置里手滑写个 0 或负数就等于把刚拆掉的无限等待原样装回来，而那种故障要等到线上卡住才发作
-    $curl->setTimeout(max(1, (int)($config['dns']['timeout'] ?? 5)));
-    $curl->setConnectTimeout(max(1, (int)($config['dns']['connect-timeout'] ?? 3)));
+    $options = [CURLOPT_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_TIMEOUT => max(1, (int)($config['dns']['timeout'] ?? 5)), CURLOPT_CONNECTTIMEOUT => max(1, (int)($config['dns']['connect-timeout'] ?? 3))];
     // 钉住 resolver 自己的地址。没配 ip 就交给 curl 去解析：那仍然是系统 resolver，但走在 curl 里，超时管得住，不像 gethostbynamel 那样能把整个进程挂死。
     // 不像 ActivityPub_CURL 那样每次先用 '-' 撤掉上一条：那边钉的 host 是对端域名，一个长期进程会经手几千个，这边钉的只有 resolver 列表里那两三个，条目数是常数，攒不起来
     if (!empty($resolver['ip']) && !empty(($parts = parse_url($resolver['url']))['host'])) {
         $ips = $resolver['ip'];
         foreach ($ips as $i => $ip) if (strpos($ip, ':') !== false) $ips[$i] = '['.$ip.']';
-        $curl->setOpt(CURLOPT_RESOLVE, [$parts['host'].':'.($parts['port'] ?? 443).':'.implode(',', $ips)]);
+        $options[CURLOPT_RESOLVE] = [$parts['host'].':'.($parts['port'] ?? 443).':'.implode(',', $ips)];
     }
-    $json = json_decode((string)$curl->get($resolver['url'].'?name='.urlencode($host).'&type='.$type), 1);
-    // 传输失败和 4xx/5xx 都由 $curl->error 兜住（见 Curl::exec）。错误页的正文一般也过不了 Club_Resolver_Answer 那关，但那是巧合不是保证，状态码该自己看
-    $answer = $curl->error ? false : Club_Resolver_Answer($json, $type);
+    $curl = Club_HTTP_Request($handle, $resolver['url'].'?name='.urlencode($host).'&type='.$type, ['Accept' => 'application/dns-json'], $options);
+    $json = json_decode((string)$curl['response'], 1);
+    // 传输失败和 4xx/5xx 都由 Club_HTTP_Request 兜住。错误页的正文一般也过不了 Club_Resolver_Answer 那关，但那是巧合不是保证，状态码该自己看
+    $answer = $curl['error'] ? false : Club_Resolver_Answer($json, $type);
     // SERVFAIL 是对端域名的毛病，这家 resolver 本身是好的，别混进 warning 里去污染本站的故障视图
     if ($answer === null) Club_Log_Event('info', 'doh reports the domain fails to resolve', ['resolver' => $resolver['url'], 'host' => $host, 'type' => $type]);
     elseif ($answer === false)
         Club_Log_Event('warning', 'doh query failed', ['resolver' => $resolver['url'], 'host' => $host, 'type' => $type,
-            'http' => $curl->httpStatusCode, 'status' => is_array($json) ? ($json['Status'] ?? '?') : '?', 'error' => $curl->errorMessage]);
+            'http' => $curl['status'], 'status' => is_array($json) ? ($json['Status'] ?? '?') : '?', 'error' => $curl['message']]);
     return $answer;
 }
 
@@ -2364,7 +2382,7 @@ function Club_Endpoint_Complete($url, $token, $task, $result) {
     elseif ($state == 'blacklisted') Club_Log_Event('info', 'endpoint blacklisted: '.$url, ['reason' => $result, 'fails' => $plan['fails'], 'age' => $plan['age']]);
     // 这一条 payload 自己的去向，跟 endpoint 是两回事
     if ($result == 'ok') Club_Log_Event('debug', 'push delivered', ['club' => $task['club'], 'target' => $url, 'retries' => (int)$task['retries']]);
-    elseif ($result == 'rejected') Club_Log_Event('info', 'push dropped, target refused the activity', ['club' => $task['club'], 'target' => $url, 'code' => isset($curl) ? $curl->httpStatusCode : 0]);
+    elseif ($result == 'rejected') Club_Log_Event('info', 'push dropped, target refused the activity', ['club' => $task['club'], 'target' => $url, 'code' => isset($curl) ? $curl['status'] : 0]);
     elseif ($result == 'local-dns') Club_Log_Event('debug', 'push deferred, waiting for local dns', ['club' => $task['club'], 'target' => $url, 'retry' => 300]);
     elseif ($result == 'dropped') Club_Log_Event('debug', 'queue dropped without contacting the target', ['club' => $task['club'], 'target' => $url]);
     elseif ($state == 'exhausted') Club_Log_Event('warning', 'push dropped after '.$task['retries'].' failed attempts', ['club' => $task['club'], 'target' => $url, 'reason' => $result]);
@@ -2807,19 +2825,11 @@ function Club_Json_Encode($data) {
     return json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 }
 
-function Club_Json_Output($data, $format = 0, $status = 200) {
-    switch ($format) {
-        case 1: $format = 'jrd+json'; break;
-        case 2: $format = 'activity+json'; break;
-        default: $format = 'json'; break;
-    } header('Content-type: application/'.$format.'; charset=utf-8');
+function Club_Json_Output($data, $type = 'json', $status = 200) {
+    header('Content-type: application/'.$type.'; charset=utf-8');
 
     if ($status != 200) {
         http_response_code($status);
         $data = array_merge(['code' => $status], $data);
     } echo Club_Json_Encode($data);
-}
-
-function to_array($data) {
-    return is_array($data) ? $data : [$data];
 }

@@ -72,7 +72,7 @@ function controller() {
                                     'cc' => [$announce['actor'], $public_streams],
                                     'object' => $announce['object']
                                 ];
-                            } Club_Json_Output($arr, 2);
+                            } Club_Json_Output($arr, 'activity+json');
                         } else {
                             $pdo = $db->prepare('select count(a.id) from `announces` `a` join `clubs` `c` on a.cid = c.cid where c.name = :club');
                             $pdo->execute([':club' => $club]);
@@ -91,9 +91,9 @@ function controller() {
                             case 'featured': Club_Get_OrderedCollection($club_url.'/collections/featured'); break;
                             case 'tags': Club_Get_OrderedCollection($club_url.'/collections/tags', ['type' => 'Collection']); break;
                             case 'devices': Club_Get_OrderedCollection($club_url.'/collections/devices', ['type' => 'Collection']); break;
-                            default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
+                            default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 'json', 404); break;
                         } break;
-                    default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
+                    default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 'json', 404); break;
                 } else {
                     $pdo = $db->prepare('select `cid`,`nickname`,`infoname`,`summary`,`avatar`,`banner`,`public_key`,`timestamp` from `clubs` where `name` = :club');
                     $pdo->execute([':club' => $club]);
@@ -137,10 +137,10 @@ function controller() {
                                 'type' => 'Image',
                                 'url' => $pdo['banner'] ?: $config['default']['banner']
                             ]
-                        ], 2);
+                        ], 'activity+json');
                     } else Club_Template('profile', ['club' => $club, 'nickname' => $nickname, 'summary' => $summary, 'row' => $pdo]);
                 }
-            } else Club_Json_Output(['message' => 'User not found'], 0, 404); break;
+            } else Club_Json_Output(['message' => 'User not found'], 'json', 404); break;
 
         case 'inbox': if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Process(); else Club_Get_OrderedCollection($base.'/inbox'); break;
 
@@ -181,14 +181,14 @@ function controller() {
             if (preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches)) {
                 $resource_identifier = $matches[1];
                 if (($resource_host = $matches[2]) != $config['base']) {
-                    Club_Json_Output(['message' => 'Resource host does not match'], 0, 404);
+                    Club_Json_Output(['message' => 'Resource host does not match'], 'json', 404);
                     break;
                 }
             } elseif (preg_match('/^acct:([a-zA-Z_][a-zA-Z0-9_]+)$/', $resource, $matches)) {
                 $resource_host = $config['base'];
                 $resource_identifier = $matches[1];
             } else {
-                Club_Json_Output(['message' => 'Resource is invalid'], 0, 400);
+                Club_Json_Output(['message' => 'Resource is invalid'], 'json', 400);
                 break;
             }
 
@@ -209,10 +209,10 @@ function controller() {
                             'href' => $club_url
                         ]
                 ]]);
-            } else Club_Json_Output(['message' => 'User not found'], 0, 404); break;
+            } else Club_Json_Output(['message' => 'User not found'], 'json', 404); break;
 
         case 'index': Club_Template('index'); break;
 
-        default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 0, 404); break;
+        default: Club_Json_Output(['message' => 'Error: Route Not Found!'], 'json', 404); break;
     }
 }

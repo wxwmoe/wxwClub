@@ -70,9 +70,7 @@ A simple social groups compatible with ActivityPub.
 
 参考项目  
 [wordpress-activitypub / MIT][1]  
-[php-curl-class / Unlicense License][2]  
   
 MIT © FGHRSH
 
   [1]: https://github.com/pfefferle/wordpress-activitypub "ActivityPub for WordPress"
-  [2]: https://github.com/php-curl-class/php-curl-class "php-curl-class"

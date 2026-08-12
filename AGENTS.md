@@ -19,7 +19,6 @@ Two entry points share `src/bootstrap.php` (loads config, opens the DB connectio
 | `src/worker.php` | The three queue loops: `worker_delivery` / `worker_probe` / `worker_maintain` |
 | `src/controller.php` | Web routing and HTTP entry |
 | `src/migrate.php` + `src/migrate/N.php` | Merge framework and the per-version steps |
-| `src/class/curl.php` | Trimmed-down php-curl-class |
 | `src/template/`, `src/i18n/` | Page templates and localized strings |
 | `tools/wxwclub.sql` | Fresh-install snapshot; must match the merge end state column for column |
 | `tests/` | The whole test layer; `tests/run.php` is the only entry point |

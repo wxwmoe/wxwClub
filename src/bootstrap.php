@@ -29,7 +29,7 @@ set_exception_handler(function ($e) {
     Club_Log_Event('error', 'uncaught '.get_class($e), ['error' => $e->getMessage(), 'at' => $where]);
     error_log('Uncaught '.get_class($e).': '.$e->getMessage().' in '.$where."\n".$e->getTraceAsString());
     if (PHP_SAPI == 'cli') exit(1);
-    if (!headers_sent()) Club_Json_Output(['message' => 'Internal error'], 0, 500);
+    if (!headers_sent()) Club_Json_Output(['message' => 'Internal error'], 'json', 500);
 });
 
 // web 请求也会走 resolver，DNS 争用和刷新等待要在这一侧留下同样的计数，否则日志里只看得见 worker 那一半，冷缓存被 FPM 抢走的情况永远对不上账
@@ -53,6 +53,6 @@ if (PHP_SAPI != 'cli' && ($schema = Club_DB_Version()) !== DB_VERSION) {
     $action = $schema < DB_VERSION ? 'run the worker to merge it' : 'deploy code matching the database schema';
     header('Retry-After: 60');
     Club_Log_Event('error', 'request blocked, database schema mismatch', ['schema' => $schema, 'expected' => DB_VERSION, 'state' => $state, 'uri' => $_SERVER['REQUEST_URI'] ?? '']);
-    Club_Json_Output(['message' => 'Database schema '.$schema.' is '.$state.' (expected '.DB_VERSION.'), '.$action], 0, 503);
+    Club_Json_Output(['message' => 'Database schema '.$schema.' is '.$state.' (expected '.DB_VERSION.'), '.$action], 'json', 503);
     exit;
 }
