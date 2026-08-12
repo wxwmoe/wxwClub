@@ -77,7 +77,7 @@ CREATE TABLE `announces` (
 CREATE TABLE `tasks` (
   `tid` int NOT NULL AUTO_INCREMENT,
   `cid` int NOT NULL,
-  `type` varchar(8) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `type` varchar(10) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `jsonld` mediumtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
   `timestamp` int NOT NULL,
   PRIMARY KEY (`tid`),
@@ -89,13 +89,12 @@ CREATE TABLE `tasks` (
 CREATE TABLE `queues` (
   `id` int NOT NULL AUTO_INCREMENT,
   `tid` int NOT NULL,
-  `type` varchar(8) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'relay',
   `target` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `due_at` int unsigned NOT NULL,
   `retries` tinyint unsigned NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   UNIQUE KEY `tid_target` (`tid`,`target`),
-  KEY `target_type_due` (`target`,`type`,`due_at`,`id`),
+  KEY `target_due` (`target`,`due_at`,`id`),
   CONSTRAINT `queues_ibfk_2` FOREIGN KEY (`tid`) REFERENCES `tasks` (`tid`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
@@ -105,19 +104,11 @@ CREATE TABLE `endpoints` (
   `fail_since` int unsigned NOT NULL DEFAULT '0',
   `retry_at` int unsigned NOT NULL DEFAULT '0',
   `next_at` int unsigned DEFAULT NULL,
-  `follow_at` int unsigned DEFAULT NULL,
-  `notice_at` int unsigned DEFAULT NULL,
-  `announce_at` int unsigned DEFAULT NULL,
-  `relay_at` int unsigned DEFAULT NULL,
   `idle_since` int unsigned NOT NULL DEFAULT '0',
   `lease_until` int unsigned NOT NULL DEFAULT '0',
   `lease_token` binary(16) DEFAULT NULL,
   PRIMARY KEY (`url`),
   KEY `schedule` (`next_at`,`lease_until`),
-  KEY `follow_schedule` (`follow_at`,`lease_until`),
-  KEY `notice_schedule` (`notice_at`,`lease_until`),
-  KEY `announce_schedule` (`announce_at`,`lease_until`),
-  KEY `relay_schedule` (`relay_at`,`lease_until`),
   UNIQUE KEY `lease_token` (`lease_token`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
@@ -165,4 +156,14 @@ CREATE TABLE `meta` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- 结构版本。与代码里的 DB_VERSION 不相等时 web 全挡；只允许 worker 向前合并
-INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '5');
+INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '4');
+
+INSERT INTO `clubs` (`cid`, `name`, `public_key`, `private_key`, `timestamp`) VALUES (1, 'test', '', '', 1666972800);
+INSERT INTO `users` (`uid`, `name`, `actor`, `inbox`, `public_key`, `shared_inbox`, `timestamp`) VALUES
+  (1, 'alice@remote.example', 'https://remote.example/users/alice', 'https://remote.example/users/alice/inbox', '', 'https://remote.example/inbox', 1666972800);
+INSERT INTO `activities` (`id`, `uid`, `type`, `clubs`, `object`, `timestamp`) VALUES
+  (1, 1, 'Create', '["test"]', 'https://remote.example/users/alice/statuses/1', 1666972800);
+INSERT INTO `followers` (`id`, `cid`, `uid`, `timestamp`) VALUES (1, 1, 1, 1666972800);
+INSERT INTO `tasks` (`tid`, `cid`, `type`, `jsonld`, `timestamp`) VALUES (1, 1, 'push', '{"type":"Announce"}', 1666972800);
+INSERT INTO `queues` (`id`, `tid`, `target`, `due_at`, `retries`) VALUES (1, 1, 'https://remote.example/inbox', 1666972800, 0);
+INSERT INTO `endpoints` (`url`, `next_at`) VALUES ('https://remote.example/inbox', 1666972800);

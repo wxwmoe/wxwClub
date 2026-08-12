@@ -318,13 +318,28 @@ t_is(Club_Blacklist_Decide(true, 3, false, $now)['state'], 'restored', 'a live t
 
 t_group('decide / reconcile and prune');
 
-// next_at 和 idle_since 必须同进同出
-t_is(Club_Endpoint_Drifted(100, ['next_at' => 100, 'idle_since' => 0]), false, 'a scheduled row that matches is not drifted');
-t_is(Club_Endpoint_Drifted(null, ['next_at' => null, 'idle_since' => 5]), false, 'an idle row that matches is not drifted');
-t_is(Club_Endpoint_Drifted(100, ['next_at' => 200, 'idle_since' => 0]), true, 'a wrong next_at is drift');
-t_is(Club_Endpoint_Drifted(null, ['next_at' => null, 'idle_since' => 0]), true, 'an idle row with no idle clock is drift');
-t_is(Club_Endpoint_Drifted(100, ['next_at' => 100, 'idle_since' => 5]), true, 'a scheduled row with an idle clock is drift');
-t_is(Club_Endpoint_Drifted(null, ['next_at' => 100, 'idle_since' => 5]), true, 'a row that should be idle but is scheduled is drift');
+// 分类提示、汇总时间和 idle_since 必须一起核对，漏一列就会让那一类永远由错误的 worker 领取。
+$t_schedule = ['next_at' => 100, 'follow_at' => null, 'notice_at' => null, 'announce_at' => null, 'relay_at' => 100];
+$t_scheduled = $t_schedule + ['idle_since' => 0];
+$t_empty = ['next_at' => null, 'follow_at' => null, 'notice_at' => null, 'announce_at' => null, 'relay_at' => null];
+t_is(Club_Endpoint_Drifted($t_schedule, $t_scheduled), false, 'a categorized schedule that matches is not drifted');
+t_is(Club_Endpoint_Drifted($t_empty, $t_empty + ['idle_since' => 5]), false, 'an idle row that matches is not drifted');
+t_is(Club_Endpoint_Drifted($t_schedule, array_merge($t_scheduled, ['next_at' => 200])), true, 'a wrong next_at is drift');
+t_is(Club_Endpoint_Drifted($t_schedule, array_merge($t_scheduled, ['relay_at' => 200])), true, 'a wrong category time is drift');
+t_is(Club_Endpoint_Drifted($t_empty, $t_empty + ['idle_since' => 0]), true, 'an idle row with no idle clock is drift');
+t_is(Club_Endpoint_Drifted($t_schedule, $t_schedule + ['idle_since' => 5]), true, 'a scheduled row with an idle clock is drift');
+
+t_is(Club_Task_Category(['type' => 'Accept'], true), 'follow', 'Accept is routed to follow');
+t_is(Club_Task_Category(['type' => 'Create'], true), 'notice', 'a direct local activity is routed to notice');
+t_is(Club_Task_Category(['type' => 'Announce'], false), 'announce', 'a fanout local activity is routed to announce');
+t_is(Club_Task_Category('{"type":"Create"}', false), 'relay', 'an untouched remote payload is routed to relay');
+
+$t_config = $config;
+$config['worker']['delivery'] = 8;
+t_is(Club_Config_Delivery_Workers(), ['follow' => 2, 'notice' => 2, 'announce' => 2, 'relay' => 2], 'a legacy total splits evenly across delivery types');
+$config['worker']['delivery'] = 9;
+t_is(Club_Config_Delivery_Workers(), ['follow' => 2, 'notice' => 2, 'announce' => 3, 'relay' => 2], 'an odd legacy total gives the extra worker to announce');
+$config = $t_config;
 
 $before = $now - 604800;
 t_is(Club_Endpoint_Prune_Decide(0, $before - 1, 0, 0, 0, $now, $before), 'prune', 'an endpoint idle past the grace period is removed');
@@ -418,6 +433,7 @@ foreach ([
     ['config.node.language', ['node' => ['language' => 'kl']]],
     ['config.node.log-retention', ['node' => ['log-retention' => '30 days']]],
     ['config.worker.delivery', ['worker' => ['delivery' => 0]]],
+    ['config.worker.delivery.follow', ['worker' => ['delivery' => ['follow' => 0]]]],
     ['config.worker.probe', ['worker' => ['probe' => -1]]],
     ['config.dns.resolver', ['dns' => ['resolver' => []]]],
     ['config.dns.resolver[0].url', ['dns' => ['resolver' => [['url' => 'http://insecure.example/dns', 'ip' => []]]]]],

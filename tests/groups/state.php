@@ -11,19 +11,32 @@ function t_state_reset() {
     t_exec('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values (\'test\', \'\', \'\', :now)', [':now' => time()]);
 }
 
-// 一条 endpoint 加它名下的一条 queue，返回 queue 的 id
-function t_state_queue($url, $endpoint = [], $due = null, $retries = 0) {
+function t_state_pending($url, $category, $due = null, $retries = 0) {
     $now = time();
-    $endpoint = array_merge(['fails' => 0, 'fail_since' => 0, 'retry_at' => 0, 'next_at' => $now, 'idle_since' => 0, 'lease_until' => 0], $endpoint);
-    t_exec('insert into `tasks`(`cid`,`type`,`jsonld`,`timestamp`) select `cid`, \'push\', \'{}\', :now from `clubs` where `name` = \'test\'', [':now' => $now]);
-    t_exec('insert into `queues`(`tid`,`target`,`due_at`,`retries`) values (:tid, :url, :due, :retries)',
-        [':tid' => t_one('select max(`tid`) from `tasks`'), ':url' => $url, ':due' => isset($due) ? $due : $now, ':retries' => $retries]);
-    t_exec('insert into `endpoints`(`url`,`fails`,`fail_since`,`retry_at`,`next_at`,`idle_since`,`lease_until`) values (:url, :fails, :since, :retry, :next, :idle, :lease)'.
-        ' on duplicate key update `fails` = :fails2, `fail_since` = :since2, `retry_at` = :retry2, `next_at` = :next2, `idle_since` = :idle2, `lease_until` = :lease2',
-        [':url' => $url, ':fails' => $endpoint['fails'], ':since' => $endpoint['fail_since'], ':retry' => $endpoint['retry_at'], ':next' => $endpoint['next_at'],
-            ':idle' => $endpoint['idle_since'], ':lease' => $endpoint['lease_until'], ':fails2' => $endpoint['fails'], ':since2' => $endpoint['fail_since'],
-            ':retry2' => $endpoint['retry_at'], ':next2' => $endpoint['next_at'], ':idle2' => $endpoint['idle_since'], ':lease2' => $endpoint['lease_until']]);
+    t_exec('insert into `tasks`(`cid`,`type`,`jsonld`,`timestamp`) select `cid`, :category, \'{}\', :now from `clubs` where `name` = \'test\'', [':category' => $category, ':now' => $now]);
+    $task = (int)t_one('select max(`tid`) from `tasks`');
+    t_exec('insert into `queues`(`tid`,`type`,`target`,`due_at`,`retries`) values (:tid, :type, :url, :due, :retries)',
+        [':tid' => $task, ':type' => $category, ':url' => $url, ':due' => isset($due) ? $due : $now, ':retries' => $retries]);
+    Club_Endpoint_Upsert($task, $category);
     return (int)t_one('select max(`id`) from `queues`');
+}
+
+// 一条 endpoint 加它名下的一条 queue，返回 queue 的 id
+function t_state_queue($url, $endpoint = [], $due = null, $retries = 0, $category = 'relay') {
+    $now = time();
+    $endpoint = array_merge(['fails' => 0, 'fail_since' => 0, 'retry_at' => 0, 'next_at' => $now, 'follow_at' => null, 'notice_at' => null, 'announce_at' => null, 'relay_at' => null,
+        'idle_since' => 0, 'lease_until' => 0], $endpoint);
+    $endpoint[$category.'_at'] = $endpoint['next_at'];
+    $id = t_state_pending($url, $category, $due, $retries);
+    t_exec('insert into `endpoints`(`url`,`fails`,`fail_since`,`retry_at`,`next_at`,`follow_at`,`notice_at`,`announce_at`,`relay_at`,`idle_since`,`lease_until`)'.
+        ' values (:url, :fails, :since, :retry, :next, :follow, :notice, :announce, :relay, :idle, :lease) on duplicate key update `fails` = :fails2, `fail_since` = :since2,'.
+        ' `retry_at` = :retry2, `next_at` = :next2, `follow_at` = :follow2, `notice_at` = :notice2, `announce_at` = :announce2, `relay_at` = :relay2, `idle_since` = :idle2, `lease_until` = :lease2',
+        [':url' => $url, ':fails' => $endpoint['fails'], ':since' => $endpoint['fail_since'], ':retry' => $endpoint['retry_at'], ':next' => $endpoint['next_at'],
+            ':follow' => $endpoint['follow_at'], ':notice' => $endpoint['notice_at'], ':announce' => $endpoint['announce_at'], ':relay' => $endpoint['relay_at'],
+            ':idle' => $endpoint['idle_since'], ':lease' => $endpoint['lease_until'], ':fails2' => $endpoint['fails'], ':since2' => $endpoint['fail_since'], ':retry2' => $endpoint['retry_at'],
+            ':next2' => $endpoint['next_at'], ':follow2' => $endpoint['follow_at'], ':notice2' => $endpoint['notice_at'], ':announce2' => $endpoint['announce_at'], ':relay2' => $endpoint['relay_at'],
+            ':idle2' => $endpoint['idle_since'], ':lease2' => $endpoint['lease_until']]);
+    return $id;
 }
 
 function t_state_lease($url, $lease = 120) {
@@ -33,7 +46,8 @@ function t_state_lease($url, $lease = 120) {
 }
 
 function t_state_endpoint($url) {
-    return t_row('select `fails`, `fail_since`, `retry_at`, `next_at`, `idle_since`, `lease_until`, `lease_token` from `endpoints` where `url` = :url', [':url' => $url]);
+    return t_row('select `fails`, `fail_since`, `retry_at`, `next_at`, `follow_at`, `notice_at`, `announce_at`, `relay_at`, `idle_since`, `lease_until`, `lease_token`'.
+        ' from `endpoints` where `url` = :url', [':url' => $url]);
 }
 
 t_group('state / delivery results');
@@ -103,24 +117,63 @@ t_group('state / lease fencing');
 // 领取是互斥的：同一条 endpoint 只放一次投递在途
 t_state_reset();
 $id = t_state_queue($t_url);
-$claim = Club_Endpoint_Claim(time());
+$claim = Club_Endpoint_Claim('relay', time());
 t_ok(isset($claim['token']), 'an available endpoint can be claimed');
-t_is(Club_Endpoint_Claim(time()), null, 'a leased endpoint cannot be claimed again');
+t_is(Club_Endpoint_Claim('relay', time()), null, 'a leased endpoint cannot be claimed again');
 
 // 出网前换 token，旧 owner 醒过来一个字也写不进去
 $next = Club_Lease_Token();
-t_is(Club_Endpoint_Authorize($t_url, $claim['token'], $next, $id), true, 'the lease owner is authorized to go out');
-t_is(Club_Endpoint_Authorize($t_url, $claim['token'], Club_Lease_Token(), $id), false, 'the superseded token is no longer authorized');
+t_is(Club_Endpoint_Authorize($t_url, $claim['token'], $next, $id, 'relay'), true, 'the lease owner is authorized to go out');
+t_is(Club_Endpoint_Authorize($t_url, $claim['token'], Club_Lease_Token(), $id, 'relay'), false, 'the superseded token is no longer authorized');
 t_is(Club_Endpoint_Result($t_url, $claim['token'], ['id' => $id, 'club' => 'test'], 'ok'), false, 'a stale token cannot write a result');
 t_is((int)t_one('select count(*) from `queues`'), 1, 'a stale result deletes nothing');
 t_is(Club_Endpoint_Result($t_url, $next, ['id' => $id, 'club' => 'test'], 'ok'), true, 'the current token can write its result');
+
+t_group('state / delivery categories');
+
+// 四类都有到期任务时只放最高类领取；完成一类才轮到下一类，共享 token 仍让同一 endpoint 串行。
+t_state_reset();
+foreach (array_reverse(Club_Task_Category_List()) as $category) t_state_queue($t_url, [], null, 0, $category);
+Club_Endpoint_Repair($t_url, time());
+foreach (Club_Task_Category_List() as $position => $category) {
+    foreach (array_slice(Club_Task_Category_List(), $position + 1) as $lower) t_is(Club_Endpoint_Claim($lower, time()), null, $lower.' waits behind due '.$category);
+    $claim = Club_Endpoint_Claim($category, time());
+    t_ok(isset($claim['token']), $category.' claims when every higher category is empty');
+    $task = Club_Endpoint_Queue($t_url, $claim['token'], $category, time());
+    t_is($task['type'] ?? null, $category, $category.' worker selects its own logical queue');
+    t_is(Club_Endpoint_Result($t_url, $claim['token'], $task + ['club' => 'test'], 'ok'), true, $category.' completion advances the endpoint');
+}
+
+// 优先顺序只看已经到期的任务；未来的 follow 不能让当前可投的 relay 空等。
+t_state_reset();
+t_state_queue($t_url, [], null, 0, 'relay');
+$future = time() + 3600;
+t_state_queue($t_url, ['next_at' => $future], $future, 0, 'follow');
+Club_Endpoint_Repair($t_url, time());
+t_ok(Club_Endpoint_Claim('relay', time()) !== null, 'a future follow does not block a due relay');
+
+// 低类领完之后才来的高类，要在选 queue 和最终出网两道窗口分别拦住。
+t_state_reset();
+$relay = t_state_queue($t_url);
+$claim = Club_Endpoint_Claim('relay', time());
+t_state_pending($t_url, 'follow');
+t_is(Club_Endpoint_Queue($t_url, $claim['token'], 'relay', time()), null, 'a follow arriving after relay claim blocks queue selection');
+Club_Endpoint_Release($t_url, $claim['token']);
+
+t_state_reset();
+$relay = t_state_queue($t_url);
+$claim = Club_Endpoint_Claim('relay', time());
+$task = Club_Endpoint_Queue($t_url, $claim['token'], 'relay', time());
+t_state_pending($t_url, 'follow');
+t_is(Club_Endpoint_Authorize($t_url, $claim['token'], Club_Lease_Token(), $task['id'], 'relay'), false, 'a follow arriving before authorization blocks relay output');
+Club_Endpoint_Release($t_url, $claim['token']);
 
 // 黑名单在出网前也拦一道，next_at 那个提示不算数
 t_state_reset();
 $id = t_state_queue($t_url);
 $token = t_state_lease($t_url);
 Club_Blacklist_Add($t_url, time());
-t_is(Club_Endpoint_Authorize($t_url, $token, Club_Lease_Token(), $id), false, 'a blacklisted target is refused right before the request');
+t_is(Club_Endpoint_Authorize($t_url, $token, Club_Lease_Token(), $id, 'relay'), false, 'a blacklisted target is refused right before the request');
 t_is(Club_Endpoint_Desired($t_url, 0), null, 'a blacklisted target has no desired schedule');
 
 t_group('state / blacklist');

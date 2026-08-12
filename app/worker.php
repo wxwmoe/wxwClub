@@ -11,7 +11,7 @@ function worker($type) {
         switch ($type) {
             case 'maintain': $worked = worker_maintain($now, $config); break;
             case 'probe': $worked = worker_probe($now); break;
-            default: $worked = worker_delivery($now); break;
+            default: $worked = worker_delivery($type, $now); break;
         }
         worker_idle($worked, $type);
     } finally {
@@ -39,14 +39,14 @@ function worker_idle($worked, $type) {
     usleep($ms * 1000);
 }
 
-function worker_delivery($now) {
-    return ($lease = Club_Endpoint_Claim($now)) ? worker_endpoint($lease, $now) : false;
+function worker_delivery($category, $now) {
+    return ($lease = Club_Endpoint_Claim($category, $now)) ? worker_endpoint($lease, $now) : false;
 }
 
 // 一条 endpoint 的完整投递。所有权在 DNS 之前就拿到了，出网之前还要再换一次 token：解析和 curl 各有超时但合起来没有上界，跨过 120 秒租约之后这条 endpoint 已经易主
 function worker_endpoint($lease, $now) {
-    $url = $lease['url']; $token = $lease['token']; $start = microtime(true);
-    if (!($task = Club_Endpoint_Queue($url, $token, $now))) {
+    $url = $lease['url']; $token = $lease['token']; $category = $lease['category']; $start = microtime(true);
+    if (!($task = Club_Endpoint_Queue($url, $token, $category, $now))) {
         // 领取后的 token、退避、黑名单或 queue 已经变化，按当前状态重排后放手
         Club_Log_Event('debug', 'endpoint claim has no eligible queue', ['endpoint' => $url]);
         worker_finish('endpoint release', function () use ($url, $token) { Club_Endpoint_Release($url, $token); });
@@ -55,16 +55,9 @@ function worker_endpoint($lease, $now) {
     }
     // worker 是长期进程，关联标记不像 web 那样每请求自动归零，每条任务都要重设。用队列行号，同一条投递的入队、重试、成功几行就能串起来
     Club_Log_Ref('queue#'.$task['id']);
-    if ($task['type'] != 'push') {
-        // 认不出来的类型永远处理不掉，留着只会被反复领取。丢掉这一条，但不能当成终局拒绝：那条路会连带清掉 endpoint 的故障段，而这里根本没跟对端说过话
-        Club_Log_Event('warning', 'queue dropped, unknown task type', ['id' => $task['id'], 'type' => $task['type'], 'target' => $url]);
-        worker_finish('endpoint completion', function () use ($url, $token, $task) { Club_Endpoint_Result($url, $token, $task, 'dropped'); });
-        Club_Stat('endpoint_ms', (int)((microtime(true) - $start) * 1000));
-        return true;
-    }
     $next = Club_Lease_Token(); $active = $token;
-    $result = ActivityPub_Push($task['target'], $task['club'], $task['jsonld'], function () use ($url, $token, $next, $task, &$active) {
-            if (!Club_Endpoint_Authorize($url, $token, $next, $task['id'])) return false;
+    $result = ActivityPub_Push($task['target'], $task['club'], $task['jsonld'], function () use ($url, $token, $next, $task, $category, &$active) {
+            if (!Club_Endpoint_Authorize($url, $token, $next, $task['id'], $category)) return false;
             $active = $next;
             return true;
         });

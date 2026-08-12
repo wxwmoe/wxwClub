@@ -32,7 +32,7 @@ $config = [
         'log-level' => getenv('CLUB_TEST_LOG') ?: 'silent', 'log-retention' => 30
     ],
     'dns' => ['resolver' => [['url' => 'https://one.one.one.one/dns-query', 'ip' => ['1.1.1.1']]], 'timeout' => 5, 'connect-timeout' => 3],
-    'worker' => ['delivery' => 1, 'probe' => 1],
+    'worker' => ['delivery' => ['follow' => 1, 'notice' => 1, 'announce' => 1, 'relay' => 1], 'probe' => 1],
     'club' => ['open-registrations' => true, 'create-limit' => 0, 'suspended-names' => [], 'relay-limit' => 512, 'limits' => [], 'system-name' => 'system'],
     'notice' => ['enabled' => true, 'limit' => 20, 'retention' => 30]
 ];

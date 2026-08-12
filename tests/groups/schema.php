@@ -98,13 +98,13 @@ t_is(t_schema_diff($snapshot, t_schema_dump()), [], 'a fresh install is left unt
 
 t_group('schema / upgrade from a legacy database');
 
-// 每份夹具都是某次历史提交里 tools/wxwclub.sql 的原样拷贝。自动合并是后来才有的，那之前线上结构就以提交里的快照为准，
-// 所以夹具不是照着 app/database/steps/ 反推出来的合成结构，而是那一天真实装出来的库。按文件名从旧到新排，后面几组接着最新那份跑
+// 每份夹具都是某次历史提交里 schema.sql 的原样拷贝再加几行数据，不从 steps 反推历史结构。按文件名从旧到新排，后面几组接着最新那份跑。
 $fixtures = glob(TEST_ROOT.'/fixtures/schema/*.sql');
 foreach ($fixtures as $fixture) {
     $from = basename($fixture, '.sql');
     t_schema_sql($fixture);
-    t_is(Club_DB_Version(), 0, $from.': a database without meta reads as version 0');
+    $before = Club_DB_Version();
+    t_ok($before >= 0 && $before < DB_VERSION, $from.': the fixture predates the current schema');
     list($version, $error) = t_schema_merge();
     t_is($version, DB_VERSION, $from.': merges all the way up'.$error);
     // 这一条就是快照漂移的闸门。差别出现在这里，说明改结构时漏了 app/database/schema.sql 那一半
@@ -114,6 +114,11 @@ foreach ($fixtures as $fixture) {
     t_is(t_one('select `clubs` from `activities` where `id` = 1'), '["test"]', $from.': the activity keeps its club');
     t_is((int)t_one('select count(*) from `followers`'), 1, $from.': existing followers are kept');
     if ($from === '52f1d01-final') t_schema_scheduling($from);
+    if ($from === 'ed9e358-final') {
+        t_is(t_one('select `type` from `tasks` where `tid` = 1'), 'push', $from.': legacy task names are not rewritten');
+        t_is((int)t_one('select `relay_at` from `endpoints` where `url` = :url', [':url' => 'https://remote.example/inbox']), 1666972800,
+            $from.': legacy push backlog is scheduled as relay');
+    }
 }
 
 // 只有 52f1d01 那份带着调度侧的存量行，而它们恰恰是这次合并里最容易整批消失的东西：结构比对看不见行，
@@ -125,7 +130,8 @@ function t_schema_scheduling($from) {
     t_is(t_one('select `jsonld` from `tasks` where `tid` = 1'), '{"type":"Announce"}', $from.': the task keeps its payload');
 
     // due_at 取自旧的 timestamp，retries 取自旧的 retry
-    $queue = t_row('select `target`, `due_at`, `retries` from `queues` where `id` = 1') ?: [];
+    $queue = t_row('select `type`, `target`, `due_at`, `retries` from `queues` where `id` = 1') ?: [];
+    t_is($queue['type'] ?? '-', 'relay', $from.': legacy queues enter the lowest type');
     t_is(isset($queue['target']) ? $queue['target'] : '-', 'https://remote.example/inbox', $from.': the queue row survives with its target');
     t_is((int)($queue['due_at'] ?? -1), 1666972800, $from.': queues.due_at is backfilled from the old timestamp');
     t_is((int)($queue['retries'] ?? -1), 0, $from.': queues.retries is backfilled from the old retry');

@@ -94,11 +94,8 @@ switch ($argv[1]) {
         // 维护是全站一份的活，多开只是把同样的事做 N 遍，所以固定一个、不作配置；起了第二个 master 时它们之间靠命名锁选出一个真正干活，见 worker_maintain。
         // 投递和探活都靠 token 租约互斥，加进程就是加并发，队列逻辑一行都不用改
         $slots = ['maintain.0' => 'maintain'];
-        foreach (['delivery' => 8, 'probe' => 1] as $type => $fallback) for ($i = 0, $n = (int)($config['worker'][$type] ?? $fallback); $i < $n; $i++) $slots[$type.'.'.$i] = $type;
-        if (!in_array('delivery', $slots, true)) {
-            Club_Log_Console('error', 'worker needs at least one delivery process, nothing would ever be sent', ['worker' => $config['worker'] ?? []]);
-            exit(1);
-        }
+        foreach (Club_Config_Delivery_Workers() as $type => $n) for ($i = 0; $i < $n; $i++) $slots[$type.'.'.$i] = $type;
+        for ($i = 0, $n = (int)($config['worker']['probe'] ?? 1); $i < $n; $i++) $slots['probe.'.$i] = 'probe';
         if (!function_exists('pcntl_signal') || !function_exists('pcntl_fork') || !function_exists('pcntl_wait')) {
             Club_Log_Console('error', 'worker unavailable, ext-pcntl missing');
             exit(1);
