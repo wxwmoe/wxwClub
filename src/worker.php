@@ -134,9 +134,11 @@ function worker_maintain($now, $config) {
     // 初值是 null，所以进程起来的第一轮必写一行：待命的 master 什么也不做，没有这行就完全看不出它是在待命还是维护队列压根没起来。之后只有易主才写，不会跟着轮次刷
     if ($held !== $leader) Club_Log_Event('info', $held ? 'maintenance leader acquired' : 'maintenance standby, another master holds the lock', ['pid' => getmypid()]);
     // 落选就退化成空转，由 worker_idle 退避到 2 秒再问一次，对面一挂这边最多 2 秒接手
-    if (!($leader = $held)) return false;
-    // rotate 自己带 1 小时节流，这里的间隔只决定多久去问它一次
-    $every = ['rotate' => 300, 'reconcile' => 60, 'cleanup' => 30, 'dns' => 600, 'tasks' => 60, 'monitor' => 60];
+    if (!$held) { $leader = false; return false; }
+    // 到期表和监控窗口都属于一次任期；旧 leader 再次接管时不能沿用待命前的时间，否则快照会把没有观测到的待命期算进窗口
+    if ($leader !== true) { $due = []; Club_Monitor_Count(null); Club_Monitor_Snapshot(true); } $leader = true;
+    // 周期只在这里决定，具体工作不再各带一层节流，否则调度表写的是询问频率而不是实际执行频率
+    $every = ['rotate' => 3600, 'reconcile' => 60, 'cleanup' => 30, 'dns' => 600, 'tasks' => 60, 'monitor' => 300];
     foreach ($every as $unit => $interval) if (!isset($due[$unit])) $due[$unit] = 0;
     $units = array_keys($every); $count = count($units);
     for ($offset = 0; $offset < $count; $offset++) {
@@ -148,13 +150,9 @@ function worker_maintain($now, $config) {
             Club_DB_Retry('maintenance '.$unit, function () use ($unit, $config, $now, &$due) {
                 switch ($unit) {
                     case 'rotate': Club_Log_Rotate($config['node']['log-retention'] ?? 30); break;
-                    case 'monitor':
-                        // 自己按 5 分钟节流，这里只保证有人足够频繁地去问它一次
-                        Club_Monitor_Snapshot(); break;
+                    case 'monitor': Club_Monitor_Snapshot(); break;
                     case 'reconcile': Club_Reconcile_Step(); break;
-                    case 'cleanup':
-                        // 清完一整批就说明还有 backlog，下一轮立刻接着清
-                        if (Club_Blacklist_Cleanup($batch = 500) >= $batch) $due[$unit] = $now; break;
+                    case 'cleanup': if (Club_Blacklist_Cleanup($batch = 500) >= $batch) $due[$unit] = $now; break;  // 删满一批说明可能还有 backlog，下轮继续或确认收尾
                     case 'dns': Club_Resolver_Cleanup(); break;
                     case 'tasks': if (worker_expire()) $due[$unit] = $now; break;
                 }

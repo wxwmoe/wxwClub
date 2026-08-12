@@ -662,10 +662,9 @@ function Club_Log_Shift($dirs = ['event', 'stat']) {
 }
 
 // logs/ 按请求写文件，长期跑会占满 inode，由 worker 空闲时清理
-function Club_Log_Rotate($days, $interval = 3600) {
-    static $last = 0;
-    if ($days < 1 || $last > time() - $interval || !is_dir($root = APP_ROOT.'/logs')) return;
-    $last = time(); $expire = time() - $days * 86400;
+function Club_Log_Rotate($days) {
+    if ($days < 1 || !is_dir($root = APP_ROOT.'/logs')) return;
+    $expire = time() - $days * 86400;
     foreach (glob($root.'/*', GLOB_ONLYDIR) as $dir) foreach (glob($dir.'/*') as $file) if (is_file($file) && filemtime($file) < $expire) unlink($file);
 }
 
@@ -2748,12 +2747,13 @@ function Club_Monitor_Count($key, $value = 1) {
     return $data[$key];
 }
 
-// 全站视角的周期记录，只有维护队列跑。snapshot 是此刻的数据库存量，interval 是这 5 分钟里发生的事，两类混在一起就没法算速率了
-function Club_Monitor_Snapshot($interval = 300) {
+// 全站视角的周期记录，只有维护队列跑。snapshot 是此刻的数据库存量，window 是两次快照之间发生的事，两类混在一起就没法算速率了
+function Club_Monitor_Snapshot($reset = false) {
     global $db; static $last = 0;
+    if ($reset) { $last = 0; return false; }
     $now = time();
+    // 第一次只立窗口起点；执行周期由 worker_maintain 统一负责，数据库失败时外层会在 5 秒后重试，成功前不推进起点
     if (!$last) { $last = $now; return false; }
-    if ($last > $now - $interval) return false;
     $window = $now - $last;
     // total 含着待回收的空行，单看它读不出「有多少 endpoint 在排队投递」。idle 本身就是等着被回收的那部分，卡住了它只会单调涨。
     // 不必拿它减 blacklist：拉黑目标的控制行在 backlog 清完那一批就删了，落在 idle 里的只剩正在清的那几条，同一行的 blacklisted_queues 非零就是它们还在的信号。
