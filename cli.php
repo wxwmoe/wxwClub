@@ -78,6 +78,7 @@ Usage:
   php cli.php club set <club> <nickname|infoname|summary|avatar|banner> <value>
   php cli.php club clear <club> <nickname|infoname|summary|avatar|banner>
   php cli.php club publish <club>
+  php cli.php user cleanup [--yes]
   php cli.php user fetch <handle|actor-url>
   php cli.php user groups <handle|actor-url> [--json]
   php cli.php follow add|remove <handle|actor-url> <club>
@@ -238,6 +239,20 @@ function cli_manage($resource, $action, $args) {
         $data['timestamp_text'] = cli_time($user['timestamp']); $data['refresh_text'] = cli_time($user['refresh']);
         cli_emit($data, ['uid:          '.$user['uid'], 'name:         '.$user['name'], 'actor:        '.$user['actor'], 'inbox:        '.$user['inbox'],
             'shared_inbox: '.$user['shared_inbox'], 'created:      '.$data['timestamp_text'], 'refreshed:    '.$data['refresh_text']]);
+        return 0;
+    }
+
+    if ($resource === 'user' && $action === 'cleanup') {
+        $yes = cli_flag($args, '--yes');
+        if ($args) return cli_error('usage: php cli.php user cleanup [--yes]');
+        $unused = (int)$db->query('select count(*) from `users` where not exists (select 1 from `followers` where `followers`.`uid` = `users`.`uid`)' .
+            ' and not exists (select 1 from `activities` where `activities`.`uid` = `users`.`uid`)')->fetchColumn();
+        if (!$yes) {
+            cli_emit(['preview' => true, 'users' => $unused], ['Matched '.$unused.' unused user(s).', 'Run again with --yes to clean up.']);
+            return $unused ? 2 : 0;
+        }
+        $deleted = Club_Actor_Cleanup();
+        cli_emit(['deleted' => $deleted], ['Cleaned up '.$deleted.' unused user(s).']);
         return 0;
     }
 

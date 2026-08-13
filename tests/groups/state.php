@@ -278,6 +278,17 @@ t_is($update['type'], 'Update', 'profile publishing emits an Update activity');
 t_is($update['object']['name'], 'Test Group', 'profile publishing embeds the complete current actor');
 t_is(Club_Group_Follow('https://remote.example/users/alice', 'test', false), 'removed', 'cli can remove a follower');
 
+// 只清既没关注、也没动态的缓存；notice 不算用户动态，并随 users 外键一起收掉。limit=1 强制走多批，覆盖批次边界。
+t_exec('insert into `notices`(`uid`,`type`,`timestamp`) select `uid`, \'limit\', :now from `users` where `name` = \'alice@remote.example\'', [':now' => time()]);
+t_exec('insert into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`) select `uid`, \'Create\', \'[]\', \'https://remote.example/objects/bob\', :now from `users` where `name` = \'bob@remote.example\'', [':now' => time()]);
+t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values' .
+    ' (\'carol@remote.example\', \'https://remote.example/users/carol\', \'https://remote.example/users/carol/inbox\', \'\', :shared, :now, :now)', [':shared' => $t_url, ':now' => time()]);
+t_is(Club_Actor_Cleanup(1), 2, 'user cleanup deletes unused actors across bounded batches');
+t_is((int)t_one('select count(*) from `users` where `name` = \'alice@remote.example\''), 0, 'user cleanup removes an actor with notices only');
+t_is((int)t_one('select count(*) from `notices`'), 0, 'user cleanup cascades notices owned by a removed actor');
+t_is((int)t_one('select count(*) from `users` where `name` = \'bob@remote.example\''), 1, 'user cleanup keeps an actor with activity');
+t_is((int)t_one('select count(*) from `users` where `name` = \'carol@remote.example\''), 0, 'user cleanup removes a second unused actor');
+
 // 人工永久拉黑要撤销旧租约并立刻停调度；探活命令则能显式把它从「永不」拉回当前时间。
 $token = t_state_lease($t_url);
 t_is(Club_Blacklist_Force($t_url), true, 'cli can force a target onto the blacklist');

@@ -268,6 +268,23 @@ function ActivityPub_Verify_Fail($reason) {
     global $verify_reason; $verify_reason = $reason; return false;
 }
 
+// 没关注任何群组、也没留下动态的 actor 缓存已经没有业务读者。分批独立提交，避免一次清理把 users 和级联的 notices 长时间锁成一笔大事务；
+// 条件留在 delete 里重查，预览之后新产生的关注或动态不能被并发清掉。
+function Club_Actor_Cleanup($limit = 500) {
+    global $db; $limit = max(1, (int)$limit); $total = 0;
+    do {
+        $rows = Club_DB_Transaction('actor cleanup', function () use ($db, $limit) {
+            $pdo = $db->prepare('delete from `users` where not exists (select 1 from `followers` where `followers`.`uid` = `users`.`uid`)' .
+                ' and not exists (select 1 from `activities` where `activities`.`uid` = `users`.`uid`) limit '.$limit);
+            $pdo->execute();
+            return $pdo->rowCount();
+        });
+        $total += $rows;
+    } while ($rows >= $limit);
+    Club_Log_Event('info', 'unused actors cleaned by cli', ['rows' => $total]);
+    return $total;
+}
+
 // 拉取远端 actor 写入本地缓存，已存在则更新（对方可能轮换密钥或迁移 inbox）。
 // users 是全站共用的一份，这行属于哪个群组无从谈起，签名统一用系统群组：同一行的建立和刷新由不同群组签本来就不一致，
 // 而随手拿投稿命中的某个群组来签，等于让对端为一次首访去拉一个它没见过、还可能单独封过的 actor
