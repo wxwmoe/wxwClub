@@ -6,32 +6,26 @@ A simple social groups compatible with ActivityPub.
 
 ## 特性
 
-### 已实现
-
 - 兼容 WebFinger 查找
 - 兼容 Mastodon 安全模式
-- 简单兼容 ActivityPub 协议
-  - 响应 关注 / 取消关注 请求
-  - 转发收到的 公开 / 不公开 消息
-  - 收到旧消息 Tombstone 时撤销转发
-  - 收到跨站用户 Delete 时清理关注关系
-- 单个群组 Actor 支持自定义修改
-  - 个人资料页　头像、横幅、昵称
-  - 中文简介、英文简介、简介模板
-- 投稿限流，支持 用户 / 群组 / 实例 / 重复内容 四类规则
-- 触发限流时私信提醒投稿者，原帖删除后自动撤回提醒
-- 提醒文案多语言，按对端 contentMap 自动选择
-- 站点首页、群组主页、Outbox，均为游标翻页
-- Push 任务队列，自动重试，多次失败进黑名单
-- Shared Inbox、Outbox 实现
-- 跨站消息 HTTP Signature 校验
-  - 校验 Date / Digest，签名主体与 actor 绑定
-  - 出站请求只允许公网地址，跳转逐跳重签
-- 兼容 Mastodon、Misskey、Pleroma
-
-### 待实现
-- 私信修改 Actor 信息
-- RsaSignature2017 生成
+- 兼容 ActivityPub 群组互操作
+  - 响应关注、取消关注请求
+  - 转发提及群组的公开、不公开消息
+  - 转发带签名的编辑、投票更新和删除活动
+  - 用户销户后清理关注关系和历史消息
+  - 原消息删除后撤回转发
+- 支持个性化的群组简介信息
+  - 头像、横幅、昵称均可修改
+  - 独立的多语言简介和简介模板
+- 投稿限流，支持按用户、群组、实例、重复内容设置规则
+- 触发限流时私信提醒投稿者，原消息删除后自动撤回提醒
+- 提醒文案支持多语言，按消息 `contentMap` 自动选择语言
+- 站点首页、群组页、Outbox 使用游标翻页，避免深分页扫描
+- 投递队列自动重试，持续失败的实例进入黑名单并定期探测恢复
+- 校验跨站消息的 HTTP Signature
+  - 校验 Date / Digest，签名主体与 Actor 绑定
+  - 出站请求只允许访问公网地址，跳转逐跳校验并重新签名
+- 兼容 Mastodon、Misskey、Pleroma、GoToSocial 互操作
 
 ## 使用
 
@@ -68,9 +62,13 @@ A simple social groups compatible with ActivityPub.
 
 > (> ʌ <) 都看到这了，点个 Star 吧 ~
 
-参考项目  
+ActivityPub 兼容实现参考  
 [wordpress-activitypub / MIT][1]  
+[mastodon / AGPL-3.0][2]  
+[misskey / AGPL-3.0][3]  
   
 MIT © FGHRSH
 
-  [1]: https://github.com/pfefferle/wordpress-activitypub "ActivityPub for WordPress"
+  [1]: https://github.com/Automattic/wordpress-activitypub "ActivityPub for WordPress"
+  [2]: https://github.com/mastodon/mastodon "Your self-hosted, globally interconnected microblogging community"
+  [3]: https://github.com/misskey-dev/misskey "A completely free and open interplanetary-microblogging platform"
