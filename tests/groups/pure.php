@@ -42,6 +42,11 @@ $long = 'https://a.example/'.str_repeat('x', 255 - strlen('https://a.example/'))
 t_is(Club_Endpoint_Normalize($long), $long, 'Club_Endpoint_Normalize at 255 bytes');
 t_is(Club_Endpoint_Normalize($long.'x'), false, 'Club_Endpoint_Normalize over 255 bytes');
 
+t_table('Club_Url_Host', 'Club_Url_Host', [
+    ['Remote.Example.', 'remote.example'], ['[2001:0db8::1]', '2001:db8::1'], ['127.0.0.1', '127.0.0.1'],
+    ['https://remote.example', false], ['remote.example:8443', false], ['-remote.example', false], ['', false]
+]);
+
 t_group('pure / ssrf');
 
 // PHP 的 NO_PRIV_RANGE/NO_RES_RANGE 漏掉的那些段，正是这张表要盯住的
@@ -330,6 +335,7 @@ t_is(Club_Endpoint_Drifted($t_empty, $t_empty + ['idle_since' => 0]), true, 'an 
 t_is(Club_Endpoint_Drifted($t_schedule, $t_schedule + ['idle_since' => 5]), true, 'a scheduled row with an idle clock is drift');
 
 t_is(Club_Task_Category(['type' => 'Accept'], true), 'follow', 'Accept is routed to follow');
+t_is(Club_Task_Category(['type' => 'Update'], false), 'relay', 'an actor Update uses the high-fanout relay queue');
 t_is(Club_Task_Category(['type' => 'Create'], true), 'notice', 'a direct local activity is routed to notice');
 t_is(Club_Task_Category(['type' => 'Announce'], false), 'announce', 'a fanout local activity is routed to announce');
 t_is(Club_Task_Category('{"type":"Create"}', false), 'relay', 'an untouched remote payload is routed to relay');

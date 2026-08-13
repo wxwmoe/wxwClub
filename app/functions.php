@@ -13,7 +13,7 @@ function ActivityPub_Collection($id, $arr = []) {
 // 跳转自己跟：交给 curl 的话每一跳既过不了内网检查，签名也对不上新 host。跳数与 Mastodon 一致。
 // $fetch_retry 说的是「这次拉不到」还是「这个地址永远拉不到」，两者的自愈概率差好几个数量级：调用方拿它决定给对端 5xx 还是终局 4xx，判错一边就是丢活动或者无限重投。
 // 默认终局，只有说得出「过一会儿可能就好了」的失败才置 true
-function ActivityPub_Fetch($url, $club, $hops = 3) {
+function ActivityPub_Fetch($url, $club, $hops = 3, $accept = 'application/activity+json') {
     global $curl, $fetch_retry;
     $fetch_retry = false;
     for ($i = 0; $i <= $hops; $i++) {
@@ -29,7 +29,7 @@ function ActivityPub_Fetch($url, $club, $hops = 3) {
         }
         $date = gmdate('D, d M Y H:i:s T');
         // 把验过的 IP 一起交下去，别让 curl 自己再解析一遍
-        $result = ActivityPub_Request($url, $date, ['Signature' => ActivityPub_Sign($url, $club, $date)], null, $public);
+        $result = ActivityPub_Request($url, $date, ['Signature' => ActivityPub_Sign($url, $club, $date)], null, $public, $accept);
         // 有救的只有传输层没通（连不上、超时、TLS，看 curl_error）和对端喊等会儿的那几个状态码。不能照 Club_HTTP_Request 的返回值判：它把 4xx / 5xx 一律算进 error，
         // 那样 404、410 这种「这个文档永远不在」的终局答复也成了还有救，对端会一直收到 5xx。这条线与投递侧的 rejected 完全互补（501 同样归终局），只多一个 2xx —— 拿到了文档但它不合法，那也是终局
         $code = $curl['status'];
@@ -121,7 +121,7 @@ function ActivityPub_Push_State($code) {
     return 'failed';
 }
 
-function ActivityPub_Request($url, $date, $head, $data = null, $ips = null) {
+function ActivityPub_Request($url, $date, $head, $data = null, $ips = null, $accept = 'application/activity+json') {
     global $ver, $base, $curl; static $handle = null, $pinned = null;
     if (!isset($handle)) $handle = curl_init();
     // 内网检查的另一半：Club_Url_Public 只交上来公网地址，私网那些是靠「curl 拿不到就连不上」拦住的。不钉的话 curl 会拿 URL 自己再解析一遍，既把剔掉的地址捡回来，也留下 DNS rebinding 的空子。
@@ -140,7 +140,7 @@ function ActivityPub_Request($url, $date, $head, $data = null, $ips = null) {
     if ($resolve) $options[CURLOPT_RESOLVE] = $resolve;
     // 跳转由 ActivityPub_Fetch 自己跟，POST 则完全不跟：curl 会把它降级成 GET
     // 只放行 http(s)，否则能把我们带到 file:// 之类的协议上
-    $headers = ['Accept' => 'application/activity+json', 'Content-Type' => 'application/activity+json', 'Date' => $date] + $head;
+    $headers = ['Accept' => $accept, 'Content-Type' => 'application/activity+json', 'Date' => $date] + $head;
     $curl = Club_HTTP_Request($handle, $url, $headers, $options, $data);
     Club_Log_Write('debug', 'curl', [isset($data) ? 'post' : 'get', strtolower($curl['headers']['Status-Line'] ?? ''),
         preg_replace('#^https?://#i', '', $url)], ['header' => $curl['headers'], 'result' => $curl['response'], 'error' => $curl['error']]);
@@ -335,6 +335,35 @@ function Club_Actor_Has($actor) {
     return (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
 }
 
+// 管理入口接受 actor URL 或 acct handle。handle 先走 WebFinger 找协议声明的 canonical actor，不能按实例软件猜 /users/name 一类路径。
+// WebFinger 也是对端给出的 GET 目标，沿用 actor 拉取的逐跳公网校验、DNS pin 和重签名，不能为 CLI 另开一条不受 SSRF 约束的出口。
+function Club_Actor_Resolve($input) {
+    $input = trim((string)$input);
+    if (preg_match('#^https?://#i', $input)) return $input;
+    if (!preg_match('/^@?([^@\s]+)@([^@\s]+)$/', $input, $matches)) return false;
+    $user = $matches[1]; $host = strtolower(rtrim($matches[2], '.'));
+    if (Club_Endpoint_Normalize('https://'.$host.'/') === false) return false;
+    if (!($club = Club_Group_Signer())) return false;
+    $resource = 'acct:'.$user.'@'.$host;
+    $url = 'https://'.$host.'/.well-known/webfinger?resource='.rawurlencode($resource);
+    $body = ActivityPub_Fetch($url, $club, 3, 'application/jrd+json, application/json');
+    $json = is_string($body) ? json_decode($body, true) : null;
+    if (!is_array($json)) {
+        Club_Log_Event('warning', 'webfinger failed, response is not json', ['resource' => $resource]);
+        return false;
+    }
+    $fallback = '';
+    foreach ((array)($json['links'] ?? []) as $link) {
+        if (!is_array($link) || ($link['rel'] ?? '') !== 'self' || !is_string($link['href'] ?? null)) continue;
+        $type = strtolower((string)($link['type'] ?? ''));
+        if ($type === 'application/activity+json' || strpos($type, 'application/ld+json') === 0) return $link['href'];
+        if ($fallback === '') $fallback = $link['href'];
+    }
+    if ($fallback !== '') return $fallback;
+    Club_Log_Event('warning', 'webfinger failed, actor link is missing', ['resource' => $resource]);
+    return false;
+}
+
 // 验签失败时刷新公钥，带冷却时间，防止伪造签名把本站当外连放大器
 function Club_Actor_Sync($actor, $cooldown = 3600) {
     global $db, $fetch_retry; $pdo = $db->prepare('select `refresh` from `users` where `actor` = :actor');
@@ -347,6 +376,44 @@ function Club_Actor_Sync($actor, $cooldown = 3600) {
         $fetch_retry = true; return false;
     }
     return Club_Actor_Fetch($actor);
+}
+
+// Actor 文档和资料更新必须来自同一份组装结果；两边各抄一份时，新增字段只改到网页那份，远端收到 Update 后反而会把缓存里的字段删掉。
+function Club_Group_Actor($club, &$row = null) {
+    global $db, $base, $config;
+    $pdo = $db->prepare('select `cid`,`name`,`nickname`,`infoname`,`summary`,`avatar`,`banner`,`public_key`,`timestamp` from `clubs` where `name` = :club');
+    $pdo->execute([':club' => $club]);
+    if (!($row = $pdo->fetch(PDO::FETCH_ASSOC))) return false;
+    $club = $row['name']; $club_url = $base.'/club/'.$club; $system = Club_Group_System($club);
+    $infoname = isset($row['infoname']) ? json_decode($row['infoname'], true) : [];
+    $nametag = array_merge($config['default']['infoname'], is_array($infoname) ? $infoname : []);
+    $summary = $row['summary'] ?: Club_Template_NameTag($club, $config['default']['summary'], $nametag);
+    $nickname = $row['nickname'] ?: Club_Template_NameTag($club, $config['default']['nickname'], $nametag);
+    return [
+        '@context' => Club_Template_Render('context'),
+        'id' => $club_url,
+        'type' => $system ? 'Service' : 'Group',
+        'following' => $club_url.'/following',
+        'followers' => $club_url.'/followers',
+        'inbox' => $club_url.'/inbox',
+        'outbox' => $club_url.'/outbox',
+        'featured' => $club_url.'/collections/featured',
+        'featuredTags' => $club_url.'/collections/tags',
+        'preferredUsername' => $club,
+        'name' => $nickname,
+        'summary' => $summary,
+        'url' => $club_url,
+        'manuallyApprovesFollowers' => $system,
+        'discoverable' => false,
+        'published' => gmdate('Y-m-d\TH:i:s\Z', $row['timestamp']),
+        'devices' => $club_url.'/collections/devices',
+        'publicKey' => ['id' => $club_url.'#main-key', 'owner' => $club_url, 'publicKeyPem' => $row['public_key']],
+        'tag' => [],
+        'attachment' => [],
+        'endpoints' => ['sharedInbox' => $base.'/inbox'],
+        'icon' => ['type' => 'Image', 'url' => $row['avatar'] ?: $config['default']['avatar']],
+        'image' => ['type' => 'Image', 'url' => $row['banner'] ?: $config['default']['banner']]
+    ];
 }
 
 function Club_Group_Create($club, $system = false) {
@@ -399,9 +466,70 @@ function Club_Group_Fail($reason) {
     global $club_reason; $club_reason = $reason; return false;
 }
 
+// 管理命令只改本站保存的关注关系。没有原始 Follow Activity 就不能伪造 Accept，远端协议状态由管理员自行确认。
+function Club_Group_Follow($actor, $club, $follow) {
+    global $db;
+    $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor'); $pdo->execute([':actor' => $actor]);
+    if (!($uid = $pdo->fetch(PDO::FETCH_COLUMN, 0))) return 'user-missing';
+    $pdo = $db->prepare('select `cid` from `clubs` where `name` = :club'); $pdo->execute([':club' => $club]);
+    if (!($cid = $pdo->fetch(PDO::FETCH_COLUMN, 0))) return 'club-missing';
+    if ($follow) {
+        $pdo = $db->prepare('insert ignore into `followers`(`cid`,`uid`,`timestamp`) values (:cid, :uid, :now)');
+        $pdo->execute([':cid' => $cid, ':uid' => $uid, ':now' => time()]);
+        $state = $pdo->rowCount() ? 'added' : 'exists';
+    } else {
+        $pdo = $db->prepare('delete from `followers` where `cid` = :cid and `uid` = :uid');
+        $pdo->execute([':cid' => $cid, ':uid' => $uid]);
+        $state = $pdo->rowCount() ? 'removed' : 'absent';
+    }
+    Club_Log_Event($state === 'added' || $state === 'removed' ? 'info' : 'debug', 'cli follow '.$state, ['club' => $club, 'actor' => $actor]);
+    return $state;
+}
+
 function Club_Group_From_Object($object) {
     if (count($parts = explode('/club/', ActivityPub_Object_Id($object))) < 2) return false;
     return explode('/', $parts[1])[0];
+}
+
+// 资料更新照 Mastodon 发完整 Actor 的 Update；内部走 relay 通道，因为它与原帖转发一样是面向所有 follower shared inbox 的高扇出任务。
+function Club_Group_Publish($club) {
+    global $db, $public_streams;
+    if (!($actor = Club_Group_Actor($club, $row))) return false;
+    $pdo = $db->prepare('select count(*) as `followers`, count(distinct `u`.`shared_inbox` collate ascii_bin) as `targets` from `followers` `f` join `users` `u` on `f`.`uid` = `u`.`uid`'.
+        ' where `f`.`cid` = :cid and not exists (select 1 from `blacklist` `b` where `b`.`target` = `u`.`shared_inbox` collate ascii_bin)');
+    $pdo->execute([':cid' => $row['cid']]); $counts = $pdo->fetch(PDO::FETCH_ASSOC);
+    if (!(int)$counts['targets']) return ['followers' => (int)$counts['followers'], 'targets' => 0, 'queued' => false];
+    $id = $actor['id'].'#updates/'.time().'-'.bin2hex(random_bytes(4));
+    $activity = ['@context' => 'https://www.w3.org/ns/activitystreams', 'id' => $id, 'type' => 'Update', 'actor' => $actor['id'], 'to' => [$public_streams], 'object' => $actor];
+    $queued = Club_Delivery_Queue($club, $activity);
+    if ($queued) Club_Log_Event('info', 'club profile update queued', ['club' => $club, 'followers' => (int)$counts['followers'], 'targets' => (int)$counts['targets'], 'activity' => $id]);
+    return ['followers' => (int)$counts['followers'], 'targets' => (int)$counts['targets'], 'queued' => (bool)$queued, 'activity' => $id];
+}
+
+function Club_Group_Set($club, $field, $value) {
+    global $db;
+    $fields = ['nickname', 'infoname', 'summary', 'avatar', 'banner'];
+    if (!in_array($field, $fields, true)) throw new InvalidArgumentException('Unknown club field: '.$field);
+    if (isset($value) && !is_string($value)) throw new InvalidArgumentException('Club field value must be a string or null');
+    if ($field === 'nickname' && isset($value) && preg_match_all('/./us', $value, $chars) > 30) throw new InvalidArgumentException('nickname exceeds 30 characters');
+    if ($field === 'infoname' && isset($value)) {
+        $decoded = json_decode($value, true);
+        if (!is_array($decoded) || substr(ltrim($value), 0, 1) !== '{') throw new InvalidArgumentException('infoname must be a JSON object');
+        $value = Club_Json_Encode($decoded);
+    }
+    if (($field === 'avatar' || $field === 'banner') && isset($value)) {
+        $parts = parse_url($value);
+        if (strlen($value) > 255 || !is_array($parts) || empty($parts['host']) || !in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'], true) || isset($parts['user']) || isset($parts['pass']))
+            throw new InvalidArgumentException($field.' must be an HTTP(S) URL no longer than 255 bytes');
+    }
+    $pdo = $db->prepare('update `clubs` set `'.$field.'` = :value where `name` = :club');
+    $pdo->execute([':value' => $value, ':club' => $club]);
+    if (!$pdo->rowCount()) {
+        $pdo = $db->prepare('select 1 from `clubs` where `name` = :club'); $pdo->execute([':club' => $club]);
+        if (!$pdo->fetch(PDO::FETCH_COLUMN, 0)) return false;
+    }
+    Club_Log_Event('info', 'club profile field changed by cli', ['club' => $club, 'field' => $field, 'cleared' => !isset($value)]);
+    return true;
 }
 
 // 发私信提醒、对外拉取、给透传的转发签名都用它，不开放注册、不进目录、不接受关注
@@ -1103,6 +1231,8 @@ function Club_Notice_Send($actor, $type, $vars = [], $lang = null, $reply = null
 function Club_Task_Category($activity, $direct) {
     if (!is_array($activity)) return 'relay';
     if (($activity['type'] ?? '') === 'Accept') return 'follow';
+    // Actor Update 与原帖转发一样要扇出到整个 follower 集合，大群组不能拿它占住公告通道。
+    if (($activity['type'] ?? '') === 'Update') return 'relay';
     return $direct ? 'notice' : 'announce';
 }
 
@@ -1215,6 +1345,36 @@ function Club_Queue_Insert($task, $target, $category = 'relay') {
         return null;
     }
     return true;
+}
+
+// 管理清理按 target 分批删队列；task 只有在最后一个消费者也没了时才回收，不能因为清一家实例把同一活动投给其他实例的行一起级联掉。
+function Club_Queue_Purge($targets, $limit = 500) {
+    global $db; $limit = max(1, (int)$limit); $total = 0;
+    $targets = array_values(array_unique((array)$targets)); sort($targets, SORT_STRING);
+    foreach ($targets as $target) {
+        do {
+            $rows = 0; $blocked = false;
+            try {
+                $db->beginTransaction();
+                $pdo = $db->prepare('select `url` from `endpoints` where `url` = :target for update'); $pdo->execute([':target' => $target]);
+                $pdo = $db->prepare('select `target` from `blacklist` where `target` = :target for update'); $pdo->execute([':target' => $target]);
+                $blocked = (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
+                $pdo = $db->prepare('delete from `queues` where `target` = :target limit '.$limit); $pdo->execute([':target' => $target]);
+                $rows = $pdo->rowCount(); $total += $rows;
+                if ($rows < $limit && $blocked) {
+                    $pdo = $db->prepare('delete from `endpoints` where `url` = :target'); $pdo->execute([':target' => $target]);
+                }
+                $db->commit();
+            } catch (PDOException $e) {
+                if ($db->inTransaction()) $db->rollback();
+                throw $e;
+            }
+        } while ($rows >= $limit);
+        if (!$blocked) Club_Endpoint_Repair($target, time());
+    }
+    while (Club_Task_Cleanup(0)) {}
+    Club_Log_Event('info', 'queues purged by cli', ['targets' => count($targets), 'rows' => $total]);
+    return $total;
 }
 
 function Club_Queue_Retry($id, $retries, $due) {
@@ -1892,6 +2052,38 @@ function Club_Blacklist_Defer($target, $token, $reason) {
     Club_Log_Event('debug', $pdo->rowCount() ? 'blacklist probe deferred' : 'blacklist probe defer skipped, lease is no longer ours',
         ['target' => $target, 'token' => $token, 'reason' => $reason, 'retry' => $check - time()]);
     return (bool)$pdo->rowCount();
+}
+
+// 人工拉黑会覆盖自动恢复状态并撤销旧租约；已经出网的请求收不回来，但结果回来时 token 已失效，不能再改队列或健康历史。
+function Club_Blacklist_Force($target, $check = 4111110000) {
+    global $db; $now = time();
+    if (($target = Club_Endpoint_Require($target, ['source' => 'cli blacklist'])) === false) return false;
+    try {
+        $db->beginTransaction();
+        $pdo = $db->prepare('select `url` from `endpoints` where `url` = :target for update'); $pdo->execute([':target' => $target]);
+        $pdo = $db->prepare('select `target` from `blacklist` where `target` = :target for update'); $pdo->execute([':target' => $target]);
+        $pdo = $db->prepare('insert into `blacklist`(`target`,`created_at`,`check_at`,`checks`,`restore_pending_at`,`lease_until`,`lease_token`)'.
+            ' values (:target, :now, :check, 0, null, 0, null) on duplicate key update `check_at` = values(`check_at`), `restore_pending_at` = null, `lease_until` = 0, `lease_token` = null');
+        $pdo->execute([':target' => $target, ':now' => $now, ':check' => (int)$check]);
+        $pdo = $db->prepare('update `endpoints` set `next_at` = null, `follow_at` = null, `notice_at` = null, `announce_at` = null, `relay_at` = null,'.
+            ' `idle_since` = if(`idle_since` > 0, `idle_since`, :now), `lease_until` = 0, `lease_token` = null where `url` = :target');
+        $pdo->execute([':target' => $target, ':now' => $now]);
+        $db->commit();
+    } catch (PDOException $e) {
+        if ($db->inTransaction()) $db->rollback();
+        throw $e;
+    }
+    Club_Log_Event('info', 'endpoint blacklisted by cli', ['target' => $target, 'check_at' => (int)$check]);
+    return true;
+}
+
+function Club_Blacklist_Probe_Now($targets) {
+    global $db; $now = time(); $rows = 0;
+    $targets = array_values(array_unique((array)$targets)); sort($targets, SORT_STRING);
+    $pdo = $db->prepare('update `blacklist` set `check_at` = :now where `target` = :target and `restore_pending_at` is null');
+    foreach ($targets as $target) { $pdo->execute([':target' => $target, ':now' => $now]); $rows += $pdo->rowCount(); }
+    Club_Log_Event($rows ? 'info' : 'debug', 'blacklist probes requested by cli', ['targets' => count($targets), 'updated' => $rows]);
+    return $rows;
 }
 
 // 真正解禁：blacklist 行在这一步提交之前一直挡着入队和出网，提交之后只接受未来的新活动，过去的 backlog 不会被随机复活
@@ -2868,6 +3060,14 @@ function Club_Url_Absolute($url, $base) {
     if (substr($url, 0, 1) === '/') return $root.$url;
     $path = $parts['path'] ?? '/';
     return $root.substr($path, 0, strrpos($path, '/') + 1).$url;
+}
+
+// CLI 的 host 参数不带 scheme、port 或 path；单独规范化它，避免拿 endpoint 规则拼一个假 URL 后再拆回来。
+function Club_Url_Host($input) {
+    $host = strtolower(rtrim(trim((string)$input, " \t\n\r\0\x0B[]"), '.'));
+    if (filter_var($host, FILTER_VALIDATE_IP)) return inet_ntop(inet_pton($host));
+    if (!preg_match('/^[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)*$/', $host)) return false;
+    return $host;
 }
 
 // 只放行公网 http(s)：actor、keyId、inbox 都是对端给的，不挡的话伪造一个签名就能让本站去访问 127.0.0.1、云元数据服务之类的内网目标。

@@ -1,7 +1,10 @@
 #!/usr/bin/env php
 <?php if (PHP_SAPI != 'cli') exit("The program runs only in CLI mode!\n");
 
-if (isset($argv[1]) && $argv[1] === 'test') {
+if (!isset($argv[1])) { cli_usage(); exit(1); }
+if ($argv[1] === 'help') { cli_usage(); exit(0); }
+
+if ($argv[1] === 'test') {
     array_splice($argv, 1, 1);
     require(__DIR__.'/tests/suite.php');
     exit;
@@ -62,12 +65,313 @@ function worker_loop($type) {
     Club_Stat_Flush(true);
 }
 
-if (!isset($argv[1])) {
-    fwrite(STDERR, "Usage: php cli.php worker|migrate|test [group...]\n");
-    exit(1);
+function cli_error($message, $code = 1) {
+    fwrite(STDERR, 'Error: '.$message."\n");
+    return $code;
+}
+
+function cli_usage() {
+    echo <<<'TEXT'
+Usage:
+  php cli.php club list [--after CID|--before CID] [--order asc|desc] [--limit 50] [--json]
+  php cli.php club show <club> [--json]
+  php cli.php club set <club> <nickname|infoname|summary|avatar|banner> <value>
+  php cli.php club clear <club> <nickname|infoname|summary|avatar|banner>
+  php cli.php club publish <club>
+  php cli.php user fetch <handle|actor-url>
+  php cli.php user groups <handle|actor-url> [--json]
+  php cli.php follow add|remove <handle|actor-url> <club>
+  php cli.php dns show|refresh <host> [--json]
+  php cli.php queue show <host|target> [--json]
+  php cli.php queue purge <host|target> [--yes]
+  php cli.php endpoint show <host|target> [--json]
+  php cli.php blacklist show|probe|add <host|target> [--json]
+  php cli.php worker|migrate|test [group...]
+  php cli.php status [--json]
+TEXT;
+    echo "\n";
+}
+
+function cli_flag(&$args, $name) {
+    $key = array_search($name, $args, true);
+    if ($key === false) return false;
+    array_splice($args, $key, 1);
+    return true;
+}
+
+function cli_option(&$args, $name, $default = null) {
+    $key = array_search($name, $args, true);
+    if ($key === false) return $default;
+    if (!isset($args[$key + 1])) throw new InvalidArgumentException($name.' requires a value');
+    $value = $args[$key + 1]; array_splice($args, $key, 2);
+    return $value;
+}
+
+function cli_emit($data, $lines = []) {
+    global $cli_json;
+    if ($cli_json) echo Club_Json_Encode($data), "\n";
+    else foreach ((array)$lines as $line) echo $line, "\n";
+}
+
+function cli_time($timestamp, $never = false) {
+    if (!isset($timestamp)) return '-';
+    if ($never && (int)$timestamp === 4111110000) return '永不';
+    return date('Y-m-d H:i:s', (int)$timestamp);
+}
+
+// LIKE 只负责缩小候选，最后必须按 URL 解析出的 host 精确比较；否则 example.com 会误中 notexample.com，甚至 path/query 里的同名字符串。
+function cli_targets($input, $source) {
+    global $db;
+    if (($target = Club_Endpoint_Normalize($input)) !== false) return [$target];
+    if (($host = Club_Url_Host($input)) === false) throw new InvalidArgumentException('expected a host or normalized HTTP(S) target');
+    $sources = [
+        'blacklist' => ['target', 'blacklist'],
+        'endpoints' => ['url', 'endpoints'],
+        'queues' => ['target', 'queues'],
+        'users' => ['shared_inbox', 'users']
+    ];
+    if (!isset($sources[$source])) throw new InvalidArgumentException('unknown target source');
+    list($column, $table) = $sources[$source];
+    $pdo = $db->prepare('select distinct `'.$column.'` from `'.$table.'` where `'.$column.'` like :like order by `'.$column.'` collate ascii_bin');
+    $pdo->execute([':like' => '%'.$host.'%']); $targets = [];
+    foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $url) {
+        $found = parse_url($url, PHP_URL_HOST);
+        if (is_string($found) && strcasecmp(rtrim(trim($found, '[]'), '.'), $host) === 0) $targets[] = $url;
+    }
+    return $targets;
+}
+
+function cli_user($input) {
+    global $db;
+    $input = trim((string)$input);
+    if (preg_match('#^https?://#i', $input)) {
+        $pdo = $db->prepare('select * from `users` where `actor` = :actor'); $pdo->execute([':actor' => $input]);
+        return $pdo->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+    $name = ltrim($input, '@');
+    $pdo = $db->prepare('select * from `users` where `name` = :name order by `uid` limit 2'); $pdo->execute([':name' => $name]);
+    $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
+    if (count($rows) > 1) throw new RuntimeException('more than one cached actor uses this handle; pass the actor URL');
+    return $rows ? $rows[0] : null;
+}
+
+function cli_table($rows, $columns) {
+    if (!$rows) return ['No rows.'];
+    $lines = [implode("\t", array_values($columns))];
+    foreach ($rows as $row) {
+        $values = [];
+        foreach (array_keys($columns) as $key) $values[] = isset($row[$key]) ? (string)$row[$key] : '-';
+        $lines[] = implode("\t", $values);
+    }
+    return $lines;
+}
+
+function cli_manage($resource, $action, $args) {
+    global $db, $base, $cli_json;
+    $cli_json = cli_flag($args, '--json');
+    if (Club_DB_Version() !== DB_VERSION) return cli_error('database schema does not match this code; run php cli.php migrate');
+
+    if ($resource === 'club' && $action === 'list') {
+        $limit = (int)cli_option($args, '--limit', 50); $order = strtolower(cli_option($args, '--order', 'asc'));
+        $after = cli_option($args, '--after'); $before = cli_option($args, '--before');
+        if ($args || $limit < 1 || $limit > 200 || !in_array($order, ['asc', 'desc'], true) || (isset($after) && isset($before)) ||
+            (isset($after) && (!ctype_digit((string)$after) || (int)$after < 1)) || (isset($before) && (!ctype_digit((string)$before) || (int)$before < 1)))
+            return cli_error('usage: php cli.php club list [--after CID|--before CID] [--order asc|desc] [--limit 50]');
+        if ($order === 'asc' && isset($before) || $order === 'desc' && isset($after)) return cli_error('--after belongs to asc order and --before belongs to desc order');
+        $cursor = isset($after) ? (int)$after : (isset($before) ? (int)$before : null); $where = '';
+        if (isset($cursor)) $where = ' where `c`.`cid` '.($order === 'asc' ? '>' : '<').' :cursor';
+        $sql = 'select `c`.`cid`, `c`.`name`, `c`.`nickname`, `c`.`timestamp`, (select count(*) from `followers` `f` where `f`.`cid` = `c`.`cid`) as `followers`,' .
+            ' (select count(*) from `announces` `a` where `a`.`cid` = `c`.`cid`) as `announces` from `clubs` `c`'.$where.' order by `c`.`cid` '.$order.' limit '.($limit + 1);
+        $pdo = $db->prepare($sql); $pdo->execute(isset($cursor) ? [':cursor' => $cursor] : []); $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
+        $more = count($rows) > $limit; if ($more) array_pop($rows);
+        foreach ($rows as &$row) $row['created'] = cli_time($row['timestamp']); unset($row);
+        $next = $more && $rows ? (int)$rows[count($rows) - 1]['cid'] : null;
+        $lines = cli_table($rows, ['cid' => 'CID', 'name' => 'NAME', 'nickname' => 'NICKNAME', 'followers' => 'FOLLOWERS', 'announces' => 'ANNOUNCES', 'created' => 'CREATED']);
+        if (!$cli_json && isset($next)) $lines[] = 'Next: php cli.php club list --'.($order === 'asc' ? 'after' : 'before').' '.$next.' --order '.$order.' --limit '.$limit;
+        cli_emit(['items' => $rows, 'has_more' => $more, $order === 'asc' ? 'next_after' : 'next_before' => $next], $lines);
+        return 0;
+    }
+
+    if ($resource === 'club' && $action === 'show') {
+        if (count($args) !== 1) return cli_error('usage: php cli.php club show <club>');
+        if (!($actor = Club_Group_Actor($args[0], $row))) return cli_error('club not found', 2);
+        $pdo = $db->prepare('select (select count(*) from `followers` where `cid` = :cid) as `followers`, (select count(*) from `announces` where `cid` = :cid2) as `announces`,' .
+            ' (select count(*) from `tasks` `t` where `t`.`cid` = :cid3 and exists (select 1 from `queues` `q` where `q`.`tid` = `t`.`tid`)) as `tasks`');
+        $pdo->execute([':cid' => $row['cid'], ':cid2' => $row['cid'], ':cid3' => $row['cid']]); $counts = $pdo->fetch(PDO::FETCH_ASSOC);
+        $data = ['cid' => (int)$row['cid'], 'name' => $row['name'], 'actor' => $actor['id'], 'effective' => ['nickname' => $actor['name'], 'summary' => $actor['summary'],
+            'avatar' => $actor['icon']['url'], 'banner' => $actor['image']['url']], 'overrides' => ['nickname' => $row['nickname'], 'infoname' => $row['infoname'], 'summary' => $row['summary'],
+            'avatar' => $row['avatar'], 'banner' => $row['banner']], 'followers' => (int)$counts['followers'], 'announces' => (int)$counts['announces'], 'tasks' => (int)$counts['tasks'],
+            'created_at' => (int)$row['timestamp'], 'public_key_sha256' => hash('sha256', $row['public_key'])];
+        cli_emit($data, ['cid:                '.$data['cid'], 'name:               '.$data['name'], 'actor:              '.$data['actor'], 'nickname:           '.$data['effective']['nickname'],
+            'summary:            '.$data['effective']['summary'], 'avatar:             '.$data['effective']['avatar'], 'banner:             '.$data['effective']['banner'],
+            'followers:          '.$data['followers'], 'announces:          '.$data['announces'], 'pending tasks:      '.$data['tasks'], 'created:            '.cli_time($data['created_at']),
+            'public key sha256:  '.$data['public_key_sha256']]);
+        return 0;
+    }
+
+    if ($resource === 'club' && ($action === 'set' || $action === 'clear')) {
+        $need = $action === 'set' ? 3 : 2;
+        if (count($args) !== $need) return cli_error('usage: php cli.php club '.$action.' <club> <field>'.($action === 'set' ? ' <value>' : ''));
+        if (!Club_Group_Set($args[0], $args[1], $action === 'set' ? $args[2] : null)) return cli_error('club not found', 2);
+        cli_emit(['club' => $args[0], 'field' => $args[1], 'cleared' => $action === 'clear'], ['Updated '.$args[0].'.'.$args[1].'.']);
+        return 0;
+    }
+
+    if ($resource === 'club' && $action === 'publish') {
+        if (count($args) !== 1) return cli_error('usage: php cli.php club publish <club>');
+        if (($result = Club_Group_Publish($args[0])) === false) return cli_error('club not found', 2);
+        if (!$result['targets']) {
+            cli_emit($result, ['No follower shared inboxes to notify.']); return 0;
+        }
+        if (!$result['queued']) return cli_error('could not queue the profile update');
+        cli_emit($result, ['Queued profile Update for '.$result['targets'].' shared inbox(es) representing '.$result['followers'].' follower(s).']);
+        return 0;
+    }
+
+    if ($resource === 'user' && $action === 'fetch') {
+        if (count($args) !== 1) return cli_error('usage: php cli.php user fetch <handle|actor-url>');
+        if (!($actor = Club_Actor_Resolve($args[0]))) return cli_error('could not resolve actor');
+        if (!($user = Club_Actor_Fetch($actor))) return cli_error('could not fetch actor');
+        $pdo = $db->prepare('select * from `users` where `uid` = :uid'); $pdo->execute([':uid' => $user['uid']]); $user = $pdo->fetch(PDO::FETCH_ASSOC);
+        $data = ['uid' => (int)$user['uid'], 'name' => $user['name'], 'actor' => $user['actor'], 'inbox' => $user['inbox'], 'shared_inbox' => $user['shared_inbox'],
+            'timestamp' => (int)$user['timestamp'], 'refresh' => (int)$user['refresh'], 'public_key_sha256' => hash('sha256', $user['public_key'])];
+        $data['timestamp_text'] = cli_time($user['timestamp']); $data['refresh_text'] = cli_time($user['refresh']);
+        cli_emit($data, ['uid:          '.$user['uid'], 'name:         '.$user['name'], 'actor:        '.$user['actor'], 'inbox:        '.$user['inbox'],
+            'shared_inbox: '.$user['shared_inbox'], 'created:      '.$data['timestamp_text'], 'refreshed:    '.$data['refresh_text']]);
+        return 0;
+    }
+
+    if ($resource === 'user' && $action === 'groups') {
+        if (count($args) !== 1) return cli_error('usage: php cli.php user groups <handle|actor-url>');
+        if (!($user = cli_user($args[0]))) return cli_error('user is not cached; run php cli.php user fetch first', 2);
+        $pdo = $db->prepare('select `c`.`cid`, `c`.`name`, `c`.`nickname`, `f`.`timestamp` from `followers` `f` join `clubs` `c` on `f`.`cid` = `c`.`cid` where `f`.`uid` = :uid order by `c`.`cid`');
+        $pdo->execute([':uid' => $user['uid']]); $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as &$row) $row['followed'] = cli_time($row['timestamp']); unset($row);
+        cli_emit(['user' => $user['actor'], 'groups' => $rows], cli_table($rows, ['cid' => 'CID', 'name' => 'NAME', 'nickname' => 'NICKNAME', 'followed' => 'FOLLOWED']));
+        return 0;
+    }
+
+    if ($resource === 'follow' && ($action === 'add' || $action === 'remove')) {
+        if (count($args) !== 2) return cli_error('usage: php cli.php follow add|remove <handle|actor-url> <club>');
+        if (!($user = cli_user($args[0]))) return cli_error('user is not cached; run php cli.php user fetch first', 2);
+        $state = Club_Group_Follow($user['actor'], $args[1], $action === 'add');
+        if ($state === 'club-missing') return cli_error('club not found', 2);
+        cli_emit(['state' => $state, 'actor' => $user['actor'], 'club' => $args[1]], [$state.': '.$user['actor'].' -> '.$args[1]]);
+        return 0;
+    }
+
+    if ($resource === 'dns' && ($action === 'show' || $action === 'refresh')) {
+        if (count($args) !== 1 || ($host = Club_Url_Host($args[0])) === false) return cli_error('usage: php cli.php dns '.$action.' <host>');
+        if ($action === 'refresh') {
+            $ips = Club_Resolver_Get($host, 0, 0); $row = Club_Resolver_Read($host);
+            $deferred = Club_Resolver_Deferred() || ($row && (int)$row['lock_until'] > time());
+            $message = $deferred ? 'Deferred: another process owns the refresh.' : 'Refreshed '.$host.': '.($ips ? implode(', ', $ips) : '(no records)');
+            cli_emit(['host' => $host, 'ips' => $ips, 'deferred' => $deferred, 'cache' => $row], [$message]);
+            return $deferred ? 2 : 0;
+        }
+        $row = Club_Resolver_Read($host);
+        if (!$row) return cli_error('host is not cached', 2);
+        $data = ['host' => $host, 'ips' => $row['ips'] === '' ? [] : explode(',', $row['ips']), 'checked_at' => (int)$row['checked_at'], 'lock_until' => (int)$row['lock_until']];
+        cli_emit($data, ['host:       '.$host, 'ips:        '.($row['ips'] === '' ? '(negative cache)' : $row['ips']), 'checked:    '.cli_time($row['checked_at']),
+            'lock_until: '.((int)$row['lock_until'] ? cli_time($row['lock_until']) : '-')]);
+        return 0;
+    }
+
+    if ($resource === 'queue' && ($action === 'show' || $action === 'purge')) {
+        if (!$args) return cli_error('usage: php cli.php queue '.$action.' <host|target>'.($action === 'purge' ? ' [--yes]' : ''));
+        $yes = cli_flag($args, '--yes');
+        if (count($args) !== 1) return cli_error('usage: php cli.php queue '.$action.' <host|target>'.($action === 'purge' ? ' [--yes]' : ''));
+        $targets = cli_targets($args[0], 'queues');
+        if (!$targets) return cli_error('no queue targets matched', 2);
+        $rows = []; $total = 0;
+        $pdo = $db->prepare('select count(*) as `queues`, count(distinct `tid`) as `tasks`, min(`due_at`) as `first_due`, max(`due_at`) as `last_due` from `queues` where `target` = :target');
+        foreach ($targets as $target) {
+            $pdo->execute([':target' => $target]); $row = $pdo->fetch(PDO::FETCH_ASSOC); $row['target'] = $target;
+            $row['first'] = cli_time($row['first_due']); $row['last'] = cli_time($row['last_due']); $rows[] = $row;
+            $total += (int)$row['queues'];
+        }
+        if ($action === 'show') {
+            cli_emit(['items' => $rows, 'queues' => $total], cli_table($rows, ['target' => 'TARGET', 'queues' => 'QUEUES', 'tasks' => 'TASKS', 'first' => 'FIRST DUE', 'last' => 'LAST DUE']));
+            return 0;
+        }
+        if (!$yes) {
+            cli_emit(['preview' => true, 'targets' => count($targets), 'queues' => $total], ['Matched '.count($targets).' target(s), '.$total.' queue row(s).', 'Run again with --yes to purge.']);
+            return 2;
+        }
+        $deleted = Club_Queue_Purge($targets);
+        cli_emit(['targets' => count($targets), 'deleted' => $deleted], ['Purged '.$deleted.' queue row(s) from '.count($targets).' target(s).']);
+        return 0;
+    }
+
+    if ($resource === 'endpoint' && $action === 'show') {
+        if (count($args) !== 1) return cli_error('usage: php cli.php endpoint show <host|target>');
+        $targets = cli_targets($args[0], 'endpoints'); $rows = [];
+        $pdo = $db->prepare('select `e`.`url`, `e`.`fails`, `e`.`fail_since`, `e`.`retry_at`, `e`.`next_at`, `e`.`follow_at`, `e`.`notice_at`, `e`.`announce_at`, `e`.`relay_at`, `e`.`idle_since`,'.
+            ' `e`.`lease_until`, hex(`e`.`lease_token`) as `lease_token`, (select count(*) from `queues` `q` where `q`.`target` = `e`.`url`) as `queues`,' .
+            ' exists(select 1 from `blacklist` `b` where `b`.`target` = `e`.`url`) as `blacklisted` from `endpoints` `e` where `e`.`url` = :target');
+        foreach ($targets as $target) { $pdo->execute([':target' => $target]); if ($row = $pdo->fetch(PDO::FETCH_ASSOC)) $rows[] = $row; }
+        cli_emit(['items' => $rows], cli_table($rows, ['url' => 'URL', 'fails' => 'FAILS', 'retry_at' => 'RETRY', 'next_at' => 'NEXT', 'queues' => 'QUEUES', 'blacklisted' => 'BLOCKED']));
+        return $rows ? 0 : 2;
+    }
+
+    if ($resource === 'blacklist' && $action === 'show') {
+        if (count($args) !== 1) return cli_error('usage: php cli.php blacklist show <host|target>');
+        $targets = cli_targets($args[0], 'blacklist'); $rows = [];
+        $pdo = $db->prepare('select `target`,`created_at`,`check_at`,`checks`,`restore_pending_at`,`lease_until` from `blacklist` where `target` = :target');
+        foreach ($targets as $target) {
+            $pdo->execute([':target' => $target]);
+            if ($row = $pdo->fetch(PDO::FETCH_ASSOC)) {
+                $row['created'] = cli_time($row['created_at']); $row['next_probe'] = cli_time($row['check_at'], true);
+                $row['state'] = isset($row['restore_pending_at']) ? 'cleanup-pending' : ((int)$row['lease_until'] > time() ? 'probing' : 'blocked'); $rows[] = $row;
+            }
+        }
+        cli_emit(['items' => $rows], cli_table($rows, ['target' => 'TARGET', 'checks' => 'CHECKS', 'created' => 'CREATED', 'next_probe' => 'NEXT PROBE', 'state' => 'STATE']));
+        return $rows ? 0 : 2;
+    }
+
+    if ($resource === 'blacklist' && $action === 'probe') {
+        if (count($args) !== 1) return cli_error('usage: php cli.php blacklist probe <host|target>');
+        $targets = cli_targets($args[0], 'blacklist');
+        if (!$targets) return cli_error('no blacklisted targets matched', 2);
+        $updated = Club_Blacklist_Probe_Now($targets);
+        cli_emit(['matched' => count($targets), 'updated' => $updated], ['Matched '.count($targets).' target(s); scheduled '.$updated.' probe(s).']);
+        return 0;
+    }
+
+    if ($resource === 'blacklist' && $action === 'add') {
+        if (count($args) !== 1) return cli_error('usage: php cli.php blacklist add <host|target>');
+        $direct = Club_Endpoint_Normalize($args[0]); $targets = $direct === false ? cli_targets($args[0], 'users') : [$direct];
+        if (!$targets) return cli_error('no shared inbox targets matched this host', 2);
+        foreach ($targets as $target) Club_Blacklist_Force($target);
+        cli_emit(['targets' => $targets, 'check_at' => 4111110000], array_merge(['Blacklisted '.count($targets).' target(s) permanently:'], $targets));
+        return 0;
+    }
+
+    if ($resource === 'status' && $action === '') {
+        if ($args) return cli_error('usage: php cli.php status');
+        $row = $db->query('select (select count(*) from `clubs`) as `clubs`, (select count(*) from `users`) as `users`, (select count(*) from `followers`) as `followers`,' .
+            ' (select count(*) from `tasks`) as `tasks`, (select count(*) from `queues`) as `queues`, (select count(*) from `endpoints`) as `endpoints`,' .
+            ' (select count(*) from `blacklist`) as `blacklist`, (select count(*) from `dns`) as `dns`')->fetch(PDO::FETCH_ASSOC);
+        $row['schema'] = DB_VERSION;
+        cli_emit($row, ['schema:    '.$row['schema'], 'clubs:    '.$row['clubs'], 'users:     '.$row['users'], 'followers: '.$row['followers'], 'tasks:     '.$row['tasks'],
+            'queues:    '.$row['queues'], 'endpoints: '.$row['endpoints'], 'blacklist: '.$row['blacklist'], 'dns:       '.$row['dns']]);
+        return 0;
+    }
+
+    return cli_error('unknown command; run php cli.php help');
 }
 
 switch ($argv[1]) {
+    case 'club':
+    case 'user':
+    case 'follow':
+    case 'dns':
+    case 'queue':
+    case 'endpoint':
+    case 'blacklist':
+        try { exit(cli_manage($argv[1], $argv[2] ?? '', array_slice($argv, 3))); }
+        catch (InvalidArgumentException $e) { exit(cli_error($e->getMessage())); }
+        catch (RuntimeException $e) { exit(cli_error($e->getMessage())); }
     case 'worker':
         // 库里的结构与这份代码不一致时，先进入结构合并闸门。合并期间 web 那边整个入口是 503，这里也不能起队列进程 —— 半新半旧的结构下投递会写出对不上的行。
         // 合并完直接退出，让容器按 restart 策略把正常的队列进程带起来
@@ -164,6 +468,10 @@ switch ($argv[1]) {
             exit(1);
         }
         exit(0);
+    case 'status':
+        try { exit(cli_manage('status', '', array_slice($argv, 2))); }
+        catch (InvalidArgumentException $e) { exit(cli_error($e->getMessage())); }
+        catch (RuntimeException $e) { exit(cli_error($e->getMessage())); }
     default:
         fwrite(STDERR, 'Unknown parameter: '.$argv[1]."\n");
         exit(1);

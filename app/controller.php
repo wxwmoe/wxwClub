@@ -95,50 +95,10 @@ function controller() {
                         } break;
                     default: Club_HTTP_Respond(['message' => 'Error: Route Not Found!'], 'json', 404); break;
                 } else {
-                    $pdo = $db->prepare('select `cid`,`nickname`,`infoname`,`summary`,`avatar`,`banner`,`public_key`,`timestamp` from `clubs` where `name` = :club');
-                    $pdo->execute([':club' => $club]);
-                    $pdo = $pdo->fetch(PDO::FETCH_ASSOC);
-                    $nametag = array_merge($config['default']['infoname'], json_decode($pdo['infoname'], 1) ?: []);
-                    $summary = $pdo['summary'] ?: Club_Template_NameTag($club, $config['default']['summary'], $nametag);
-                    $nickname = $pdo['nickname'] ?: Club_Template_NameTag($club, $config['default']['nickname'], $nametag);
                     // 系统群组没有主页，浏览器访问也只给 actor
-                    if ($system || (isset($_SERVER['HTTP_ACCEPT']) && strpos($_SERVER['HTTP_ACCEPT'], 'json'))) {
-                        Club_HTTP_Respond([
-                            '@context' => Club_Template_Render('context'),
-                            'id' => $club_url,
-                            'type' => $system ? 'Service' : 'Group',
-                            'following' => $club_url.'/following',
-                            'followers' => $club_url.'/followers',
-                            'inbox' => $club_url.'/inbox',
-                            'outbox' => $club_url.'/outbox',
-                            'featured' => $club_url.'/collections/featured',
-                            'featuredTags' => $club_url.'/collections/tags',
-                            'preferredUsername' => $club,
-                            'name' => $nickname,
-                            'summary' => $summary,
-                            'url' => $club_url,
-                            'manuallyApprovesFollowers' => $system,
-                            'discoverable' => false,
-                            'published' => gmdate('Y-m-d\TH:i:s\Z', $pdo['timestamp']),
-                            'devices' => $club_url.'/collections/devices',
-                            'publicKey' => [
-                                'id' => $club_url.'#main-key',
-                                'owner' => $club_url,
-                                'publicKeyPem' => $pdo['public_key']
-                            ],
-                            'tag' => [],
-                            'attachment' => [],
-                            'endpoints' => ['sharedInbox' => $base.'/inbox'],
-                            'icon' => [
-                                'type' => 'Image',
-                                'url' => $pdo['avatar'] ?: $config['default']['avatar']
-                            ],
-                            'image' => [
-                                'type' => 'Image',
-                                'url' => $pdo['banner'] ?: $config['default']['banner']
-                            ]
-                        ], 'activity+json');
-                    } else Club_Template_Render('profile', ['club' => $club, 'nickname' => $nickname, 'summary' => $summary, 'row' => $pdo]);
+                    $actor = Club_Group_Actor($club, $pdo);
+                    if ($system || (isset($_SERVER['HTTP_ACCEPT']) && strpos($_SERVER['HTTP_ACCEPT'], 'json'))) Club_HTTP_Respond($actor, 'activity+json');
+                    else Club_Template_Render('profile', ['club' => $club, 'nickname' => $actor['name'], 'summary' => $actor['summary'], 'row' => $pdo]);
                 }
             } else Club_HTTP_Respond(['message' => 'User not found'], 'json', 404); break;
 

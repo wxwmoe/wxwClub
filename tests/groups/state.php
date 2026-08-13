@@ -253,6 +253,48 @@ t_exec('update `endpoints` set `idle_since` = 0, `next_at` = :next where `url` =
 t_is(Club_Endpoint_Prune($t_url, time()), 'idled', 'a row with no idle clock gets one instead of being removed');
 t_is(t_state_endpoint($t_url)['next_at'], null, 'idling also clears the stale schedule');
 
+t_group('state / cli management');
+
+t_state_reset();
+t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values'.
+    ' (\'alice@remote.example\', \'https://remote.example/users/alice\', :inbox, \'\', :shared, :now, :now),'.
+    ' (\'bob@remote.example\', \'https://remote.example/users/bob\', :inbox2, \'\', :shared2, :now2, :now2)',
+    [':inbox' => 'https://remote.example/users/alice/inbox', ':shared' => $t_url, ':inbox2' => 'https://remote.example/users/bob/inbox', ':shared2' => $t_url, ':now' => time(), ':now2' => time()]);
+t_is(Club_Group_Set('test', 'nickname', 'Test Group'), true, 'cli can set a club profile field');
+t_is(Club_Group_Set('test', 'infoname', '{"zh-CN":"测试"}'), true, 'cli validates and stores infoname json');
+$actor = Club_Group_Actor('test', $club_row);
+t_is($actor['name'], 'Test Group', 'the actor document uses the stored nickname');
+t_is(json_decode($club_row['infoname'], true)['zh-CN'], '测试', 'the actor source row keeps normalized infoname json');
+t_is(Club_Group_Follow('https://remote.example/users/alice', 'test', true), 'added', 'cli can add a follower');
+t_is(Club_Group_Follow('https://remote.example/users/alice', 'test', true), 'exists', 'adding the same follower is idempotent');
+t_is(Club_Group_Follow('https://remote.example/users/bob', 'test', true), 'added', 'a second user can follow the group');
+$published = Club_Group_Publish('test');
+t_is($published['followers'], 2, 'profile publishing counts followers');
+t_is($published['targets'], 1, 'profile publishing deduplicates a shared inbox');
+t_is((int)t_one('select count(*) from `queues`'), 1, 'profile publishing queues one row per shared inbox');
+t_is(t_one('select `type` from `queues` limit 1'), 'relay', 'profile publishing uses the relay queue');
+$update = json_decode(t_one('select `jsonld` from `tasks` limit 1'), true);
+t_is($update['type'], 'Update', 'profile publishing emits an Update activity');
+t_is($update['object']['name'], 'Test Group', 'profile publishing embeds the complete current actor');
+t_is(Club_Group_Follow('https://remote.example/users/alice', 'test', false), 'removed', 'cli can remove a follower');
+
+// 人工永久拉黑要撤销旧租约并立刻停调度；探活命令则能显式把它从「永不」拉回当前时间。
+$token = t_state_lease($t_url);
+t_is(Club_Blacklist_Force($t_url), true, 'cli can force a target onto the blacklist');
+$blocked = t_row('select `check_at`,`restore_pending_at`,`lease_until`,`lease_token` from `blacklist` where `target` = :url', [':url' => $t_url]);
+t_is((int)$blocked['check_at'], 4111110000, 'a forced blacklist entry never probes automatically');
+t_is($blocked['lease_token'], null, 'forcing the blacklist invalidates an old lease');
+t_is(t_state_endpoint($t_url)['next_at'], null, 'forcing the blacklist unschedules the endpoint');
+t_is(Club_Blacklist_Probe_Now([$t_url]), 1, 'cli can request an immediate probe');
+t_ok((int)t_one('select `check_at` from `blacklist` where `target` = :url', [':url' => $t_url]) <= time(), 'an immediate probe is due now');
+
+// 清黑名单目标的 backlog 后控制行立即走，但 blacklist 本身继续挡未来入队。
+t_is(Club_Queue_Purge([$t_url], 1), 1, 'queue purge deletes the target backlog in bounded batches');
+t_is((int)t_one('select count(*) from `queues` where `target` = :url', [':url' => $t_url]), 0, 'queue purge leaves no matching queue');
+t_is((int)t_one('select count(*) from `endpoints` where `url` = :url', [':url' => $t_url]), 0, 'a drained blacklisted target loses its control row');
+t_is((int)t_one('select count(*) from `blacklist` where `target` = :url', [':url' => $t_url]), 1, 'queue purge keeps the permanent blacklist row');
+t_is((int)t_one('select count(*) from `tasks` where not exists (select 1 from `queues` where queues.tid = tasks.tid)'), 0, 'queue purge removes orphan tasks');
+
 t_group('state / maintenance leader');
 
 require_once(APP_ROOT.'/app/worker.php');
