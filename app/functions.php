@@ -268,6 +268,14 @@ function ActivityPub_Verify_Fail($reason) {
     global $verify_reason; $verify_reason = $reason; return false;
 }
 
+// WebFinger 可以拿 URI 当 resource，但这里只认本站实际存在的 canonical actor URL；替别的软件猜 /@name、/author/name 会凭空制造身份别名。
+// null 表示格式受支持但指向别站，false 表示本站不认识这种 resource，调用方据此区分 404 和 400。
+function ActivityPub_WebFinger_Resource($resource, $base, $host) {
+    if (preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches)) return $matches[2] === $host ? $matches[1] : null;
+    if (preg_match('~^'.preg_quote($base, '~').'/club/([^/?#]+)$~', $resource, $matches)) return $matches[1];
+    return false;
+}
+
 // 没关注任何群组、也没留下动态的 actor 缓存已经没有业务读者。分批独立提交，避免一次清理把 users 和级联的 notices 长时间锁成一笔大事务；
 // 条件留在 delete 里重查，预览之后新产生的关注或动态不能被并发清掉。
 function Club_Actor_Cleanup($limit = 500) {

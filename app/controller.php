@@ -138,16 +138,11 @@ function controller() {
             // ?resource[]=x 这种数组参数直接当空处理，否则 preg_match 会收到数组报错
             $resource = is_scalar($_GET['resource'] ?? null) ? (string)$_GET['resource'] : '';
             Club_Log_Write('debug', 'webfinger', [$resource], $_SERVER);
-            if (preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches)) {
-                $resource_identifier = $matches[1];
-                if (($resource_host = $matches[2]) != $config['base']) {
-                    Club_HTTP_Respond(['message' => 'Resource host does not match'], 'json', 404);
-                    break;
-                }
-            } elseif (preg_match('/^acct:([a-zA-Z_][a-zA-Z0-9_]+)$/', $resource, $matches)) {
-                $resource_host = $config['base'];
-                $resource_identifier = $matches[1];
-            } else {
+            $resource_identifier = ActivityPub_WebFinger_Resource($resource, $base, $config['base']);
+            if ($resource_identifier === null) {
+                Club_HTTP_Respond(['message' => 'Resource host does not match'], 'json', 404);
+                break;
+            } elseif ($resource_identifier === false) {
                 Club_HTTP_Respond(['message' => 'Resource is invalid'], 'json', 400);
                 break;
             }

@@ -47,6 +47,18 @@ t_table('Club_Url_Host', 'Club_Url_Host', [
     ['https://remote.example', false], ['remote.example:8443', false], ['-remote.example', false], ['', false]
 ]);
 
+t_table('ActivityPub_WebFinger_Resource', 'ActivityPub_WebFinger_Resource', [
+    ['acct:test@local.example', 'https://local.example', 'local.example', 'test'],
+    ['https://local.example/club/test', 'https://local.example', 'local.example', 'test'],
+    ['acct:test@remote.example', 'https://local.example', 'local.example', null],
+    ['acct:test', 'https://local.example', 'local.example', false],
+    ['http://local.example/club/test', 'https://local.example', 'local.example', false],
+    ['https://local.example/club/test?x=1', 'https://local.example', 'local.example', false],
+    ['https://local.example/club/test#key', 'https://local.example', 'local.example', false],
+    ['https://local.example/@test', 'https://local.example', 'local.example', false],
+    ['https://local.example/author/test', 'https://local.example', 'local.example', false]
+]);
+
 t_group('pure / ssrf');
 
 // PHP 的 NO_PRIV_RANGE/NO_RES_RANGE 漏掉的那些段，正是这张表要盯住的
