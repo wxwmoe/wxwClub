@@ -10,6 +10,25 @@ function ActivityPub_Collection($id, $arr = []) {
     Club_HTTP_Respond($arr, 'activity+json');
 }
 
+// Digest 头是逗号分隔的一串 algorithm=base64，整条都要吃干净：从垃圾里截出一个能对上的值就放行，等于允许对端在正确摘要旁边挂任意内容。
+// 认得的算法全部返回让调用方逐个比对，只挑一个正确的等于放走跟它并排的那个错的；不认得的（unixsum 之类）丢掉，一个都不认得由调用方判失败。失败返回 false，$error 是稳定原因码
+function ActivityPub_Digest_Parse($value, &$error = null) {
+    // 标记只有大小写不敏感这一条宽容，那是 RFC 3230 明写的（RFC 9530 干脆全小写）；连字符不是可忽略字符，IANA 登记的就是 SHA-256，Mastodon 也只认这个拼法
+    static $algos = ['sha-256' => ['sha256', 32], 'sha-512' => ['sha512', 64]];
+    $error = '';
+    if (!is_string($value) || strlen($value) > 4096) { $error = 'bad length'; return false; }
+    $digests = [];
+    foreach (explode(',', $value) as $part) {
+        if (!preg_match('~^[ \t]*([A-Za-z0-9-]+)[ \t]*=[ \t]*([A-Za-z0-9+/]+={0,2})[ \t]*$~', $part, $matches)) { $error = 'malformed entry'; return false; }
+        if (!isset($algos[strtolower($matches[1])])) continue;
+        list($algo, $size) = $algos[strtolower($matches[1])];
+        if (($raw = base64_decode($matches[2], true)) === false || strlen($raw) !== $size) { $error = 'bad '.$algo.' value'; return false; }
+        if (isset($digests[$algo]) && !hash_equals($digests[$algo], $raw)) { $error = 'conflicting '.$algo.' values'; return false; }
+        $digests[$algo] = $raw;
+    }
+    return $digests;
+}
+
 // 跳转自己跟：交给 curl 的话每一跳既过不了内网检查，签名也对不上新 host。跳数与 Mastodon 一致。
 // $fetch_retry 说的是「这次拉不到」还是「这个地址永远拉不到」，两者的自愈概率差好几个数量级：调用方拿它决定给对端 5xx 还是终局 4xx，判错一边就是丢活动或者无限重投。
 // 默认终局，只有说得出「过一会儿可能就好了」的失败才置 true
@@ -176,31 +195,82 @@ function ActivityPub_Sign_Fields($url) {
     return ['authority' => $authority, 'target' => $target];
 }
 
+// Cavage 的 auth-param 逐字符解析。一条正则做不到的三件事在这里：quoted-string 里的转义、区分「没给这个参数」和「参数是空的」、把重复参数判成错误而不是让后一个覆盖前一个 ——
+// 覆盖意味着对端能塞两个 keyId，一个给日志看、另一个给验签用。参数名统一成小写，语法合法的未知参数按草案吃掉再丢弃。失败返回 false，$error 是稳定原因码
+function ActivityPub_Signature_Parse($value, &$error = null) {
+    static $tchar = '!#$%&\'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    $error = '';
+    // 合法报文里最长的一项是 4096 位 RSA 签名的 base64（684 字节），4 KB 十倍富余；再长的只可能是拿解析器当 CPU 消耗品
+    if (!is_string($value) || $value === '' || strlen($value) > 4096) { $error = 'bad length'; return false; }
+    $params = []; $i = 0; $len = strlen($value);
+    while (true) {
+        $i += strspn($value, " \t", $i);
+        if (!($span = strspn($value, $tchar, $i))) { $error = 'bad parameter name'; return false; }
+        $name = strtolower(substr($value, $i, $span)); $i += $span;
+        $i += strspn($value, " \t", $i);
+        if (substr($value, $i, 1) !== '=') { $error = 'missing value for '.$name; return false; }
+        $i += 1 + strspn($value, " \t", $i + 1);
+        if (substr($value, $i, 1) === '"') {
+            $param = ''; $i++;
+            while (true) {
+                if ($i >= $len) { $error = 'unterminated quoted string'; return false; }
+                $char = $value[$i++];
+                if ($char === '"') break;
+                // 转义的那个字符原样收下：\" 不能提前结束这个值
+                if ($char === '\\') { if ($i >= $len) { $error = 'unterminated quoted string'; return false; } $char = $value[$i++]; }
+                $param .= $char;
+            }
+        } else {
+            // created=1402170695 这种时间戳按草案就是不加引号的
+            if (!($span = strspn($value, $tchar, $i))) { $error = 'missing value for '.$name; return false; }
+            $param = substr($value, $i, $span); $i += $span;
+        }
+        if (isset($params[$name])) { $error = 'duplicate parameter: '.$name; return false; }
+        $params[$name] = $param;
+        $i += strspn($value, " \t", $i);
+        if ($i >= $len) break;
+        // 分隔符只有逗号：认空白的话尾部垃圾也跟着放行了
+        if ($value[$i] !== ',') { $error = 'bad separator'; return false; }
+        $i++;
+    }
+    $known = ['keyid' => '', 'algorithm' => '', 'headers' => '', 'signature' => '', 'created' => '', 'expires' => ''];
+    return array_merge($known, array_intersect_key($params, $known));
+}
+
 function ActivityPub_Verify($input = null, $pull = true) {
     global $db, $verify_signed, $verify_actor, $verify_retry, $fetch_retry;
+    // hs2019 在草案里本该由 keyId 的元数据决定摘要算法，但 Fediverse 上（GoToSocial 是典型）它就是 RSA PKCS#1 v1.5 + SHA-256 的别名，本站也只存一把 RSA 公钥，按这个互通约定验，不做算法协商
     static $algos = ['rsa-sha256' => OPENSSL_ALGO_SHA256, 'hs2019' => OPENSSL_ALGO_SHA256, 'rsa-sha512' => OPENSSL_ALGO_SHA512];
     // 默认终局：下面的每一条头部检查，失败原因都在对端那份请求里，重投多少次都是同一个结果
     $verify_retry = false;
     if (empty($_SERVER['HTTP_SIGNATURE'])) return ActivityPub_Verify_Fail('no signature header');
-    $signature = [];
-    preg_match_all('/[,\s]*(.*?)="(.*?)"/', $_SERVER['HTTP_SIGNATURE'], $matches);
-    foreach ($matches[1] as $k => $v) $signature[$v] = $matches[2][$k];
-    if (empty($signature['keyId']) || empty($signature['signature']) || empty($signature['headers'])) return ActivityPub_Verify_Fail('malformed signature header');
-    // algorithm 是对端给的，直接透传给 openssl 等于让对方挑摘要算法
-    $algo = strtolower($signature['algorithm'] ?? 'rsa-sha256');
+    if (($signature = ActivityPub_Signature_Parse($_SERVER['HTTP_SIGNATURE'], $error)) === false) return ActivityPub_Verify_Fail('malformed signature header: '.$error);
+    // 草案允许缺 headers 时默认只签 (created)，但那样请求目标和正文都没有任何保护，这三项一律要求显式给出
+    if ($signature['keyid'] === '' || $signature['signature'] === '' || $signature['headers'] === '') return ActivityPub_Verify_Fail('incomplete signature header');
+    // algorithm 是对端给的，直接透传给 openssl 等于让对方挑摘要算法；缺省按 rsa-sha256，Mastodon 那一类报文常年不带这个参数
+    $algo = strtolower($signature['algorithm']) ?: 'rsa-sha256';
     if (!isset($algos[$algo])) return ActivityPub_Verify_Fail('unsupported algorithm: '.$algo);
+    // 签名该有多少字节由公钥模数决定，交给 openssl 判；严格 base64 只拦下根本不是 base64 的那种
+    if (!($raw = base64_decode($signature['signature'], true))) return ActivityPub_Verify_Fail('malformed signature base64');
 
     $post = strtolower($_SERVER['REQUEST_METHOD']) == 'post';
     // headers= 的顺序就是签名串的行顺序，(request-target) 不一定排在第一个
-    $headers = explode(' ', strtolower($signature['headers']));
+    $headers = preg_split('/\s+/', strtolower(trim($signature['headers'])), -1, PREG_SPLIT_NO_EMPTY);
+    if (!$headers || count(array_unique($headers)) !== count($headers)) return ActivityPub_Verify_Fail('malformed signed header list: '.$signature['headers']);
     if (!in_array('(request-target)', $headers)) return ActivityPub_Verify_Fail('(request-target) not signed');
+    // 这两项只认整秒：草案自己那句「亚秒可用小数」跟同段和 §2.3 的 MUST integer 冲突，RFC 9421 也只认整数。
+    // §2.3 还只许它们配 hs2019，那条故意不收严 —— 时效窗口照样在管，收严只多一条把真实流量弹回去的路
+    $created = in_array('(created)', $headers); $expires = in_array('(expires)', $headers);
+    if ($created && !ctype_digit($signature['created'])) return ActivityPub_Verify_Fail('malformed (created): '.($signature['created'] ?: '-'));
+    if ($expires && !ctype_digit($signature['expires'])) return ActivityPub_Verify_Fail('malformed (expires): '.($signature['expires'] ?: '-'));
     // date 或 (created) 必须签名并校验时效，否则签名可以被无限重放
     if (in_array('date', $headers)) {
         if (!ActivityPub_Verify_Date($_SERVER['HTTP_DATE'] ?? '')) return ActivityPub_Verify_Fail('date out of range: '.($_SERVER['HTTP_DATE'] ?? '-').' vs '.gmdate('D, d M Y H:i:s T'));
-    } elseif (in_array('(created)', $headers)) {
-        if (!ActivityPub_Verify_Date($signature['created'] ?? '')) return ActivityPub_Verify_Fail('(created) out of range: '.($signature['created'] ?? '-').' vs '.time());
+    } elseif ($created) {
+        if (!ActivityPub_Verify_Date($signature['created'])) return ActivityPub_Verify_Fail('(created) out of range: '.$signature['created'].' vs '.time());
     } else return ActivityPub_Verify_Fail('neither date nor (created) signed');
-    if (in_array('(expires)', $headers) && ($signature['expires'] ?? PHP_INT_MAX) < time()) return ActivityPub_Verify_Fail('signature expired at '.$signature['expires']);
+    if ($expires && $created && (int)$signature['expires'] < (int)$signature['created']) return ActivityPub_Verify_Fail('(expires) precedes (created): '.$signature['expires'].' vs '.$signature['created']);
+    if ($expires && (int)$signature['expires'] < time()) return ActivityPub_Verify_Fail('signature expired at '.$signature['expires'].' vs '.time());
     // POST 不签 digest 的话请求体可以被任意替换
     if ($post && !in_array('digest', $headers)) return ActivityPub_Verify_Fail('digest not signed');
     if ($post && empty($_SERVER['HTTP_DIGEST'])) return ActivityPub_Verify_Fail('digest header missing');
@@ -209,28 +279,33 @@ function ActivityPub_Verify($input = null, $pull = true) {
     foreach ($headers as $header) {
         switch ($header) {
             case '(request-target)': $lines[] = $header.': '.strtolower($_SERVER['REQUEST_METHOD']).' '.$_SERVER['REQUEST_URI']; break;
-            case '(created)': case '(expires)': $lines[] = $header.': '.($signature[trim($header, '()')] ?? ''); break;
+            case '(created)': case '(expires)': $lines[] = $header.': '.$signature[trim($header, '()')]; break;
             default:
                 // Content-Type / Content-Length 在 $_SERVER 里没有 HTTP_ 前缀
                 $key = strtoupper(str_replace('-', '_', $header));
                 if (!in_array($key, ['CONTENT_TYPE', 'CONTENT_LENGTH'])) $key = 'HTTP_'.$key;
-                $lines[] = $header.': '.($_SERVER[$key] ?? '');
+                // 签了却根本不存在的头，用空值凑出一行等于替对端把签名串补齐；存在但为空是合法的，这两种只有 array_key_exists 分得开
+                if (!array_key_exists($key, $_SERVER)) return ActivityPub_Verify_Fail('signed header missing: '.$header);
+                $lines[] = $header.': '.trim((string)$_SERVER[$key], " \t");
         }
     } $verify_signed = implode("\n", $lines);
 
     // keyId 一般是 actor 后面挂个片段，去掉片段就是 actor；片段名不一定叫 main-key，少数实现写成路径，所以末尾的 /main-key 也一并去掉
-    $actor = explode('#', $signature['keyId'])[0];
+    $actor = explode('#', $signature['keyid'])[0];
     if (substr($actor, -9) === '/main-key') $actor = substr($actor, 0, -9);
     $pdo = $db->prepare('select `public_key` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     if ($public_key = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
-        $result = openssl_verify($verify_signed, base64_decode($signature['signature']), $public_key, $algos[$algo]);
-        if ($result === 1) {
+        // 三个算法名全部落到 RSA 验签，所以密钥类型必须先确认：不查的话一把 EC 或 Ed25519 公钥也会被丢进 RSA 路径
+        $key = openssl_pkey_get_public($public_key);
+        $details = $key ? openssl_pkey_get_details($key) : false;
+        if (!$details || $details['type'] !== OPENSSL_KEYTYPE_RSA) ActivityPub_Verify_Fail('public key is not rsa: '.$actor);
+        elseif (($result = openssl_verify($verify_signed, $raw, $key, $algos[$algo])) === 1) {
             if ($post && !ActivityPub_Verify_Digest($input)) return false;
             $verify_actor = $actor; return true;
         }
         // 0 是签名对不上，-1 / false 是 openssl 本身出错（多半是公钥坏了）
-        ActivityPub_Verify_Fail($result === 0 ? 'signature mismatch' : 'openssl error: '.openssl_error_string());
+        else ActivityPub_Verify_Fail($result === 0 ? 'signature mismatch' : 'openssl error: '.openssl_error_string());
     } else ActivityPub_Verify_Fail('unknown actor: '.$actor);
 
     // 可能是没见过的 actor，也可能是对方轮换了密钥，拉取一次后重试
@@ -257,10 +332,10 @@ function ActivityPub_Verify_Date($date, $skew = 300) {
 }
 
 function ActivityPub_Verify_Digest($input) {
-    if (!preg_match('/([A-Za-z0-9-]+)\s*=\s*([A-Za-z0-9+\/=]+)/', $_SERVER['HTTP_DIGEST'], $matches)) return ActivityPub_Verify_Fail('malformed digest header');
-    $algo = strtolower(str_replace('-', '', $matches[1]));
-    if (!in_array($algo, ['sha256', 'sha512'])) return ActivityPub_Verify_Fail('unsupported digest algorithm: '.$matches[1]);
-    if (!hash_equals(hash($algo, (string)$input, 1), base64_decode($matches[2]))) return ActivityPub_Verify_Fail('digest mismatch, body length '.strlen((string)$input));
+    if (($digests = ActivityPub_Digest_Parse($_SERVER['HTTP_DIGEST'], $error)) === false) return ActivityPub_Verify_Fail('malformed digest header: '.$error);
+    if (!$digests) return ActivityPub_Verify_Fail('no supported digest algorithm: '.$_SERVER['HTTP_DIGEST']);
+    // 认得的全部要对上：只挑一个正确的放行，等于对端可以在旁边挂一个对不上的摘要看谁先被命中
+    foreach ($digests as $algo => $digest) if (!hash_equals(hash($algo, (string)$input, 1), $digest)) return ActivityPub_Verify_Fail('digest mismatch on '.$algo.', body length '.strlen((string)$input));
     return true;
 }
 

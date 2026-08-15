@@ -152,6 +152,52 @@ t_table('Club_I18n_Match', 'Club_I18n_Match', [
 
 t_table('Club_Log_Slug', 'Club_Log_Slug', [['a/b', 'aⳆb'], ['a\\b', 'aⳆb'], ["a\tb", 'a_b'], ['a*b?[c]', 'abc'], ["a\x00b", 'ab']]);
 
+t_group('pure / signature header');
+
+// 六个键的形状是固定的，缺席就是空串 —— 让调用方分得开「没给」和「给了空的」，也让下面每一行只写它关心的那几个
+function t_sig($params = []) {
+    return array_merge(['keyid' => '', 'algorithm' => '', 'headers' => '', 'signature' => '', 'created' => '', 'expires' => ''], $params);
+}
+
+// 一条正则做不到的都在这张表里：转义引号、未加引号的时间戳、重复参数、尾部垃圾
+t_table('ActivityPub_Signature_Parse', 'ActivityPub_Signature_Parse', [
+    ['keyId="https://a.example/users/alice#main-key",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="AAAA"',
+        t_sig(['keyid' => 'https://a.example/users/alice#main-key', 'algorithm' => 'rsa-sha256', 'headers' => '(request-target) host date digest', 'signature' => 'AAAA'])],
+    ['signature="AAAA",headers="(request-target) date",keyId="k"', t_sig(['keyid' => 'k', 'headers' => '(request-target) date', 'signature' => 'AAAA'])],
+    // quoted-string 里的转义：\" 不能提前结束这个值，\\ 只留一个反斜杠
+    ['keyId="a\"b\\\\c",signature="AAAA"', t_sig(['keyid' => 'a"b\\c', 'signature' => 'AAAA'])],
+    // (created)/(expires) 的时间戳按草案就是不加引号的，加了引号的也得认
+    ['keyId="k",signature="AAAA",headers="(created) (expires)",created=1402170695,expires=1402170995',
+        t_sig(['keyid' => 'k', 'headers' => '(created) (expires)', 'signature' => 'AAAA', 'created' => '1402170695', 'expires' => '1402170995'])],
+    ['keyId="k",created="1402170695"', t_sig(['keyid' => 'k', 'created' => '1402170695'])],
+    ['KEYID="k",Algorithm="RSA-SHA256"', t_sig(['keyid' => 'k', 'algorithm' => 'RSA-SHA256'])],
+    ['keyId="k",opaque="whatever",signature="AAAA"', t_sig(['keyid' => 'k', 'signature' => 'AAAA'])],
+    ['keyId = "k" , signature = "AAAA"', t_sig(['keyid' => 'k', 'signature' => 'AAAA'])],
+    ['keyId="",signature="AAAA"', t_sig(['signature' => 'AAAA'])],
+    // 重复参数：后一个覆盖前一个的话，对端能塞两个 keyId，一个给日志看、另一个给验签用
+    ['keyId="a",keyId="b"', false],
+    ['keyId="a",KEYID="b"', false],
+    ['keyId="a', false],
+    ['keyId="a\"', false],
+    ['keyId="a" algorithm="rsa-sha256"', false],
+    ['keyId="a";algorithm="rsa-sha256"', false],
+    ['keyId="a",', false],
+    ['keyId="a"junk', false],
+    [',keyId="a"', false],
+    ['="a"', false],
+    ['keyId', false],
+    ['keyId=', false],
+    ['', false],
+    [null, false],
+    [123, false]
+]);
+// 超长头部只可能是拿解析器当 CPU 消耗品
+t_is(ActivityPub_Signature_Parse('keyId="'.str_repeat('k', 4000).'"'), t_sig(['keyid' => str_repeat('k', 4000)]), 'ActivityPub_Signature_Parse under the length cap');
+t_is(ActivityPub_Signature_Parse('keyId="'.str_repeat('k', 4100).'"'), false, 'ActivityPub_Signature_Parse over the length cap');
+// 原因码要拿得到，验签失败的日志只剩这一句能看
+ActivityPub_Signature_Parse('keyId="a",keyId="b"', $t_error);
+t_is($t_error, 'duplicate parameter: keyid', 'ActivityPub_Signature_Parse reports a stable reason');
+
 t_group('pure / date and digest');
 
 t_is(ActivityPub_Verify_Date(gmdate('D, d M Y H:i:s T')), true, 'ActivityPub_Verify_Date accepts now');
@@ -165,11 +211,42 @@ t_is(ActivityPub_Verify_Date(''), false, 'ActivityPub_Verify_Date rejects an emp
 t_is(ActivityPub_Verify_Date('garbage'), false, 'ActivityPub_Verify_Date rejects an unparsable date');
 
 $body = '{"type":"Follow"}';
-$_SERVER['HTTP_DIGEST'] = 'SHA-256='.base64_encode(hash('sha256', $body, true));
+$t_sha256 = hash('sha256', $body, true); $t_sha512 = hash('sha512', $body, true);
+// 整条 Digest 都要吃干净：从垃圾里截出一个能对上的值就放行，等于允许对端在正确摘要旁边挂任意内容
+t_table('ActivityPub_Digest_Parse', 'ActivityPub_Digest_Parse', [
+    ['SHA-256='.base64_encode($t_sha256), ['sha256' => $t_sha256]],
+    // 小写是 RFC 9530 的写法；连字符不是可忽略字符，IANA 没登记过 SHA256，认下来只会顺带认了 SHA-2-56
+    ['sha-256='.base64_encode($t_sha256), ['sha256' => $t_sha256]],
+    ['SHA256='.base64_encode($t_sha256), []],
+    ['SHA-2-56='.base64_encode($t_sha256), []],
+    ['SHA-512='.base64_encode($t_sha512), ['sha512' => $t_sha512]],
+    ['SHA-256='.base64_encode($t_sha256).', SHA-512='.base64_encode($t_sha512), ['sha256' => $t_sha256, 'sha512' => $t_sha512]],
+    // 同一个算法给两遍同一个值无所谓，给两个不同的值就无从判断对端想让哪个生效
+    ['SHA-256='.base64_encode($t_sha256).',SHA-256='.base64_encode($t_sha256), ['sha256' => $t_sha256]],
+    ['SHA-256='.base64_encode($t_sha256).',SHA-256='.base64_encode(hash('sha256', $body.' ', true)), false],
+    ['unixsum=1234', []],
+    ['unixsum=1234,SHA-256='.base64_encode($t_sha256), ['sha256' => $t_sha256]],
+    ['SHA-256='.base64_encode(hash('md5', $body, true)), false],
+    ['SHA-512='.base64_encode($t_sha256), false],
+    ['SHA-256='.base64_encode($t_sha256).' junk', false],
+    ['SHA-256=not base64', false],
+    ['SHA-256=', false],
+    ['garbage', false],
+    ['', false],
+    [null, false],
+    [123, false]
+]);
+
+$_SERVER['HTTP_DIGEST'] = 'SHA-256='.base64_encode($t_sha256);
 t_is(ActivityPub_Verify_Digest($body), true, 'ActivityPub_Verify_Digest accepts a matching sha-256');
 t_is(ActivityPub_Verify_Digest($body.' '), false, 'ActivityPub_Verify_Digest rejects a modified body');
-$_SERVER['HTTP_DIGEST'] = 'SHA-512='.base64_encode(hash('sha512', $body, true));
+$_SERVER['HTTP_DIGEST'] = 'SHA-512='.base64_encode($t_sha512);
 t_is(ActivityPub_Verify_Digest($body), true, 'ActivityPub_Verify_Digest accepts sha-512');
+$_SERVER['HTTP_DIGEST'] = 'SHA-256='.base64_encode($t_sha256).',SHA-512='.base64_encode($t_sha512);
+t_is(ActivityPub_Verify_Digest($body), true, 'ActivityPub_Verify_Digest accepts both digests at once');
+// 两个都在就两个都要对，挑一个正确的放行等于让对端在旁边挂个对不上的
+$_SERVER['HTTP_DIGEST'] = 'SHA-256='.base64_encode($t_sha256).',SHA-512='.base64_encode(hash('sha512', $body.' ', true));
+t_is(ActivityPub_Verify_Digest($body), false, 'ActivityPub_Verify_Digest checks every digest it understands');
 // algorithm 是对端给的，不能直接透传给 hash()
 $_SERVER['HTTP_DIGEST'] = 'MD5='.base64_encode(hash('md5', $body, true));
 t_is(ActivityPub_Verify_Digest($body), false, 'ActivityPub_Verify_Digest rejects an unsupported algorithm');

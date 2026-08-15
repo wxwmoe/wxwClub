@@ -4,7 +4,8 @@
  *
  * 报文是从线上 inbox 抓下来的原始字节，只把域名和用户名改写成了 example 域，其余一个字节没动 —— 兼容性的风险在报文形状里，形状不能被 json_decode 再编码一遍磨掉。
  * 签名不能照抄：抓下来的 Signature 是对端用它自己的私钥、按当时的 Date 签的，本站既没有那把私钥，Date 也早就过了时效窗口。所以每次重放都用仓库里的测试密钥现签一遍，
- * users.public_key 里放的就是配套的公钥，这样验签、Digest、时效那一整段走的是真代码而不是被绕过去。fixture 想验失败分支就自己写 sign。
+ * users.public_key 里放的就是配套的公钥，这样验签、Digest、时效那一整段走的是真代码而不是被绕过去。fixture 想验失败分支就自己写 sign，能改的每一项见 t_ap_server。
+ * signature/ 那个目录不是一个软件：报文都是同一条最普通的 Follow，变的只有签名的形状，验的是 HTTP 签名本身而不是某家实现的报文形状。
  *
  * 一条 fixture 一个进程：Club_Inbox_Reply 用一个 static 保证「应答只发一次」，同一个进程里重放第二条就再也拿不到状态码了。
  * 一个软件目录共用一个库，按 seq 从小到大跑：关注 -> 投稿 -> 编辑 -> 删除 -> 取关本来就是一条链，announce 要有关注者才扇得出去，update 要先有被转发过的帖子。 */
@@ -97,12 +98,14 @@ function t_ap_seed($fixtures) {
     $actors = [];
     foreach ($fixtures as $fixture) {
         $actor = ActivityPub_Object_Id(t_ap_activity($fixture)['actor'] ?? '');
-        if ($actor !== '') $actors[$actor] = true;
+        // 公钥默认是配套那把 RSA 测试密钥。fixture 顶层的 key 换一把别的（keys/<key>-public.pem），验的是「非 RSA 公钥进不了 RSA 验签路径」，那种 fixture 得用自己专属的 actor
+        if ($actor !== '') $actors[$actor] = isset($fixture['key']) ? $fixture['key'] : 'actor';
     }
-    foreach (array_keys($actors) as $actor) {
+    foreach ($actors as $actor => $key) {
         $host = parse_url($actor, PHP_URL_HOST);
         t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values (:name, :actor, :inbox, :public, :shared, :now, :now)',
-            [':name' => basename($actor).'@'.$host, ':actor' => $actor, ':inbox' => $actor.'/inbox', ':public' => $public, ':shared' => 'https://'.$host.'/inbox', ':now' => time()]);
+            [':name' => basename($actor).'@'.$host, ':actor' => $actor, ':inbox' => $actor.'/inbox', ':public' => file_get_contents(t_ap_dir().'/keys/'.$key.'-public.pem'),
+                ':shared' => 'https://'.$host.'/inbox', ':now' => time()]);
     }
     // 另一家实例上的一个关注者，预置好不经过任何 fixture。透传转发会把来源实例整条 shared_inbox 排掉 ——
     // 那一包本来就是它发来的 —— 所以只有投稿者自己那一家关注的话，扇出目标是空的，转发入没入队根本看不出来
@@ -156,7 +159,10 @@ function t_ap_replay($software, $name) {
     }
 }
 
-// 请求环境。Content-Type / Content-Length 在 $_SERVER 里没有 HTTP_ 前缀，签名那边按同一套规则找回来
+/* 请求环境。Content-Type / Content-Length 在 $_SERVER 里没有 HTTP_ 前缀，签名那边按同一套规则找回来。
+ * 默认是 Mastodon 那一类最常见的报文：rsa-sha256 + (request-target) host date digest。sign 里每一项都对应一种真实的对端写法或一种攻击形状：
+ * keyId / date 是身份和时刻，algorithm 与 hash 可以互相不一致（「摘要算法对端说了算」正是要拦的），headers 决定签哪几行，created / expires 覆盖默认时刻，
+ * body 是算 Digest 用的字节（跟发出去的正文不同就是「只有正文被改过」），signature 直接替换 base64，params 原样追加到头部末尾去构造畸形报文 */
 function t_ap_server($fixture, $body, $actor) {
     global $config;
     $request = $fixture['request'];
@@ -167,13 +173,29 @@ function t_ap_server($fixture, $body, $actor) {
     }
     $sign = isset($request['sign']) ? $request['sign'] : true;
     if ($sign === false) return $server;
-    $keyId = is_array($sign) && isset($sign['keyId']) ? $sign['keyId'] : $actor.'#main-key';
-    $date = gmdate('D, d M Y H:i:s T', is_array($sign) && isset($sign['date']) ? $sign['date'] : time());
-    $digest = 'SHA-256='.base64_encode(hash('sha256', $body, true));
-    $server['HTTP_DATE'] = $date; $server['HTTP_DIGEST'] = $digest;
-    $signed = '(request-target): '.strtolower($request['method']).' '.$request['path']."\nhost: ".$config['base']."\ndate: ".$date."\ndigest: ".$digest;
-    openssl_sign($signed, $signature, file_get_contents(t_ap_dir().'/keys/actor-private.pem'), OPENSSL_ALGO_SHA256);
-    $server['HTTP_SIGNATURE'] = 'keyId="'.$keyId.'",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="'.base64_encode($signature).'"';
+    if (!is_array($sign)) $sign = [];
+    $now = isset($sign['date']) ? $sign['date'] : time();
+    $headers = isset($sign['headers']) ? $sign['headers'] : ['(request-target)', 'host', 'date', 'digest'];
+    $stamps = ['created' => isset($sign['created']) ? $sign['created'] : $now, 'expires' => isset($sign['expires']) ? $sign['expires'] : $now + 300];
+    $server['HTTP_DATE'] = gmdate('D, d M Y H:i:s T', $now);
+    $server['HTTP_DIGEST'] = 'SHA-256='.base64_encode(hash('sha256', isset($sign['body']) ? $sign['body'] : $body, true));
+    $lines = [];
+    foreach ($headers as $header) {
+        if ($header === '(request-target)') $lines[] = $header.': '.strtolower($request['method']).' '.$request['path'];
+        elseif ($header === '(created)' || $header === '(expires)') $lines[] = $header.': '.$stamps[trim($header, '()')];
+        else {
+            $key = strtoupper(str_replace('-', '_', $header));
+            if (!in_array($key, ['CONTENT_TYPE', 'CONTENT_LENGTH'])) $key = 'HTTP_'.$key;
+            // 请求里没有的头也照签一行空值：对端拿这个补齐签名串，正是「已签 Header 缺失」要拦的
+            $lines[] = $header.': '.(isset($server[$key]) ? $server[$key] : '');
+        }
+    }
+    openssl_sign(implode("\n", $lines), $signature, file_get_contents(t_ap_dir().'/keys/actor-private.pem'), isset($sign['hash']) ? $sign['hash'] : OPENSSL_ALGO_SHA256);
+    $header = 'keyId="'.(isset($sign['keyId']) ? $sign['keyId'] : $actor.'#main-key').'",algorithm="'.(isset($sign['algorithm']) ? $sign['algorithm'] : 'rsa-sha256').
+        '",headers="'.implode(' ', $headers).'",signature="'.(isset($sign['signature']) ? $sign['signature'] : base64_encode($signature)).'"';
+    // 时间戳排在签名之后、不加引号，跟 GoToSocial 发出来的形状一致
+    foreach ($stamps as $name => $stamp) if (in_array('('.$name.')', $headers)) $header .= ','.$name.'='.$stamp;
+    $server['HTTP_SIGNATURE'] = $header.(isset($sign['params']) ? $sign['params'] : '');
     return $server;
 }
 
