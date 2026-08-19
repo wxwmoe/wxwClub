@@ -322,3 +322,120 @@ t_is(worker_maintain(time(), $config), false, 'a master that loses the lock runs
 // 对面走了就得接手，否则整站的维护随着那个 master 一起没了
 $t_free = $t_rival->prepare('select release_lock(:lock)'); $t_free->execute([':lock' => $t_lock]);
 t_is(worker_maintain(time(), $config), true, 'the lock going free hands maintenance over');
+
+t_group('state / bans');
+
+// 封禁停投递靠解除关注关系，投递侧一个新开关都没加。host 那一支要按主键翻页找出同一实例的 users，删多了就是把别家的关注一起清掉，删少了等于没封
+t_state_reset();
+t_exec('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values (\'other\', \'\', \'\', :now)', [':now' => time()]);
+t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values'.
+    ' (\'mallory@bad.example\', \'https://bad.example/users/mallory\', \'https://bad.example/users/mallory/inbox\', \'\', \'https://bad.example/inbox\', :now, :now),'.
+    ' (\'eve@bad.example\', \'https://bad.example/users/eve\', \'https://bad.example/users/eve/inbox\', \'\', \'https://bad.example/inbox\', :now2, :now2),'.
+    ' (\'dave@good.example\', \'https://good.example/users/dave\', \'https://good.example/users/dave/inbox\', \'\', \'https://good.example/inbox\', :now3, :now3)',
+    [':now' => time(), ':now2' => time(), ':now3' => time()]);
+foreach (['https://bad.example/users/mallory', 'https://bad.example/users/eve', 'https://good.example/users/dave'] as $t_ban_actor)
+    foreach (['test', 'other'] as $t_ban_club) t_is(Club_Group_Follow($t_ban_actor, $t_ban_club, true), 'added', 'a follower is seeded for the ban tests');
+
+// 群组级：只解除那一个群组的关注，同一个人在别的群组照旧
+t_is(Club_Ban_Detach(['https://bad.example/users/mallory'], 'actor', ['test'], true), 1, 'a club scoped preview counts only that club');
+t_is(Club_Ban_Add('https://bad.example/users/mallory', 'actor', ['test']), 1, 'a club scoped ban drops only that club');
+t_is((int)t_one('select count(*) from `followers`'), 5, 'the other club keeps the same follower');
+t_is(Club_Ban_Check('https://bad.example/users/mallory', 'bad.example'), false, 'a club scoped ban is not a site wide one');
+t_is(Club_Ban_Clubs('https://bad.example/users/mallory', 'bad.example', ['test', 'other']), ['test' => 1], 'the club check answers for the whole batch at once');
+t_is(Club_Ban_Clubs('https://bad.example/users/eve', 'bad.example', ['test']), [], 'a club scoped actor ban covers nobody else');
+// 作用域取并集，不是覆盖
+t_is(Club_Ban_Add('https://bad.example/users/mallory', 'actor', ['other']), 1, 'banning the same actor in a second club drops that one too');
+t_is(Club_Ban_Clubs('https://bad.example/users/mallory', 'bad.example', ['test', 'other']), ['test' => 1, 'other' => 1], 'a second club is merged into the same row');
+t_is((int)t_one('select count(*) from `bans`'), 1, 'one target is still one row');
+t_is(Club_Ban_Remove('https://bad.example/users/mallory', ['test']), 'narrowed', 'a club can be lifted out of the scope');
+t_is(Club_Ban_Clubs('https://bad.example/users/mallory', 'bad.example', ['test', 'other']), ['other' => 1], 'lifting one club leaves the rest banned');
+t_is(Club_Ban_Remove('https://bad.example/users/mallory', ['other']), 'removed', 'lifting the last club removes the ban');
+t_is((int)t_one('select count(*) from `bans`'), 0, 'an empty scope takes the row with it');
+
+// 全站：整条活动在 inbox 门口就被拦下，跟群组无关
+t_is(Club_Ban_Add('https://bad.example/users/mallory', 'actor'), 0, 'a site wide ban drops what is left of that actor');
+// 整个人被封的时候按群组解封同样得拒绝，跟 host 那一支走的是同一段代码，但这是运维最可能敲出来的组合
+t_is(Club_Ban_Remove('https://bad.example/users/mallory', ['test']), 'site-wide', 'an actor banned across every club refuses a per club lift');
+t_is(Club_Ban_Check('https://bad.example/users/mallory', 'bad.example') !== false, true, 'the refused per club lift leaves the actor banned');
+t_is(Club_Ban_Check('https://BAD.example/users/mallory', 'bad.example')['target'], 'https://bad.example/users/mallory', 'the inbound check normalizes the actor url it was handed');
+t_is(Club_Ban_Check('https://bad.example/users/eve', 'bad.example'), false, 'an actor ban does not cover the rest of its host');
+t_is((int)t_one('select count(*) from `users` where `actor` = \'https://bad.example/users/mallory\''), 1, 'banning an actor keeps its cached row');
+t_is(Club_Ban_Add('bad.example', 'host', null, 'spam'), 2, 'banning a host drops the follows of everyone on it');
+t_is((int)t_one('select count(*) from `followers`'), 2, 'a host ban leaves other instances alone');
+t_is(Club_Ban_Check('https://bad.example/users/eve', 'bad.example')['type'], 'host', 'the inbound check matches a banned host');
+t_is(Club_Ban_Check('https://good.example/users/dave', 'good.example'), false, 'an unrelated instance stays unbanned');
+// 全站封禁没有列出任何群组，按群组解封无从谈起；这里曾经掉进删整行那一支，把一条全站封禁悄悄解掉
+t_is(Club_Ban_Remove('bad.example', ['test']), 'site-wide', 'a site wide ban refuses to be narrowed to a club');
+t_is((int)t_one('select count(*) from `bans` where `target` = :target', [':target' => 'bad.example']), 1, 'the refused narrowing leaves the ban in place');
+// 同一个不对称的另一半：actor 自己没有封禁行，但整家实例被封着。报「没这条」会让人以为他没被封
+t_is(Club_Ban_Remove('https://bad.example/users/eve'), 'host-wide', 'an actor covered only by a host ban says so');
+t_is(Club_Ban_Remove('https://good.example/users/dave'), 'absent', 'an actor nobody banned is simply absent');
+t_is(Club_Ban_Remove('bad.example'), 'removed', 'cli can lift a ban');
+t_is(Club_Ban_Remove('bad.example'), 'absent', 'lifting a ban twice reports nothing to do');
+t_is(Club_Ban_Remove('https://bad.example/users/eve'), 'absent', 'the actor is absent again once the host ban is gone');
+t_is((int)t_one('select count(*) from `followers`'), 2, 'lifting a ban does not restore the follows it dropped');
+
+// 门口那次检查和插入之间隔着一次 actor 拉取，封禁可能正好落在中间。事务里锁到 users 那行之后必须再问一次，否则这一行会成为被封名单里的漏网关注
+t_state_reset();
+t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`)'.
+    ' values (:name, :actor, :inbox, \'\', :shared, :now, :now)', [':name' => 'late@bad.example', ':actor' => 'https://bad.example/users/late',
+        ':inbox' => 'https://bad.example/users/late/inbox', ':shared' => 'https://bad.example/inbox', ':now' => time()]);
+Club_Ban_Add('bad.example', 'host');
+Club_Inbox_Follow(['actor' => 'https://bad.example/users/late', 'id' => 'https://bad.example/follows/1', 'object' => $base.'/club/test']);
+t_is((int)t_one('select count(*) from `followers`'), 0, 'a follow that raced a ban is refused inside the transaction');
+t_is((int)t_one('select count(*) from `queues`'), 0, 'a refused follow queues no accept');
+
+// 按群组封实例：作用域跟 type 正交，host 那一支同样只解除这一个群组的关注，而且覆盖这家实例的每个用户。自带一份干净的库，免得计数跟上面的链条纠缠
+t_state_reset();
+t_exec('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values (:club, :key, :key2, :now)',
+    [':club' => 'other', ':key' => '', ':key2' => '', ':now' => time()]);
+t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values'.
+    ' (:n1, :a1, :i1, :k1, :s1, :now, :now), (:n2, :a2, :i2, :k2, :s2, :now2, :now2), (:n3, :a3, :i3, :k3, :s3, :now3, :now3)',
+    [':n1' => 'mallory@bad.example', ':a1' => 'https://bad.example/users/mallory', ':i1' => 'https://bad.example/users/mallory/inbox', ':s1' => 'https://bad.example/inbox',
+        ':n2' => 'eve@bad.example', ':a2' => 'https://bad.example/users/eve', ':i2' => 'https://bad.example/users/eve/inbox', ':s2' => 'https://bad.example/inbox',
+        ':n3' => 'dave@good.example', ':a3' => 'https://good.example/users/dave', ':i3' => 'https://good.example/users/dave/inbox', ':s3' => 'https://good.example/inbox',
+        ':k1' => '', ':k2' => '', ':k3' => '', ':now' => time(), ':now2' => time(), ':now3' => time()]);
+foreach (['https://bad.example/users/mallory', 'https://bad.example/users/eve', 'https://good.example/users/dave'] as $t_ban_actor)
+    foreach (['test', 'other'] as $t_ban_club) Club_Group_Follow($t_ban_actor, $t_ban_club, true);
+t_is(Club_Ban_Add('bad.example', 'host', ['test']), 2, 'a club scoped host ban drops that club for everyone on the host');
+t_is((int)t_one('select count(*) from `followers`'), 4, 'the other club keeps both of them');
+t_is(Club_Ban_Check('https://bad.example/users/eve', 'bad.example'), false, 'a club scoped host ban is not a site wide one');
+t_is(Club_Ban_Clubs('https://bad.example/users/eve', 'bad.example', ['test', 'other']), ['test' => 1], 'the host ban answers for anyone on it');
+t_is(Club_Ban_Clubs('https://good.example/users/dave', 'good.example', ['test']), [], 'another instance is untouched by it');
+t_is(Club_Ban_Remove('bad.example'), 'removed', 'the club scoped host ban can be lifted');
+
+// 封禁刚解除的关注关系，管理命令能原样建回来的话，投递照发、入站照拒，两边就此长期矛盾。自带一份干净的库，免得计数跟上面的链条纠缠
+t_state_reset();
+t_exec('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values (:club, :key, :key2, :now)',
+    [':club' => 'other', ':key' => '', ':key2' => '', ':now' => time()]);
+t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values'.
+    ' (:n1, :a1, :i1, :k1, :s1, :now, :now), (:n2, :a2, :i2, :k2, :s2, :now2, :now2)',
+    [':n1' => 'eve@bad.example', ':a1' => 'https://bad.example/users/eve', ':i1' => 'https://bad.example/users/eve/inbox', ':s1' => 'https://bad.example/inbox',
+        ':n2' => 'mallory@bad.example', ':a2' => 'https://bad.example/users/mallory', ':i2' => 'https://bad.example/users/mallory/inbox', ':s2' => 'https://bad.example/inbox',
+        ':k1' => '', ':k2' => '', ':now' => time(), ':now2' => time()]);
+foreach (['test', 'other'] as $t_ban_club) Club_Group_Follow('https://bad.example/users/eve', $t_ban_club, true);
+Club_Group_Follow('https://bad.example/users/mallory', 'test', true);
+t_is(Club_Ban_Add('https://bad.example/users/eve', 'actor', null, 'spam'), 2, 'a site wide actor ban clears both clubs');
+t_is(Club_Group_Follow('https://bad.example/users/eve', 'test', true), 'banned', 'the cli refuses to follow a banned actor back in');
+t_is((int)t_one('select count(*) from `followers` `f` join `users` `u` on f.uid = u.uid where u.actor = :actor',
+    [':actor' => 'https://bad.example/users/eve']), 0, 'the refused command wrote nothing');
+t_is(Club_Ban_Add('bad.example', 'host', ['test']), 1, 'a club scoped host ban covers the rest of the instance');
+t_is(Club_Group_Follow('https://bad.example/users/mallory', 'test', true), 'banned', 'a club scoped host ban blocks that club');
+t_is(Club_Group_Follow('https://bad.example/users/mallory', 'other', true), 'added', 'and leaves the other club alone');
+
+// URL 里的大小写是对端定的，而 clubs.name 不区分大小写：两边不一致的话 /club/TEST 就能绕过封了 test 的作用域
+Club_Ban_Add('https://bad.example/users/mallory', 'actor', ['test']);
+Club_Inbox_Follow(['actor' => 'https://bad.example/users/mallory', 'id' => 'https://bad.example/follows/2', 'object' => 'https://local.example/club/TEST']);
+t_is((int)t_one('select count(*) from followers f join clubs c on f.cid = c.cid join users u on f.uid = u.uid where c.name = :club and u.actor = :actor',
+    [':club' => 'test', ':actor' => 'https://bad.example/users/mallory']), 0, 'a club scoped ban is not bypassed by the url casing');
+t_is(Club_Ban_Remove('https://bad.example/users/mallory'), 'removed', 'the casing fixture cleans up after itself');
+
+// 只带 domain 一列的名单导进来，不该把运维写下的备注抹掉
+t_is(t_one('select `reason` from `bans` where `target` = :target', [':target' => 'bad.example']), null, 'a ban added without a reason has none');
+t_is(Club_Ban_Add('bad.example', 'host'), 1, 'adding it again site wide widens the scope and drops the rest');
+Club_Ban_Add('bad.example', 'host', null, 'imported by hand');
+t_is(t_one('select `reason` from `bans` where `target` = :target', [':target' => 'bad.example']), 'imported by hand', 'a reason can be set later');
+Club_Ban_Add('bad.example', 'host');
+t_is(t_one('select `reason` from `bans` where `target` = :target', [':target' => 'bad.example']), 'imported by hand', 'a later add without a reason leaves it alone');
+Club_Ban_Add('bad.example', 'host', null, '');
+t_is(t_one('select `reason` from `bans` where `target` = :target', [':target' => 'bad.example']), null, 'an explicit empty reason clears it');

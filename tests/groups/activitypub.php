@@ -107,6 +107,9 @@ function t_ap_seed($fixtures) {
             [':name' => basename($actor).'@'.$host, ':actor' => $actor, ':inbox' => $actor.'/inbox', ':public' => file_get_contents(t_ap_dir().'/keys/'.$key.'-public.pem'),
                 ':shared' => 'https://'.$host.'/inbox', ':now' => time()]);
     }
+    // 带 ban 的 fixture 自带它要的封禁行：入站在验签之前查 bans，没有这一行就走不到那条分支
+    foreach ($fixtures as $fixture) if (isset($fixture['ban'])) t_exec('insert ignore into `bans`(`target`,`type`,`timestamp`) values (:target, :type, :now)',
+        [':target' => $fixture['ban']['target'], ':type' => $fixture['ban']['type'], ':now' => time()]);
     // 另一家实例上的一个关注者，预置好不经过任何 fixture。透传转发会把来源实例整条 shared_inbox 排掉 ——
     // 那一包本来就是它发来的 —— 所以只有投稿者自己那一家关注的话，扇出目标是空的，转发入没入队根本看不出来
     t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`)'.

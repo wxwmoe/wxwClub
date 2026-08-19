@@ -1,7 +1,7 @@
 <?php
 
 // 这份代码要求的数据库结构版本，对应 app/database/steps/ 下最大的那个步骤文件。库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，入站活动会写进本地状态再报错，对端重放就是半处理
-define('DB_VERSION', 6);
+define('DB_VERSION', 7);
 
 function ActivityPub_Collection($id, $arr = []) {
     $arr = array_merge(['@context' => 'https://www.w3.org/ns/activitystreams', 'id' => $id, 'type' => 'OrderedCollection', 'totalItems' => 0], $arr);
@@ -581,6 +581,159 @@ function Club_Actor_Sync($actor, $cooldown = 3600) {
     return Club_Actor_Fetch($actor);
 }
 
+// 记下封禁并解除对方的关注关系。停止投递不靠投递侧的新开关 —— 没有扇出目标自然就不再产生投递，blacklist 仍然是端点禁用的唯一真相。
+// users 行和历史投稿留着：那是作者身份和站内已有的历史，删账号是另一条命令。已经排进队列的活动还会投出去一轮，之后不再产生。
+// $clubs 为 null 是全站封禁，给数组则只作用于这几个群组。两者相遇时全站赢：范围更大的那个已经把小的包含进去了，留着小的只会让 ban list 读起来自相矛盾
+function Club_Ban_Add($target, $type, $clubs = null, $reason = null) {
+    global $db;
+    $scope = Club_DB_Transaction('ban add', function () use ($db, $target, $type, $clubs, $reason) {
+        $pdo = $db->prepare('select `clubs`, `reason` from `bans` where `target` = :target for update');
+        $pdo->execute([':target' => $target]);
+        $row = $pdo->fetch(PDO::FETCH_ASSOC);
+        $old = $row === false ? false : $row['clubs'];
+        // 没给理由是「别动它」，不是「清空」：一份只有 domain 列的名单导进来，不该把运维一条条写下的备注全抹掉。要清就显式传空串
+        $reason = isset($reason) ? ($reason === '' ? null : $reason) : ($row === false ? null : $row['reason']);
+        // 已有的作用域跟这次的取并集。没有旧行时这次说了算；有旧行则合并，任何一边是全站结果就是全站
+        $scope = $old === false ? (isset($clubs) ? array_values(array_unique($clubs)) : null)
+            : Club_Ban_Scope(isset($old) ? (json_decode($old, 1) ?: []) : null, $clubs);
+        $pdo = $db->prepare('insert into `bans`(`target`,`type`,`clubs`,`reason`,`timestamp`) values (:target, :type, :clubs, :reason, :now)'.
+            ' on duplicate key update `type` = :retype, `clubs` = :reclubs, `reason` = :rereason');
+        $json = isset($scope) ? Club_Json_Encode($scope) : null;
+        $pdo->execute([':target' => $target, ':type' => $type, ':clubs' => $json, ':reason' => $reason, ':now' => time(),
+            ':retype' => $type, ':reclubs' => $json, ':rereason' => $reason]);
+        return $scope;
+    });
+    $rows = Club_Ban_Detach([$target], $type, $scope);
+    Club_Log_Event('info', 'ban added by cli', ['target' => $target, 'type' => $type, 'clubs' => isset($scope) ? $scope : 'all', 'follows dropped' => $rows]);
+    return $rows;
+}
+
+// 全站封禁的判据，inbox 门口用的就是它。归一化收在这里：入库和查询必须是同一个写法，差一个字母就是主键点查静默落空，封禁看起来像没生效
+function Club_Ban_Check($actor, $host) {
+    global $db;
+    $pdo = $db->prepare('select `target`, `type`, `reason` from `bans` where `clubs` is null and `target` in (:actor, :host)');
+    $pdo->execute(Club_Ban_Where($actor, $host));
+    return $pdo->fetch(PDO::FETCH_ASSOC);
+}
+
+// 这批群组里有哪几个把这个发送者封了。一条投稿投给哪几个群组要到 Club_Inbox_Create 里才认得出来，门口拦不住，只能到那里再问 ——
+// 但作用域跟着 target 存在同一行里，所以这里仍然只是一次主键点查，跟群组数无关，逐个群组问一遍那种写法从一开始就不必存在
+function Club_Ban_Clubs($actor, $host, $clubs) {
+    global $db; $banned = [];
+    if (!$clubs) return [];
+    $pdo = $db->prepare('select `clubs` from `bans` where `clubs` is not null and `target` in (:actor, :host)');
+    $pdo->execute(Club_Ban_Where($actor, $host));
+    foreach ($pdo->fetchAll(PDO::FETCH_COLUMN, 0) as $scope)
+        foreach (array_intersect($clubs, json_decode($scope, 1) ?: []) as $club) $banned[$club] = 1;
+    return $banned;
+}
+
+// 解除一组被封目标的关注关系，$dry 只数不删（CLI 的预览走同一段扫描，免得数出来的和删掉的不是同一批）。
+// 收的是数组而不是单个目标：导入一份上万条的名单时，一个 host 扫一遍 users 就是上万遍全表；把整份名单读进内存，users 只翻一遍。
+// host 不拿 like 去匹配 actor：端口、大小写、路径里出现同名子串都会判错，按 URL 取 host 才是这一列真正的含义
+function Club_Ban_Detach($targets, $type, $clubs = null, $dry = false) {
+    global $db; $total = 0;
+    if (!($targets = array_values(array_unique((array)$targets)))) return 0;
+    // 群组级封禁只解除那几个群组的关注；作用域为空说明这次封禁谁也没圈进去，没有可解除的
+    $scope = '';
+    if (isset($clubs)) {
+        if (!$clubs) return 0;
+        $names = [];
+        foreach ($clubs as $club) $names[] = $db->quote($club);
+        $scope = ' and `cid` in (select `cid` from `clubs` where `name` in ('.implode(',', $names).'))';
+    }
+    if ($type !== 'host') {
+        $names = []; $params = [];
+        foreach ($targets as $i => $target) { $names[] = ':a'.$i; $params[':a'.$i] = $target; }
+        if ($dry) {
+            $pdo = $db->prepare('select count(*) from `followers` where `uid` in (select `uid` from `users` where `actor` in ('.implode(',', $names).'))'.$scope);
+            $pdo->execute($params);
+            return (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
+        }
+        $pdo = $db->prepare('select `uid` from `users` where `actor` in ('.implode(',', $names).')');
+        $pdo->execute($params);
+        return Club_Ban_Drop($pdo->fetchAll(PDO::FETCH_COLUMN, 0), $scope);
+    }
+    $hosts = array_flip($targets); $cursor = 0;
+    $pdo = $db->prepare('select `uid`, `actor` from `users` where `uid` > :cursor order by `uid` limit 500');
+    do {
+        $pdo->execute([':cursor' => $cursor]);
+        $rows = $pdo->fetchAll(PDO::FETCH_ASSOC); $uids = [];
+        foreach ($rows as $row) {
+            $cursor = (int)$row['uid'];
+            if (isset($hosts[(string)Club_Url_Host((string)parse_url($row['actor'], PHP_URL_HOST))])) $uids[] = (int)$row['uid'];
+        }
+        if (!$uids) continue;
+        if ($dry) $total += (int)$db->query('select count(*) from `followers` where `uid` in ('.implode(',', $uids).')'.$scope)->fetch(PDO::FETCH_COLUMN, 0);
+        else $total += Club_Ban_Drop($uids, $scope);
+    } while (count($rows) === 500);
+    return (int)$total;
+}
+
+// 一批用户的关注关系。先按主键把这几行 users 锁住再删：并发的 Follow 事务开头拿的是同一把锁，锁不到就得排队，
+// 它插进来的那行不是排在这次删除前面（会被删掉），就是排在后面（那时它自己重查封禁会看见已经生效的那条，根本不会插）。
+// uid 是库里读出来的整数，直接拼进 in 列表；调用方按 500 一批切好，删除量由这批用户的关注数封顶
+function Club_Ban_Drop($uids, $scope) {
+    global $db;
+    if (!($uids = array_map('intval', (array)$uids))) return 0;
+    return (int)Club_DB_Transaction('ban detach', function () use ($db, $uids, $scope) {
+        $list = implode(',', $uids);
+        $db->query('select `uid` from `users` where `uid` in ('.$list.') for update')->fetchAll(PDO::FETCH_COLUMN, 0);
+        return $db->exec('delete from `followers` where `uid` in ('.$list.')'.$scope);
+    });
+}
+
+// $clubs 为 null 整条解封，给数组则只从作用域里摘掉这几个群组，摘空了连行一起删。
+// 返回状态串而不是 bool：调用方要分得开四种「没解成」—— 没这条封禁、这是全站封禁摘不了单个群组、以及这个 actor 被它所在实例那条封禁盖着。
+// 「全站封禁摘群组」曾经掉进删整行那一支，
+// 因为 clubs 是 NULL 时 fetch 返回的是 null 而不是 false，`=== false` 放它过去，isset() 又把它判成没有作用域。
+// 全站封禁本来就没有列出任何群组，要缩小范围得先整条解封再按群组封，替操作者猜等于把一条全站封禁悄悄解掉
+function Club_Ban_Remove($target, $clubs = null) {
+    global $db;
+    $state = Club_DB_Transaction('ban remove', function () use ($db, $target, $clubs) {
+        $pdo = $db->prepare('select `clubs` from `bans` where `target` = :target for update');
+        $pdo->execute([':target' => $target]);
+        if (($old = $pdo->fetch(PDO::FETCH_COLUMN, 0)) === false) {
+            // 这个 actor 自己没有封禁行，但它所在的实例整家被封了。报「没这条」会让人以为他没被封，而实际上他被封着，要解的是另一条
+            $host = Club_Url_Host((string)parse_url($target, PHP_URL_HOST));
+            if ($host === false || $host === $target) return 'absent';
+            $pdo = $db->prepare('select 1 from `bans` where `target` = :host');
+            $pdo->execute([':host' => $host]);
+            return $pdo->fetch(PDO::FETCH_COLUMN, 0) ? 'host-wide' : 'absent';
+        }
+        if (isset($clubs) && !isset($old)) return 'site-wide';
+        $scope = isset($clubs) ? array_values(array_diff(json_decode($old, 1) ?: [], $clubs)) : [];
+        if ($scope) {
+            $pdo = $db->prepare('update `bans` set `clubs` = :clubs where `target` = :target');
+            $pdo->execute([':target' => $target, ':clubs' => Club_Json_Encode($scope)]);
+            return 'narrowed';
+        }
+        $pdo = $db->prepare('delete from `bans` where `target` = :target');
+        $pdo->execute([':target' => $target]);
+        return 'removed';
+    });
+    // 没找到是常态（拼错了、或者早就解封过），但排查「怎么还是收不到」时要能分清
+    Club_Log_Event($state === 'removed' || $state === 'narrowed' ? 'info' : 'debug', 'ban remove, '.$state, ['target' => $target, 'clubs' => isset($clubs) ? $clubs : 'all']);
+    return $state;
+}
+
+// 两个作用域的并集，null 代表全站。任何一边是全站，结果就是全站 —— 范围更大的那个已经把小的包含进去了，留着小的只会让 ban list 读起来自相矛盾
+function Club_Ban_Scope($old, $new) {
+    if (!isset($old) || !isset($new)) return null;
+    return array_values(array_unique(array_merge($old, $new)));
+}
+
+function Club_Ban_Target($input) {
+    $input = trim((string)$input);
+    if (preg_match('#^https?://#i', $input)) return ($target = Club_Endpoint_Normalize($input)) === false ? false : ['actor', $target];
+    return ($host = Club_Url_Host($input)) === false ? false : ['host', $host];
+}
+
+// 两个判据共用的目标参数。归一化不出来的（不是 URL、host 形状不对）拿空串去查，反正没有行的 target 是空
+function Club_Ban_Where($actor, $host) {
+    return [':actor' => ($target = Club_Endpoint_Normalize($actor)) === false ? '' : $target, ':host' => ($name = Club_Url_Host($host)) === false ? '' : $name];
+}
+
 // Actor 文档和资料更新必须来自同一份组装结果；两边各抄一份时，新增字段只改到网页那份，远端收到 Update 后反而会把缓存里的字段删掉。
 function Club_Group_Actor($club, &$row = null) {
     global $db, $base, $config;
@@ -677,9 +830,17 @@ function Club_Group_Follow($actor, $club, $follow) {
     $pdo = $db->prepare('select `cid` from `clubs` where `name` = :club'); $pdo->execute([':club' => $club]);
     if (!($cid = $pdo->fetch(PDO::FETCH_COLUMN, 0))) return 'club-missing';
     if ($follow) {
-        $pdo = $db->prepare('insert ignore into `followers`(`cid`,`uid`,`timestamp`) values (:cid, :uid, :now)');
-        $pdo->execute([':cid' => $cid, ':uid' => $uid, ':now' => time()]);
-        $state = $pdo->rowCount() ? 'added' : 'exists';
+        // 封禁刚把这个人的关注关系解除掉，这条命令能原样建回来，而且之后没有任何东西会再清它 —— 投递照发，入站照拒，两边就此长期矛盾。
+        // 所以这里拒绝并说明白，要真想加就先解封。检查跟插入放同一个事务、并且先按主键锁住 users 那行，跟 Club_Inbox_Follow 用的是同一把锁和同样的顺序
+        $state = Club_DB_Transaction('cli follow', function () use ($db, $actor, $club, $cid, $uid) {
+            $pdo = $db->prepare('select `uid` from `users` where `uid` = :uid for update');
+            $pdo->execute([':uid' => $uid]);
+            $host = (string)parse_url($actor, PHP_URL_HOST);
+            if (Club_Ban_Check($actor, $host) || Club_Ban_Clubs($actor, $host, [$club])) return 'banned';
+            $pdo = $db->prepare('insert ignore into `followers`(`cid`,`uid`,`timestamp`) values (:cid, :uid, :now)');
+            $pdo->execute([':cid' => $cid, ':uid' => $uid, ':now' => time()]);
+            return $pdo->rowCount() ? 'added' : 'exists';
+        });
     } else {
         $pdo = $db->prepare('delete from `followers` where `cid` = :cid and `uid` = :uid');
         $pdo->execute([':cid' => $cid, ':uid' => $uid]);
@@ -776,6 +937,12 @@ function Club_Inbox_Create($jsonld) {
             sort($clubs, SORT_STRING);
             if ($actor = Club_Actor_Get($jsonld['actor'])) {
                 return Club_DB_Transaction('create inbox', function () use ($db, $base, $public_streams, $clubs, $actor, $jsonld, $object, $lang) {
+                // 先按主键把这行 users 锁成排他，再插下面那条 activities。这是全仓库写入路径统一的第一步（Follow、封禁解除、账号迁移、销号都这么开头），
+                // 而这里原本是唯一的例外：它靠 activities 的外键隐式拿一把共享锁，之后任何人想在同一事务里升级成排他就是 S 升 X ——
+                // 同一个人的两条投稿并发时两边各持 S 各等对方，正好是 1213。补上之后所有路径同序，Club_Notice_Send 才敢锁同一行去做配额串行化。
+                // 代价是同一个 actor 的并发投稿要排队，而它们本来就撞 activities 的唯一键，下面那条「并发投递抢走了」的分支就是为这种情况写的
+                $pdo = $db->prepare('select `uid` from `users` where `uid` = :uid for update');
+                $pdo->execute([':uid' => $actor['uid']]);
                 // 同一条内容可能同时投到 shared inbox 和群组 inbox，靠唯一键去重
                 $pdo = $db->prepare('insert ignore into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`) values(:uid, :type, :clubs, :object, :timestamp)');
                 $pdo->execute([':uid' => $actor['uid'], ':type' => 'Create', ':clubs' => Club_Json_Encode($clubs), ':object' => $object, ':timestamp' => ($time = time())]);
@@ -785,9 +952,12 @@ function Club_Inbox_Create($jsonld) {
                     $summary = is_string($s = $jsonld['object']['summary'] ?? null) ? $s : null;
                     $published = strtotime(is_string($p = $jsonld['object']['published'] ?? '') ? $p : '') ?: $time;
                     $announced = [];
+                    // 群组级封禁跟限流是同一件事的两种理由：这个群组不收这个人的投稿，回一句提醒、跳过它，别的群组照常。全站封禁在 inbox 门口就拦掉了，到不了这里
+                    $banned = Club_Ban_Clubs($jsonld['actor'], parse_url($jsonld['actor'], PHP_URL_HOST), $clubs);
                     foreach ($clubs as $club) {
+                        $reject = isset($banned[$club]) ? ['banned-club', ['club' => $club]] : Club_Limit_Check($club, $actor, $content);
                         // 触发限流就跳过这个群组，并回复到原帖上让用户知道撞了哪条规则
-                        if ($reject = Club_Limit_Check($club, $actor, $content)) {
+                        if ($reject) {
                             Club_Log_Write('info', 'filter', [$club, $reject[0]], $jsonld);
                             Club_Log_Event('info', 'announce filtered, '.$reject[0], ['club' => $club, 'actor' => $jsonld['actor'], 'object' => $object]);
                             // 一条帖子只回一次，即使撞了多个群组的规则
@@ -983,8 +1153,18 @@ function Club_Inbox_Dispatch($input, $club = null) {
         return $verify_retry ? Club_Inbox_Reply(503, 'Unable to verify the signature right now', 60) : Club_Inbox_Reply(403, 'Signature verification failed');
     }
     if (!$verify) Club_Log_Event('warning', 'inbox unverified but accepted, inbox-verify is off', ['actor' => $actor, 'reason' => $verify_reason ?? '-']);
-    // 验过签才算数：不验签就凭 actor 提前探活，等于让任何人点名让我们去敲谁
-    else Club_Blacklist_Sooner($actor);
+
+    // 封禁排在验签之后，因为提醒私信非发不可：实例级封禁挡下的多半是本站从没见过的新用户，而给一个没见过的人发私信，得先有他的 inbox 和公钥 —— 那正是验签这一步办成的事。
+    // 排在前面就得为了发私信再拉一次文档，等于把同一件事做两遍；排在后面则连密钥轮换也一并跟上了（验签自带 Club_Actor_Sync）。
+    // 代价是被封的实例每条活动要花掉本站一次 RSA，首次还多一次拉取 —— 那是「告诉对方为什么石沉大海」的价钱，认了。
+    // 给 202 而不是 4xx：对端据此不再重投，也不必从状态码里读出自己被封了。私信每次都发，只受 Club_Notice_Send 的日封顶约束
+    if ($ban = Club_Ban_Check($actor, $host)) {
+        Club_Log_Event('info', 'inbox refused, sender is banned', ['club' => $club ?? 'shared', 'type' => $type, 'actor' => $actor, 'target' => $ban['target']]);
+        Club_Notice_Send($actor, 'banned-'.$ban['type'], [], Club_I18n_Detect($jsonld['object'] ?? null), ActivityPub_Object_Id($jsonld['object'] ?? '') ?: null, 0);
+        return Club_Inbox_Reply(202, 'Accepted');
+    }
+    // 验过签才算数：不验签就凭 actor 提前探活，等于让任何人点名让我们去敲谁。被封的目标在上面已经走掉了，不给它排探活
+    if ($verify) Club_Blacklist_Sooner($actor);
     // 系统群组只负责发私信，不接受关注也不转发投稿。身份是可信的，拦它的是本站策略，所以是 403 而不是 401
     if (isset($club) && Club_Group_System($club)) {
         Club_Inbox_Skip('system club accepts nothing', ['club' => $club, 'type' => $type]);
@@ -1012,8 +1192,27 @@ function Club_Inbox_Follow($jsonld) {
     global $db, $base;
     if (!($club = Club_Group_From_Object($jsonld['object'] ?? ''))) return Club_Inbox_Skip('follow target is not a club url',
         ['actor' => $jsonld['actor'], 'object' => ActivityPub_Object_Id($jsonld['object'] ?? '')]);
+    // 名字要按库里的规范写法取回来再往下用。URL 里的大小写是对端定的，而 clubs.name 是 ascii_general_ci —— 下面那条 insert 不区分大小写地命中真正的群组，
+    // 封禁的作用域比对却是逐字节的，两边不一致的话 /club/TEST 就能绕过封了 test 的作用域。投稿那条路没这个问题，它的名字来自 Club_Group_Ensure，本来就是库里那份
+    $pdo = $db->prepare('select `name` from `clubs` where `name` = :club');
+    $pdo->execute([':club' => $club]);
+    if (!($club = $pdo->fetch(PDO::FETCH_COLUMN, 0))) return Club_Inbox_Skip('follow target is not a club here', ['actor' => $jsonld['actor'], 'club' => $club]);
+    // 这个群组把他封了：不建关注关系、不发 Accept，但要回一句，否则对方那边会一直挂着一条等不到应答的关注请求。
+    // 这里用默认冷却而不是每次都发 —— 没有 Accept 的 Follow 对端会按自己的节奏重投，每次都回等于跟着它刷
+    $host = (string)parse_url($jsonld['actor'], PHP_URL_HOST);
+    if (Club_Ban_Clubs($jsonld['actor'], $host, [$club])) {
+        Club_Notice_Send($jsonld['actor'], 'banned-club', ['club' => $club]);
+        return Club_Inbox_Skip('follow refused, banned from this club', ['club' => $club, 'actor' => $jsonld['actor']]);
+    }
     if (!($actor = Club_Actor_Get($jsonld['actor']))) return Club_Inbox_Unresolved($jsonld['actor']);
-    return Club_DB_Transaction('follow inbox', function () use ($db, $base, $club, $actor, $jsonld) {
+    return Club_DB_Transaction('follow inbox', function () use ($db, $base, $club, $actor, $jsonld, $host) {
+        // 上面那次检查到这里隔着一次 actor 拉取，可能是几秒；这中间 ban add 提交完、解除关注也扫过去了，这一行插进来就成了被封名单里的漏网关注，之后谁也不会再来删它。
+        // 所以先按主键锁住 users 那行（Club_Ban_Detach 用的是同一把、同样的顺序），拿到锁之后再问一次封禁 —— 答案这才是提交序上的那个。
+        // 锁不到就说明并发的解除关注正在跑，等它提交完这里读到的必然是已经生效的封禁
+        $pdo = $db->prepare('select `uid` from `users` where `uid` = :uid for update');
+        $pdo->execute([':uid' => $actor['uid']]);
+        if (Club_Ban_Check($jsonld['actor'], $host) || Club_Ban_Clubs($jsonld['actor'], $host, [$club]))
+            return Club_Inbox_Skip('follow refused, banned while it was being processed', ['club' => $club, 'actor' => $jsonld['actor']]);
         // 对方重发 Follow 是常态，撞唯一键时保留原记录
         $pdo = $db->prepare('insert ignore into `followers`(`cid`,`uid`,`timestamp`) select `cid`, :uid as `uid`, :timestamp as `timestamp` from `clubs` where `name` = :club');
         $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':timestamp' => time()]);
@@ -1382,27 +1581,32 @@ function Club_Notice_Send($actor, $type, $vars = [], $lang = null, $reply = null
     if (!($config['notice']['enabled'] ?? true) || empty($actor)) return false;
     if (!($club = Club_Group_Signer()) || !($user = Club_Actor_Get($actor))) return false;
 
-    if (!isset($reply)) {
-        $pdo = $db->prepare('select max(`timestamp`) from `notices` where `uid` = :uid and `type` = :type');
-        $pdo->execute([':uid' => $user['uid'], ':type' => $type]);
-        $last = $pdo->fetch(PDO::FETCH_COLUMN, 0);
-        // 用户报「没收到提醒」时，这两条决定了是发不出去还是压根没发
-        if ($last && $last > time() - $cooldown) {
-            Club_Log_Event('debug', 'notice on cooldown, '.$type, ['actor' => $actor, 'retry in' => ($last + $cooldown - time()).'s']);
-            return false;
-        }
-    } else {
-        // 逐条回复对刷屏用户等于反向刷屏，每人每天封顶
+    $locale = Club_I18n_Locale($lang);
+    $content = '<p><a href="'.$actor.'" class="u-url mention">@'.$user['name'].'</a> '.Club_I18n($type, $locale, $vars).'</p>';
+    return Club_DB_Transaction('notice enqueue', function () use ($db, $base, $config, $club, $user, $actor, $type, $reply, $cooldown, $locale, $content) {
+        // 配额检查和插入必须在同一个事务里，中间还得有把锁，否则同一个人的两条活动并发时都读到「还没到上限」，两条都插进去，上限就不是上限。
+        // 锁收件人那行 users：它总是存在，所以从「一条提醒都还没有」开始就是串行的 —— 锁 notices 里已有的行做不到这点，RC 不加间隙锁，空窗口时谁也锁不住，limit 小的时候一次并发就能翻倍。
+        // 这跟 Club_Inbox_Create、Club_Inbox_Follow、Club_Ban_Drop 用的是同一把锁、同样的顺序，不引入新的环
+        $pdo = $db->prepare('select `uid` from `users` where `uid` = :uid for update');
+        $pdo->execute([':uid' => $user['uid']]);
         $pdo = $db->prepare('select count(`id`) from `notices` where `uid` = :uid and `timestamp` >= :timestamp');
         $pdo->execute([':uid' => $user['uid'], ':timestamp' => time() - 86400]);
+        // 日封顶对所有提醒都算：它护的是「本站一天最多打扰这个人几次」，跟提醒属于哪一类无关。只挂在逐条回复那一支上的话，这句话就只有一半成立
         if (($sent = $pdo->fetch(PDO::FETCH_COLUMN, 0)) >= ($limit = $config['notice']['limit'] ?? 20)) {
             Club_Log_Event('debug', 'notice daily limit reached, '.$type, ['actor' => $actor, 'sent' => $sent, 'limit' => $limit]);
             return false;
         }
-    }
-    $locale = Club_I18n_Locale($lang);
-    $content = '<p><a href="'.$actor.'" class="u-url mention">@'.$user['name'].'</a> '.Club_I18n($type, $locale, $vars).'</p>';
-    return Club_DB_Transaction('notice enqueue', function () use ($db, $base, $club, $user, $actor, $type, $reply, $locale, $content) {
+        // 逐条回复的那种不另设冷却，回的本来就是不同的帖子；$cooldown 传 0 同理 —— 那类提醒每次都发，只受上面的日封顶约束
+        if (!isset($reply) && $cooldown) {
+            $pdo = $db->prepare('select max(`timestamp`) from `notices` where `uid` = :uid and `type` = :type');
+            $pdo->execute([':uid' => $user['uid'], ':type' => $type]);
+            $last = $pdo->fetch(PDO::FETCH_COLUMN, 0);
+            // 用户报「没收到提醒」时，这两条决定了是发不出去还是压根没发
+            if ($last && $last > time() - $cooldown) {
+                Club_Log_Event('debug', 'notice on cooldown, '.$type, ['actor' => $actor, 'retry in' => ($last + $cooldown - time()).'s']);
+                return false;
+            }
+        }
         $pdo = $db->prepare('insert into `notices`(`uid`,`type`,`object`,`timestamp`) values (:uid, :type, :object, :timestamp)');
         $pdo->execute([':uid' => $user['uid'], ':type' => $type, ':object' => $reply, ':timestamp' => ($time = time())]);
         if (!($id = $db->lastInsertId())) return false;

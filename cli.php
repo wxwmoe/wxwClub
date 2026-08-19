@@ -82,6 +82,11 @@ Usage:
   php cli.php user fetch <handle|actor-url>
   php cli.php user groups <handle|actor-url> [--json]
   php cli.php follow add|remove <handle|actor-url> <club>
+  php cli.php ban add <handle|actor-url|host> [--club CLUB,CLUB] [--reason TEXT] [--yes]
+  php cli.php ban remove <handle|actor-url|host> [--club CLUB,CLUB]
+  php cli.php ban list [--type actor|host] [--club CLUB] [--limit 50] [--json]
+  php cli.php ban export > bans.csv
+  php cli.php ban import <file.csv> [--yes]
   php cli.php dns show|refresh <host> [--json]
   php cli.php queue show <host|target> [--json]
   php cli.php queue purge <host|target> [--yes]
@@ -155,6 +160,29 @@ function cli_user($input) {
     $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
     if (count($rows) > 1 && !(int)$rows[0]['webfinger']) throw new RuntimeException('more than one cached actor uses this handle; pass the actor URL');
     return $rows ? $rows[0] : null;
+}
+
+// --club 收逗号分隔的群组名。null 是没给（全站），false 是给了但里面有本站没有的群组 —— 打错一个字就该报错，而不是悄悄封了个不存在的范围
+function cli_ban_clubs($input) {
+    global $db;
+    if (!isset($input)) return null;
+    $clubs = array_values(array_unique(array_filter(array_map('trim', explode(',', (string)$input)), 'strlen')));
+    if (!$clubs) return false;
+    $names = []; $params = [];
+    foreach ($clubs as $i => $club) { $names[] = ':c'.$i; $params[':c'.$i] = $club; }
+    $pdo = $db->prepare('select `name` from `clubs` where `name` in ('.implode(',', $names).')');
+    $pdo->execute($params);
+    return count($found = $pdo->fetchAll(PDO::FETCH_COLUMN, 0)) === count($clubs) ? $found : false;
+}
+
+// 封禁目标。handle 先走 WebFinger 解析成 actor URL —— 那是本站的身份键，handle 只是它此刻的标签。导入时 $resolve 关掉：一份上万行的名单不能每行出一次网
+function cli_ban_target($input, $resolve = true) {
+    $input = trim((string)$input);
+    if (strpos($input, '@') !== false) {
+        if (!$resolve) return false;
+        $input = Club_Actor_Resolve($input) ?: '';
+    }
+    return Club_Ban_Target($input);
 }
 
 function cli_table($rows, $columns) {
@@ -261,6 +289,143 @@ function cli_manage($resource, $action, $args) {
         return 0;
     }
 
+    if ($resource === 'ban' && $action === 'add') {
+        $yes = cli_flag($args, '--yes'); $reason = cli_option($args, '--reason'); $clubs = cli_ban_clubs(cli_option($args, '--club'));
+        if (count($args) !== 1 || $clubs === false) return cli_error('usage: php cli.php ban add <handle|actor-url|host> [--club CLUB,CLUB] [--reason TEXT] [--yes]');
+        if (!($ban = cli_ban_target($args[0]))) return cli_error('could not read a target actor or host from '.$args[0]);
+        list($type, $target) = $ban;
+        // 预览要按「执行之后的作用域」来数：Club_Ban_Add 会跟库里已有的取并集，只按这次传的 --club 数的话，
+        // 原本封了 test 的目标再来一条 --club other，预览只报 other 那一份，执行却把两个群组的关注都解除
+        $pdo = $db->prepare('select `clubs` from `bans` where `target` = :target');
+        $pdo->execute([':target' => $target]);
+        $effective = ($old = $pdo->fetch(PDO::FETCH_COLUMN, 0)) === false ? $clubs
+            : Club_Ban_Scope(isset($old) ? (json_decode($old, 1) ?: []) : null, $clubs);
+        $follows = Club_Ban_Detach([$target], $type, $effective, true);
+        $scope = isset($effective) ? ' in '.implode(', ', $effective) : ' site wide';
+        if (!$yes) {
+            cli_emit(['preview' => true, 'target' => $target, 'type' => $type, 'clubs' => $clubs, 'follows' => $follows],
+                ['Would ban '.$type.' '.$target.$scope.'.', 'Matched '.$follows.' follow(s) to drop.', 'Run again with --yes to apply.']);
+            return 0;
+        }
+        $dropped = Club_Ban_Add($target, $type, $clubs, $reason);
+        cli_emit(['target' => $target, 'type' => $type, 'clubs' => $effective, 'follows_dropped' => $dropped],
+            ['Banned '.$type.' '.$target.$scope.'.', 'Dropped '.$dropped.' follow(s).']);
+        return 0;
+    }
+
+    if ($resource === 'ban' && $action === 'remove') {
+        $clubs = cli_ban_clubs(cli_option($args, '--club'));
+        if (count($args) !== 1 || $clubs === false) return cli_error('usage: php cli.php ban remove <handle|actor-url|host> [--club CLUB,CLUB]');
+        if (!($ban = cli_ban_target($args[0]))) return cli_error('could not read a target actor or host from '.$args[0]);
+        // 解封不重建关注关系：本站没有原始 Follow，伪造不了 Accept，对方要回来得自己再关注一次
+        $state = Club_Ban_Remove($ban[1], $clubs);
+        if ($state === 'absent') return cli_error('target is not banned', 2);
+        if ($state === 'site-wide') return cli_error($ban[1].' is banned across every club; lift the whole ban and add it back per club', 2);
+        if ($state === 'host-wide') return cli_error($ban[1].' is not banned on its own; its host is, lift the ban on the host instead', 2);
+        cli_emit(['target' => $ban[1], 'clubs' => $clubs, 'state' => $state],
+            [($state === 'narrowed' ? 'Narrowed' : 'Removed').' the ban on '.$ban[1].(isset($clubs) ? ' in '.implode(', ', $clubs) : '').'.',
+                'Existing follows are not restored; the target has to follow again.']);
+        return 0;
+    }
+
+    if ($resource === 'ban' && $action === 'list') {
+        $limit = (int)cli_option($args, '--limit', 50); $type = cli_option($args, '--type'); $club = cli_option($args, '--club');
+        if ($args || $limit < 1 || $limit > 200 || (isset($type) && !in_array($type, ['actor', 'host'], true)))
+            return cli_error('usage: php cli.php ban list [--type actor|host] [--club CLUB] [--limit 50]');
+        $where = isset($type) ? ' where `type` = :type' : '';
+        // 作用域是一列 JSON，过滤只能在 PHP 这边做，所以按群组筛时不能先 limit 再筛 —— 最新的那 limit 条要是都不属于这个群组，更旧的匹配项根本读不到，结果会假装是空的。
+        // 不筛群组时照旧交给 SQL 限量；筛群组时整张表读进来再切，bans 是运维规模的表，一条手动命令不值得为它加索引或者拿 like 去猜 JSON 的形状
+        $pdo = $db->prepare('select `target`, `type`, `clubs`, `reason`, `timestamp` from `bans`'.$where.' order by `timestamp` desc, `target`'.(isset($club) ? '' : ' limit '.$limit));
+        $pdo->execute(isset($type) ? [':type' => $type] : []); $rows = [];
+        foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $scope = isset($row['clubs']) ? (json_decode($row['clubs'], 1) ?: []) : null;
+            if (isset($club) && (!isset($scope) || !in_array($club, $scope, true))) continue;
+            $row['clubs'] = isset($scope) ? implode(',', $scope) : '*';
+            $row['banned'] = cli_time($row['timestamp']);
+            if (count($rows) < $limit) $rows[] = $row;
+        }
+        cli_emit(['items' => $rows], cli_table($rows, ['target' => 'TARGET', 'type' => 'TYPE', 'clubs' => 'CLUBS', 'reason' => 'REASON', 'banned' => 'BANNED']));
+        return 0;
+    }
+
+    // 导出的就是导入认得的那份 CSV，两边同一组列，来回一趟不丢东西。写到 stdout，落盘交给 shell 的重定向
+    if ($resource === 'ban' && $action === 'export') {
+        if ($args) return cli_error('usage: php cli.php ban export > bans.csv');
+        $pdo = $db->query('select `target`, `type`, `clubs`, `reason` from `bans` order by `target` collate ascii_bin');
+        // 四个参数都显式传：8.4 起省掉 $escape 会发 Deprecated，而这条命令的 stdout 就是文件本身，任何一行提示都会混进 CSV，导入时读到的表头就成了那句提示。
+        // escape 保持 PHP 的默认反斜杠而不是空串 —— 空串要 7.4 才认，而这个仓库的语法下限是 7.3
+        $out = fopen('php://output', 'w');
+        fputcsv($out, ['target', 'type', 'clubs', 'reason'], ',', '"', '\\');
+        foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $row)
+            fputcsv($out, [$row['target'], $row['type'], isset($row['clubs']) ? implode(',', json_decode($row['clubs'], 1) ?: []) : '', (string)$row['reason']], ',', '"', '\\');
+        fclose($out);
+        return 0;
+    }
+
+    // 导入。domain 列当 target 的别名，社区里流传的那些封禁名单就能直接喂进来；已经在库里的靠 Club_Ban_Add 的并集收敛，不会把已有的作用域缩小
+    if ($resource === 'ban' && $action === 'import') {
+        $yes = cli_flag($args, '--yes');
+        if (count($args) !== 1) return cli_error('usage: php cli.php ban import <file.csv> [--yes]');
+        if (!is_readable($args[0]) || !($in = fopen($args[0], 'r'))) return cli_error('cannot read '.$args[0]);
+        if (!($head = fgetcsv($in, 0, ',', '"', '\\'))) return cli_error('the file has no header row');
+        // 空单元格在 fgetcsv 里是 null，直接 trim 在 8.4 上是一条 Deprecated
+        $head = array_flip(array_map('strtolower', array_map('trim', array_map('strval', $head))));
+        $column = isset($head['target']) ? $head['target'] : (isset($head['domain']) ? $head['domain'] : null);
+        if (!isset($column)) return cli_error('the header needs a target or domain column');
+        $rows = []; $invalid = 0; $cap = 50000;
+        while (($line = fgetcsv($in, 0, ',', '"', '\\')) !== false) {
+            if (count($rows) >= $cap) { fclose($in); return cli_error('refusing to import more than '.$cap.' rows in one run'); }
+            if (!isset($line[$column]) || trim($line[$column]) === '') continue;
+            // 目标的形状说了算，CSV 里那一列 type 只是记录：带 scheme 的值不会因为那里写着 host 就变成 host
+            if (!($ban = cli_ban_target($line[$column], false))) { $invalid++; continue; }
+            // 空的 clubs 格就是「全站」，那正是导出写出来的形状；当成错误的话，导出再导入会把所有全站封禁判成无效跳过，往返直接丢一大半
+            $cell = isset($head['clubs']) && isset($line[$head['clubs']]) ? trim($line[$head['clubs']]) : '';
+            $scope = $cell === '' ? null : cli_ban_clubs($cell);
+            if ($scope === false) { $invalid++; continue; }
+            $reason = isset($head['reason']) && isset($line[$head['reason']]) ? trim($line[$head['reason']]) : '';
+            if ($reason === '' && isset($head['public_comment']) && isset($line[$head['public_comment']])) $reason = trim($line[$head['public_comment']]);
+            // 同一个 target 在文件里出现多次是合并不是覆盖，否则前面几行的作用域和理由会被最后一行悄悄吃掉
+            // reason 那列是 255 个字符不是 255 字节，但截断不走 mbstring：全仓库别处都用 preg 的 /u 数字符，把 CLI 跑在容器外时扩展集不由 Dockerfile 说了算。
+            // 不是合法 UTF-8 时退回按字节截，那种值本来也写不进 utf8mb4 的列
+            $key = $ban[1];
+            if ($reason === '') $reason = null;
+            elseif (preg_match('/^.{0,255}/us', $reason, $cut)) $reason = $cut[0];
+            else $reason = substr($reason, 0, 255);
+            // 空的理由格是「这份名单没说」，不是「把原来那条清掉」
+            if (isset($rows[$key])) { $scope = Club_Ban_Scope($rows[$key][2], $scope); $reason = isset($rows[$key][3]) ? $rows[$key][3] : $reason; }
+            $rows[$key] = [$ban[1], $ban[0], $scope, $reason];
+        }
+        fclose($in);
+        $existing = 0; $added = 0; $groups = [];
+        $seen = $db->prepare('select `clubs` from `bans` where `target` = :target');
+        foreach ($rows as $row) {
+            $seen->execute([':target' => $row[0]]);
+            $old = $seen->fetch(PDO::FETCH_COLUMN, 0);
+            if ($old === false) $added++;
+            // 已经在库里的也要进扫描：执行时 Club_Ban_Add 会把作用域取并集，扩大之后照样解除关注关系。
+            // 预览要是跳过它们就会报「Matched 0 follow(s)」而实际删掉一批 —— 预览和执行必须扫同一批、用同一个合并后的作用域
+            else { $existing++; $row[2] = Club_Ban_Scope(isset($old) ? (json_decode($old, 1) ?: []) : null, $row[2]); }
+            // 同类型同作用域的归成一组，整组一次扫描：一个目标扫一遍 users 的话，一份上万条的名单就是上万遍全表
+            $groups[$row[1].'|'.(isset($row[2]) ? implode(',', $row[2]) : '*')][] = $row[0];
+        }
+        $follows = 0;
+        foreach ($groups as $key => $targets) {
+            list($type, $scope) = explode('|', $key, 2);
+            $follows += Club_Ban_Detach($targets, $type, $scope === '*' ? null : explode(',', $scope), !$yes);
+        }
+        if (!$yes) {
+            cli_emit(['preview' => true, 'added' => $added, 'existing' => $existing, 'invalid' => $invalid, 'follows' => $follows],
+                ['Would add '.$added.' ban(s), '.$existing.' already present, '.$invalid.' unusable row(s).', 'Matched '.$follows.' follow(s) to drop.', 'Run again with --yes to apply.']);
+            return 0;
+        }
+        // 已经在库里的也过一遍 Club_Ban_Add：作用域取并集，导入一份群组名单不会把原来的全站封禁悄悄缩小
+        foreach ($rows as $row) Club_Ban_Add($row[0], $row[1], $row[2], $row[3]);
+        Club_Log_Event('info', 'bans imported by cli', ['added' => $added, 'existing' => $existing, 'invalid' => $invalid, 'follows dropped' => $follows]);
+        cli_emit(['added' => $added, 'existing' => $existing, 'invalid' => $invalid, 'follows_dropped' => $follows],
+            ['Added '.$added.' ban(s), '.$existing.' already present, '.$invalid.' unusable row(s).', 'Dropped '.$follows.' follow(s).']);
+        return 0;
+    }
+
     if ($resource === 'user' && $action === 'groups') {
         if (count($args) !== 1) return cli_error('usage: php cli.php user groups <handle|actor-url>');
         if (!($user = cli_user($args[0]))) return cli_error('user is not cached; run php cli.php user fetch first', 2);
@@ -275,6 +440,7 @@ function cli_manage($resource, $action, $args) {
         if (count($args) !== 2) return cli_error('usage: php cli.php follow add|remove <handle|actor-url> <club>');
         if (!($user = cli_user($args[0]))) return cli_error('user is not cached; run php cli.php user fetch first', 2);
         $state = Club_Group_Follow($user['actor'], $args[1], $action === 'add');
+        if ($state === 'banned') return cli_error($user['actor'].' is banned; lift the ban before adding the follow back', 2);
         if ($state === 'club-missing') return cli_error('club not found', 2);
         cli_emit(['state' => $state, 'actor' => $user['actor'], 'club' => $args[1]], [$state.': '.$user['actor'].' -> '.$args[1]]);
         return 0;
@@ -385,6 +551,7 @@ switch ($argv[1]) {
     case 'club':
     case 'user':
     case 'follow':
+    case 'ban':
     case 'dns':
     case 'queue':
     case 'endpoint':

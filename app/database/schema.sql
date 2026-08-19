@@ -159,6 +159,15 @@ CREATE TABLE `blacklist` (
   KEY `schedule` (`restore_pending_at`,`check_at`,`lease_until`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+CREATE TABLE `bans` (
+  `target` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `type` varchar(8) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `clubs` varchar(1024) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL,
+  `reason` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `timestamp` int NOT NULL,
+  PRIMARY KEY (`target`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 CREATE TABLE `meta` (
   `name` varchar(30) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `value` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
@@ -166,4 +175,4 @@ CREATE TABLE `meta` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- 结构版本。与代码里的 DB_VERSION 不相等时 web 全挡；只允许 worker 向前合并
-INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '6');
+INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '7');

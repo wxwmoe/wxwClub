@@ -28,7 +28,7 @@ Naming is the module boundary: `Club_<domain>_<action>()`, where the domain pref
 `app/functions.php` keeps function partitions in this exact order; a bare domain function such as `Club_Stat()` belongs to its `Club_Stat_*` partition, and within each partition sort by the full function name and move the function's preceding comment with it:
 
 - `ActivityPub_*`
-- `Club_Actor_*`, `Club_Group_*`, `Club_Inbox_*`, `Club_Limit_*`, `Club_Notice_*`
+- `Club_Actor_*`, `Club_Ban_*`, `Club_Group_*`, `Club_Inbox_*`, `Club_Limit_*`, `Club_Notice_*`
 - `Club_Task_*`, `Club_Queue_*`, `Club_Lease_*`, `Club_Endpoint_*`, `Club_Delivery_*`, `Club_Blacklist_*`
 - `Club_DB_*`, `Club_HTTP_*`, `Club_Resolver_*`
 - `Club_Config_*`, `Club_Worker_*`
@@ -103,6 +103,7 @@ The easiest part to get wrong. Read this through before touching `Club_Endpoint_
 - **A still-deliverable control row is never deleted the moment it goes empty**: one delivery round leaves a large group's several thousand rows empty at once, and the next round rebuilds them identically. It has to sit out the grace period, and the reclaim re-tests queues, blacklist, lease and backoff under the primary-key lock — everything read outside the transaction may already be stale. The grace period buys nothing for a blacklisted target, because the blacklist is what stops the rebuild: `Club_Blacklist_Cleanup` drops that row as soon as the backlog is gone, and `Club_Endpoint_Prune` still refuses every blacklisted row so the two never race for it.
 - `tasks` are deleted only when `NOT EXISTS queues`.
 - **An HTTP request that already went out must never be replayed by a database retry.** `Club_DB_Retry` wraps the database segment only. Actor fetches, DNS and HTTP all happen outside any transaction.
+- **Everything hanging off one user is written behind an exclusive lock on that `users` row, taken as the transaction opens.** `followers`, `activities`, `announces` and `notices` all belong to a single user, and every path that writes them starts with a `select ... for update` on it — inbound Create and Follow, `Club_Group_Follow`, `Club_Ban_Drop`, `Club_Actor_Move`, actor deletion, `Club_Notice_Send`. Taking it late is not a weaker version of the same thing but a different bug: an insert into any table with a foreign key to `users` already holds a shared lock on that row, so a `for update` further down the transaction is an S-to-X upgrade, and two writers for the same user each sit on S waiting for the other — error 1213, reproducible in two sessions. The order is also what makes a check mean anything: bans and the notice quota are read under that lock, so a decision cannot be overtaken by a concurrent write it never saw.
 - Bulk deletes are always batched into independent bounded transactions. Never delete a target's several thousand queue rows in one transaction.
 
 ## Logging

@@ -166,6 +166,30 @@ t_table('Club_Group_From_Object', 'Club_Group_From_Object', [
     ['', false]
 ]);
 
+// 作用域的并集。null 是全站，它吸收一切 —— 合错方向就是把一条全站封禁缩成几个群组，或者反过来悄悄扩大范围
+t_table('Club_Ban_Scope', 'Club_Ban_Scope', [
+    [['a'], ['b'], ['a', 'b']],
+    [['a'], ['a'], ['a']],
+    [[], ['a'], ['a']],
+    [null, ['a'], null],
+    [['a'], null, null],
+    [null, null, null]
+]);
+
+// 封禁目标的归一化。入库和入站查询共用它，两边差一个字母就是主键点查静默落空，封禁看起来像没生效
+t_table('Club_Ban_Target', 'Club_Ban_Target', [
+    ['https://a.example/users/alice', ['actor', 'https://a.example/users/alice']],
+    ['HTTPS://A.Example:443/users/Alice', ['actor', 'https://a.example/users/Alice']],
+    ['a.example', ['host', 'a.example']],
+    ['A.Example.', ['host', 'a.example']],
+    [' a.example ', ['host', 'a.example']],
+    // handle 要先解析成 actor URL，这里不认；带路径的也不是 host
+    ['alice@a.example', false],
+    ['a.example/users/alice', false],
+    ['', false],
+    ['ftp://a.example/', false]
+]);
+
 // 候选 handle。FEP-2c59 的 webfinger 优先，它是 split-domain 部署里唯一给得出正确域的来源；两档都是自称值，落库前还要过 WebFinger 回环
 $t_actor = 'https://social.a.example/users/alice';
 t_table('Club_Actor_Handle', 'Club_Actor_Handle', [
