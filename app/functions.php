@@ -351,6 +351,43 @@ function ActivityPub_WebFinger_Resource($resource, $base, $host) {
     return false;
 }
 
+// 账号迁移在群组这一侧唯一必然被看见的时机：新账号第一次露面 —— 多半就是用户在新账号上导入关注列表时发来的那条 Follow —— 本站必须拉它的文档，alsoKnownAs 就在里面。
+// 入站的 Move 活动是同一件事的另一个入口，但只发给迁移者的关注者（Mastodon 的 ActivityPub::MoveDistributionWorker），群组在关系的另一侧，多半永远收不到，所以不能只靠它。
+// alsoKnownAs 是单方面声明，谁都能写，所以它只是线索：拉一份旧 actor，它自己文档里的 movedTo 指回来才算数，两份文档互相印证之后才动关注关系。
+function Club_Actor_Aliased($actor, $document) {
+    global $db; static $walking = false;
+    if (!($aliases = Club_Actor_Aliases($document))) return;
+    // 只有最外层这次走别名：下面要拉的旧 actor 同样可能认领着别人，两个互相 alias 的 actor 就是来回拉不完的循环。一跳够用，更长的链等下一次拉取
+    if ($walking) return Club_Log_Event('debug', 'actor aliases not followed further', ['actor' => $actor]);
+    $walking = true;
+    try {
+        $follows = $db->prepare('select 1 from `users` where `actor` = :actor and exists (select 1 from `followers` where `followers`.`uid` = `users`.`uid`)');
+        foreach ($aliases as $alias) {
+            if ($alias === $actor) continue;
+            // 只为本站还挂着关注关系的别名多发这次请求，其余的 alias 与本站无关，拉回来也没有可清理的东西
+            $follows->execute([':actor' => $alias]);
+            if (!$follows->fetch(PDO::FETCH_COLUMN, 0)) continue;
+            Club_Log_Event('info', 'actor claims an alias that still follows here, confirming the move', ['actor' => $actor, 'alias' => $alias]);
+            // 拉不到就什么都不做：旧实例已经没了的话，那几行关注关系照旧交给退避和黑名单收拾。失败原因 Club_Actor_Fetch 自己记了一行
+            if (!Club_Actor_Fetch($alias, $aliased)) continue;
+            if (($moved = ActivityPub_Object_Id($aliased['movedTo'] ?? '')) !== $actor) {
+                // 正常联邦里不该出现：要么迁移只做了一半（别名加了、还没真迁），要么有人想拿别名把不相干的人的关注关系认到自己名下
+                Club_Log_Event('warning', 'alias move refused, the alias does not point back', ['actor' => $actor, 'alias' => $alias, 'movedTo' => $moved ?: '-']);
+                continue;
+            }
+            Club_Actor_Move($alias, $actor);
+        }
+    } finally { $walking = false; }
+}
+
+// 文档里 alsoKnownAs 认领的那些旧 actor。值可以是字符串、内嵌对象，或者两者混排的数组，Mastodon 发的是数组。
+// 条数是对端说了算的，而调用方每条都要查一次库：alias 本来就是个位数，多出来的不必陪着扫
+function Club_Actor_Aliases($document) {
+    $aliases = [];
+    foreach (array_slice((array)($document['alsoKnownAs'] ?? []), 0, 10) as $known) if (($alias = ActivityPub_Object_Id($known)) !== '') $aliases[] = $alias;
+    return $aliases;
+}
+
 // 没关注任何群组、也没留下动态的 actor 缓存已经没有业务读者。分批独立提交，避免一次清理把 users 和级联的 notices 长时间锁成一笔大事务；
 // 条件留在 delete 里重查，预览之后新产生的关注或动态不能被并发清掉。
 function Club_Actor_Cleanup($limit = 500) {
@@ -370,15 +407,16 @@ function Club_Actor_Cleanup($limit = 500) {
 
 // 拉取远端 actor 写入本地缓存，已存在则更新（对方可能轮换密钥或迁移 inbox）。
 // users 是全站共用的一份，这行属于哪个群组无从谈起，签名统一用系统群组：同一行的建立和刷新由不同群组签本来就不一致，
-// 而随手拿投稿命中的某个群组来签，等于让对端为一次首访去拉一个它没见过、还可能单独封过的 actor
-function Club_Actor_Fetch($actor) {
+// 而随手拿投稿命中的某个群组来签，等于让对端为一次首访去拉一个它没见过、还可能单独封过的 actor。
+// $document 原样带出拉到的文档：alsoKnownAs 这类字段本站不存，只有在这里见得到；返回 false 时它的内容没有意义
+function Club_Actor_Fetch($actor, &$document = null) {
     global $db, $fetch_retry;
     if (!($club = Club_Group_Signer())) {
         Club_Log_Event('warning', 'fetch actor skipped, no system club', ['actor' => $actor]);
         // 缺系统群组是本站自己的毛病，建出来就好了，不能让对端替我们把活动丢掉
         $fetch_retry = true; return false;
     }
-    $jsonld = json_decode(ActivityPub_Fetch($actor, $club), 1);
+    $document = $jsonld = json_decode(ActivityPub_Fetch($actor, $club), 1);
     if (empty($jsonld['id']) || $jsonld['id'] != $actor || empty($jsonld['inbox'])) {
         Club_Log_Event('warning', 'fetch actor failed: '.$actor);
         return false;
@@ -406,7 +444,10 @@ function Club_Actor_Fetch($actor) {
     }
     $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
-    return $pdo->fetch(PDO::FETCH_ASSOC);
+    $row = $pdo->fetch(PDO::FETCH_ASSOC);
+    // 新账号第一次露面时认领的旧账号，理由和判据写在 Club_Actor_Aliased 上
+    if ($row) Club_Actor_Aliased($actor, $jsonld);
+    return $row;
 }
 
 function Club_Actor_Get($actor) {
@@ -433,6 +474,20 @@ function Club_Actor_Has($actor) {
     global $db; $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     return (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
+}
+
+// 关注者说自己搬走了（FEP-7628），删掉他名下的关注关系。只清理，不替新账号建一行：本站能写的只有自己这份名单，对端那份关注记录只有他自己发 Follow 才建得起来 ——
+// 伪造 Accept 也没用，Mastodon 的 accept_follow 要先找到一条待处理的 FollowRequest。替他建的话两边就此长期不一致：本站照投，而他那边没有关注记录，
+// Announce 连 related_to_local_activity? 那道闸门都过不去，直接被丢掉。新账号导入关注列表时会自己发 Follow 过来，那条走正常流程。
+// 旧 users 行和它名下的 activities 原样留着 —— 那些投稿的作者就是旧账号，删了会把历史帖子的署名一起带走；已经排进队列的活动也不动，那是旧 inbox 当时该收的东西。
+// 删几行由本站的群组数封顶，不必分批
+function Club_Actor_Move($actor, $target) {
+    global $db;
+    $pdo = $db->prepare('delete from `followers` where `uid` in (select `uid` from `users` where `actor` = :actor)');
+    $pdo->execute([':actor' => $actor]);
+    // 删了 0 行是常态（重放的 Move、或者他本来就没关注过），但排查掉关注时要能分清
+    Club_Log_Event($pdo->rowCount() ? 'info' : 'debug', 'follower moved away, '.$pdo->rowCount().' row(s) dropped', ['actor' => $actor, 'target' => $target]);
+    return $pdo->rowCount();
 }
 
 // 管理入口接受 actor URL 或 acct handle。handle 先走 WebFinger 找协议声明的 canonical actor，不能按实例软件猜 /users/name 一类路径。
@@ -892,6 +947,7 @@ function Club_Inbox_Dispatch($input, $club = null) {
         case 'Create': Club_Inbox_Create($jsonld); break;
         case 'Follow': Club_Inbox_Follow($jsonld); break;
         case 'Undo': Club_Inbox_Undo($jsonld); break;
+        case 'Move': Club_Inbox_Move($jsonld); break;
         // 转发要发原始报文，$jsonld 这边被归一化过（actor 拍平、Tombstone 补形状），不能拿去发
         case 'Update': Club_Inbox_Update($jsonld, $payload); break;
         case 'Delete':
@@ -952,6 +1008,16 @@ function Club_Inbox_Log($name, $input, $verify) {
     Club_Log_Write('debug', 'inbox', $name.'_server', $_SERVER);
     if (!$verify) Club_Log_Write('warning', 'inbox', $name.'_verify_failed', 'reason: '.($verify_reason ?? '-')."\n\nsignature: ".($_SERVER['HTTP_SIGNATURE'] ?? '-').
         "\n\ndigest: ".($_SERVER['HTTP_DIGEST'] ?? '-')."\n\nsigned string:\n".($verify_signed ?? '-'), 'txt');
+}
+
+// 入站的账号迁移（FEP-7628）。object 必须是发送者自己，照 Mastodon 的 ActivityPub::Activity::Move。
+// 不拉新 actor 验 alsoKnownAs：HTTP 签名已经证明这句话出自旧 actor，而本站只删他自己那几行关注关系，动不到第三方，多一次拉取只是多一种失败方式。
+// 这条路多半不会响 —— Move 只发给迁移者的关注者（ActivityPub::MoveDistributionWorker），群组在关系的另一侧 —— 收得到就顺手清掉，收不到由 Club_Actor_Aliased 兜
+function Club_Inbox_Move($jsonld) {
+    $actor = $jsonld['actor'];
+    if ($actor !== ($object = ActivityPub_Object_Id($jsonld['object'] ?? ''))) return Club_Inbox_Skip('move object is not the sender', ['actor' => $actor, 'object' => $object]);
+    if (($target = ActivityPub_Object_Id($jsonld['target'] ?? '')) === '' || $target === $actor) return Club_Inbox_Skip('move without a distinct target', ['actor' => $actor, 'target' => $target]);
+    Club_Actor_Move($actor, $target);
 }
 
 // 计票包的版本号在活动 id 的 #updates/<poll.updated_at> 后缀里（UpdatePollSerializer），随每一轮计票递增，是这类包唯一能用来判重的量：

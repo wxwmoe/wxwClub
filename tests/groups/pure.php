@@ -166,6 +166,22 @@ t_table('Club_Group_From_Object', 'Club_Group_From_Object', [
     ['', false]
 ]);
 
+// 认领旧账号的那几个 alias。三种写法都得认：认不出就是把旧账号的关注关系原地留着，一直往一个没人看的 inbox 投
+t_table('Club_Actor_Aliases', 'Club_Actor_Aliases', [
+    [['alsoKnownAs' => ['https://a.example/users/old']], ['https://a.example/users/old']],
+    [['alsoKnownAs' => 'https://a.example/users/old'], ['https://a.example/users/old']],
+    [['alsoKnownAs' => ['id' => 'https://a.example/users/old']], ['https://a.example/users/old']],
+    [['alsoKnownAs' => ['https://c.example/users/x', ['id' => 'https://a.example/users/old']]], ['https://c.example/users/x', 'https://a.example/users/old']],
+    // 取不出 id 的整条丢掉，不能在名单里留个空串去撞库里的 actor
+    [['alsoKnownAs' => [123, '', ['id' => 456]]], []],
+    [['alsoKnownAs' => []], []],
+    [['alsoKnownAs' => 123], []],
+    [[], []],
+    [false, []]
+]);
+// 条数是对端说了算的，而调用方每条都要查一次库
+t_is(count(Club_Actor_Aliases(['alsoKnownAs' => array_fill(0, 50, 'https://a.example/users/old')])), 10, 'Club_Actor_Aliases caps a long alias list');
+
 t_table('Club_I18n_Match', 'Club_I18n_Match', [
     ['zh', 'zh-CN'], ['zh-Hant', 'zh-TW'], ['ZH_TW', 'zh-TW'], ['zh-mo', 'zh-HK'],
     ['yue', 'zh-HK'], ['en-GB', 'en'], ['ja-JP', 'ja'], ['fr', false], ['', false]
