@@ -114,6 +114,8 @@ foreach ($fixtures as $fixture) {
     t_is(t_one('select `clubs` from `activities` where `id` = 1'), '["test"]', $from.': the activity keeps its club');
     t_is((int)t_one('select count(*) from `followers`'), 1, $from.': existing followers are kept');
     if ($from === '52f1d01-final') t_schema_scheduling($from);
+    // 存量 actor 的 handle 一个都没跟对端核对过，合并不能替它们声称确认过 —— 那会让 WebFinger 的 410 直接作用在一个猜出来的 handle 上
+    if ($from === 'e391bd1-final') t_is((int)t_one('select `webfinger` from `users` where `uid` = 1'), 0, $from.': legacy actors stay unconfirmed');
     if ($from === 'ed9e358-final') {
         t_is(t_one('select `type` from `tasks` where `tid` = 1'), 'push', $from.': legacy task names are not rewritten');
         t_is((int)t_one('select `relay_at` from `endpoints` where `url` = :url', [':url' => 'https://remote.example/inbox']), 1666972800,

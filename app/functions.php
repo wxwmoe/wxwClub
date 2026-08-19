@@ -1,7 +1,7 @@
 <?php
 
 // 这份代码要求的数据库结构版本，对应 app/database/steps/ 下最大的那个步骤文件。库里落后就由 worker 合并上来，合并期间 web 全挡：半新半旧的结构下接请求，入站活动会写进本地状态再报错，对端重放就是半处理
-define('DB_VERSION', 5);
+define('DB_VERSION', 6);
 
 function ActivityPub_Collection($id, $arr = []) {
     $arr = array_merge(['@context' => 'https://www.w3.org/ns/activitystreams', 'id' => $id, 'type' => 'OrderedCollection', 'totalItems' => 0], $arr);
@@ -405,6 +405,35 @@ function Club_Actor_Cleanup($limit = 500) {
     return $total;
 }
 
+// 确认这一行的 handle 绑定：拿候选 handle 查 WebFinger，要求它给回的 self 链接指回这个 actor。
+// 文档里的 webfinger 和 preferredUsername 都是对端自己写的，谁都能声明任意 handle；只有域名的 WebFinger 答复能证明这个用户名此刻归这个 actor，所以这一步的请求省不掉。
+// 回环对不上时既不改 users.actor 也不当销号：从外面分不出「实例换了 URL 结构」和「用户名被回收给了别人」，跟过去就是把一个人的历史和关注关系过户给另一个人。
+// 只把绑定作废，新 URL 的 actor 下次自己来时会建它自己的行 —— 那正是 Mastodon 撞车处理（rename_conflicting_account!）跑完之后的状态，我们不写任何东西就到了
+function Club_Actor_Confirm($actor, $document) {
+    global $db;
+    if (($handle = Club_Actor_Handle($document, $actor)) === '') return Club_Log_Event('debug', 'handle not confirmed, no usable candidate', ['actor' => $actor]);
+    // 拉不到的原因 Club_Actor_Resolve 自己记了一行。这里不区分 404 和超时：两种都只是「这次没确认成」，绑定维持原样
+    if (!($self = Club_Actor_Resolve('@'.$handle, $subject))) return Club_Log_Event('debug', 'handle not confirmed, webfinger gave no self link', ['actor' => $actor, 'handle' => $handle]);
+    // 先逐字节比，不等再比归一化后的：协议认得的等价写法（scheme 和 host 大小写、默认端口、IPv6 压缩）不该判成两个身份，而 path 和 query 仍然逐字节算数
+    if ($self !== $actor && (($a = Club_Endpoint_Normalize($self)) === false || ($b = Club_Endpoint_Normalize($actor)) === false || $a !== $b)) {
+        Club_Log_Event('warning', 'handle confirmation failed, webfinger does not loop back', ['actor' => $actor, 'handle' => $handle, 'self' => $self]);
+        $pdo = $db->prepare('update `users` set `webfinger` = 0 where `actor` = :actor and `webfinger` <> 0');
+        $pdo->execute([':actor' => $actor]);
+        return false;
+    }
+    // 权威写法是答复里的 subject，不是我们查的那个：RFC 7033 允许服务端答一个它认为更规范的值，Mastodon 也是按 subject 收敛的。形状不合格才退回候选
+    if (($confirmed = Club_Actor_Handle(['webfinger' => (string)$subject], $actor)) === '') $confirmed = $handle;
+    return Club_DB_Transaction('handle confirm', function () use ($db, $actor, $confirmed) {
+        $pdo = $db->prepare('update `users` set `name` = :name, `webfinger` = :now where `actor` = :actor');
+        $pdo->execute([':name' => $confirmed, ':now' => time(), ':actor' => $actor]);
+        // 别人对同一个 handle 的旧声明就此作废（Mastodon 的 invalidate_username! 同义）：不删行、不合并，只是让它排到重新确认的队头
+        $pdo = $db->prepare('update `users` set `webfinger` = 0 where `name` = :name and `actor` <> :actor and `webfinger` <> 0');
+        $pdo->execute([':name' => $confirmed, ':actor' => $actor]);
+        Club_Log_Event('info', 'handle confirmed', ['actor' => $actor, 'handle' => $confirmed, 'invalidated' => $pdo->rowCount()]);
+        return $confirmed;
+    });
+}
+
 // 拉取远端 actor 写入本地缓存，已存在则更新（对方可能轮换密钥或迁移 inbox）。
 // users 是全站共用的一份，这行属于哪个群组无从谈起，签名统一用系统群组：同一行的建立和刷新由不同群组签本来就不一致，
 // 而随手拿投稿命中的某个群组来签，等于让对端为一次首访去拉一个它没见过、还可能单独封过的 actor。
@@ -429,11 +458,13 @@ function Club_Actor_Fetch($actor, &$document = null) {
     // sharedInbox 坏了还能退回个人 inbox，不必连这个 actor 一起丢
     $shared = $jsonld['endpoints']['sharedInbox'] ?? null;
     if (!isset($shared) || ($shared = Club_Endpoint_Require($shared, ['actor' => $actor])) === false) $shared = $inbox;
-    $data = [':name' => ($jsonld['preferredUsername'] ?? '').'@'.parse_url($jsonld['id'], PHP_URL_HOST), ':inbox' => $inbox,
+    // 形状过不了那道 ASCII 闸门的（unicode 域名之类）仍然照老样子拼一个存着：显示和 CLI 查行要有东西可用，只是它确认不了，Club_Actor_Confirm 那边会判成没有候选
+    $data = [':name' => Club_Actor_Handle($jsonld, $actor) ?: ($jsonld['preferredUsername'] ?? '').'@'.parse_url($jsonld['id'], PHP_URL_HOST), ':inbox' => $inbox,
         ':public_key' => $jsonld['publicKey']['publicKeyPem'] ?? '', ':shared_inbox' => $shared, ':actor' => $jsonld['id'], ':timestamp' => time()];
     $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
-    if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) $pdo = $db->prepare('update `users` set `name` = :name, `inbox` = :inbox,'.
+    // 确认过的 handle 不能被这个猜测值盖掉，所以 name 只在 webfinger 还是 0 的行上跟着刷新
+    if (!($fresh = !$pdo->fetch(PDO::FETCH_COLUMN, 0))) $pdo = $db->prepare('update `users` set `name` = if(`webfinger` = 0, :name, `name`), `inbox` = :inbox,'.
         ' `public_key` = :public_key, `shared_inbox` = :shared_inbox, `refresh` = :timestamp where `actor` = :actor');
     else $pdo = $db->prepare('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`)'.
         ' values (:name, :actor, :inbox, :public_key, :shared_inbox, :timestamp, :timestamp)');
@@ -445,6 +476,8 @@ function Club_Actor_Fetch($actor, &$document = null) {
     $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     $row = $pdo->fetch(PDO::FETCH_ASSOC);
+    // 第一次缓存这个 actor 时顺手把 handle 绑定确认掉，一个 actor 一辈子多这一次 WebFinger。失败无害：webfinger 留 0，等 CLI 补，绝不因此让入站活动失败
+    if ($row && $fresh) Club_Actor_Confirm($actor, $jsonld);
     // 新账号第一次露面时认领的旧账号，理由和判据写在 Club_Actor_Aliased 上
     if ($row) Club_Actor_Aliased($actor, $jsonld);
     return $row;
@@ -467,6 +500,19 @@ function Club_Actor_Get($actor) {
         $fetch_retry = true; return false;
     }
     return Club_Actor_Fetch($actor);
+}
+
+// 候选 handle。FEP-2c59 的 webfinger 属性优先：handle 的域和 actor URL 的 host 可以不是一回事（host-meta 委托的部署就是这样），那种情况下只有它给得出正确答案；
+// 取不到或形状不对就退回 preferredUsername 加 actor URL 的 host，那是绝大多数实现的样子。两档都是自称值，调用方必须再用 WebFinger 验一次回环。
+// 形状卡死在 ASCII：users.name 是 ascii 列，unicode 域名（punycode 之前的写法）写进去会被吃掉，宁可判成没有候选
+function Club_Actor_Handle($document, $actor) {
+    $handle = is_string($claim = $document['webfinger'] ?? null) ? preg_replace('/^acct:/i', '', trim($claim)) : '';
+    if (!preg_match('/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$/', $handle)) {
+        $user = is_string($name = $document['preferredUsername'] ?? null) ? trim($name) : '';
+        $host = (string)parse_url(ActivityPub_Object_Id($document['id'] ?? '') ?: $actor, PHP_URL_HOST);
+        $handle = $user === '' || $host === '' ? '' : $user.'@'.$host;
+    }
+    return strlen($handle) <= 100 && preg_match('/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$/', $handle) ? $handle : '';
 }
 
 // 本地缓存里有没有这个 actor。只查不拉，用来挡掉与本站无关的广播
@@ -492,8 +538,8 @@ function Club_Actor_Move($actor, $target) {
 
 // 管理入口接受 actor URL 或 acct handle。handle 先走 WebFinger 找协议声明的 canonical actor，不能按实例软件猜 /users/name 一类路径。
 // WebFinger 也是对端给出的 GET 目标，沿用 actor 拉取的逐跳公网校验、DNS pin 和重签名，不能为 CLI 另开一条不受 SSRF 约束的出口。
-function Club_Actor_Resolve($input) {
-    $input = trim((string)$input);
+function Club_Actor_Resolve($input, &$subject = null) {
+    $input = trim((string)$input); $subject = null;
     if (preg_match('#^https?://#i', $input)) return $input;
     if (!preg_match('/^@?([^@\s]+)@([^@\s]+)$/', $input, $matches)) return false;
     $user = $matches[1]; $host = strtolower(rtrim($matches[2], '.'));
@@ -507,6 +553,8 @@ function Club_Actor_Resolve($input) {
         Club_Log_Event('warning', 'webfinger failed, response is not json', ['resource' => $resource]);
         return false;
     }
+    // 对端有权答一个它认为更规范的 subject（RFC 7033），确认绑定时要存的是那个，不是我们查的那个
+    $subject = is_string($json['subject'] ?? null) ? $json['subject'] : null;
     $fallback = '';
     foreach ((array)($json['links'] ?? []) as $link) {
         if (!is_array($link) || ($link['rel'] ?? '') !== 'self' || !is_string($link['href'] ?? null)) continue;

@@ -166,6 +166,28 @@ t_table('Club_Group_From_Object', 'Club_Group_From_Object', [
     ['', false]
 ]);
 
+// 候选 handle。FEP-2c59 的 webfinger 优先，它是 split-domain 部署里唯一给得出正确域的来源；两档都是自称值，落库前还要过 WebFinger 回环
+$t_actor = 'https://social.a.example/users/alice';
+t_table('Club_Actor_Handle', 'Club_Actor_Handle', [
+    [['webfinger' => 'acct:alice@a.example', 'preferredUsername' => 'alice', 'id' => $t_actor], $t_actor, 'alice@a.example'],
+    [['webfinger' => 'alice@a.example', 'id' => $t_actor], $t_actor, 'alice@a.example'],
+    [['webfinger' => 'ACCT:alice@a.example', 'id' => $t_actor], $t_actor, 'alice@a.example'],
+    // 声明不成形状就退回拼的那档，退不出来才算没有候选
+    [['webfinger' => 'not a handle', 'preferredUsername' => 'alice', 'id' => $t_actor], $t_actor, 'alice@social.a.example'],
+    [['webfinger' => ['acct:alice@a.example'], 'preferredUsername' => 'alice', 'id' => $t_actor], $t_actor, 'alice@social.a.example'],
+    [['preferredUsername' => 'alice', 'id' => $t_actor], $t_actor, 'alice@social.a.example'],
+    // 文档里没有 id 时按调用方给的 actor 取 host
+    [['preferredUsername' => 'alice'], $t_actor, 'alice@social.a.example'],
+    [['preferredUsername' => '', 'id' => $t_actor], $t_actor, ''],
+    [['id' => $t_actor], $t_actor, ''],
+    // users.name 是 ascii 列，unicode 域名存进去会被吃掉，宁可判成没有候选
+    [['webfinger' => 'acct:alice@例え.jp', 'id' => 'https://例え.jp/users/alice'], 'https://例え.jp/users/alice', ''],
+    [['webfinger' => 'acct:'.str_repeat('a', 96).'@a.example', 'id' => $t_actor], $t_actor, ''],
+    [['preferredUsername' => 'a/b', 'id' => $t_actor], $t_actor, ''],
+    [[], $t_actor, ''],
+    [false, $t_actor, '']
+]);
+
 // 认领旧账号的那几个 alias。三种写法都得认：认不出就是把旧账号的关注关系原地留着，一直往一个没人看的 inbox 投
 t_table('Club_Actor_Aliases', 'Club_Actor_Aliases', [
     [['alsoKnownAs' => ['https://a.example/users/old']], ['https://a.example/users/old']],

@@ -150,9 +150,10 @@ function cli_user($input) {
         return $pdo->fetch(PDO::FETCH_ASSOC) ?: null;
     }
     $name = ltrim($input, '@');
-    $pdo = $db->prepare('select * from `users` where `name` = :name order by `uid` limit 2'); $pdo->execute([':name' => $name]);
+    // 确认过的那行拥有这个 handle：域名的 WebFinger 答复说了算，而 Club_Actor_Confirm 会把别人对同一个 handle 的旧声明置 0。一个确认过的都没有才是真歧义
+    $pdo = $db->prepare('select * from `users` where `name` = :name order by `webfinger` desc, `uid` limit 2'); $pdo->execute([':name' => $name]);
     $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
-    if (count($rows) > 1) throw new RuntimeException('more than one cached actor uses this handle; pass the actor URL');
+    if (count($rows) > 1 && !(int)$rows[0]['webfinger']) throw new RuntimeException('more than one cached actor uses this handle; pass the actor URL');
     return $rows ? $rows[0] : null;
 }
 
@@ -232,13 +233,17 @@ function cli_manage($resource, $action, $args) {
     if ($resource === 'user' && $action === 'fetch') {
         if (count($args) !== 1) return cli_error('usage: php cli.php user fetch <handle|actor-url>');
         if (!($actor = Club_Actor_Resolve($args[0]))) return cli_error('could not resolve actor');
-        if (!($user = Club_Actor_Fetch($actor))) return cli_error('could not fetch actor');
+        if (!($user = Club_Actor_Fetch($actor, $document))) return cli_error('could not fetch actor');
+        // 已经确认过的行，拉取那边不会再自动确认（它只认第一次落库），所以这条命令每次都补一次：手工点名一个 actor 时要的就是「现在到底归谁」
+        Club_Actor_Confirm($actor, $document);
         $pdo = $db->prepare('select * from `users` where `uid` = :uid'); $pdo->execute([':uid' => $user['uid']]); $user = $pdo->fetch(PDO::FETCH_ASSOC);
         $data = ['uid' => (int)$user['uid'], 'name' => $user['name'], 'actor' => $user['actor'], 'inbox' => $user['inbox'], 'shared_inbox' => $user['shared_inbox'],
-            'timestamp' => (int)$user['timestamp'], 'refresh' => (int)$user['refresh'], 'public_key_sha256' => hash('sha256', $user['public_key'])];
+            'timestamp' => (int)$user['timestamp'], 'refresh' => (int)$user['refresh'], 'webfinger' => (int)$user['webfinger'], 'public_key_sha256' => hash('sha256', $user['public_key'])];
         $data['timestamp_text'] = cli_time($user['timestamp']); $data['refresh_text'] = cli_time($user['refresh']);
+        $data['webfinger_text'] = $user['webfinger'] ? cli_time($user['webfinger']) : 'never';
         cli_emit($data, ['uid:          '.$user['uid'], 'name:         '.$user['name'], 'actor:        '.$user['actor'], 'inbox:        '.$user['inbox'],
-            'shared_inbox: '.$user['shared_inbox'], 'created:      '.$data['timestamp_text'], 'refreshed:    '.$data['refresh_text']]);
+            'shared_inbox: '.$user['shared_inbox'], 'created:      '.$data['timestamp_text'], 'refreshed:    '.$data['refresh_text'],
+            'confirmed:    '.$data['webfinger_text']]);
         return 0;
     }
 

@@ -23,7 +23,6 @@ CREATE TABLE `users` (
   `shared_inbox` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `timestamp` int NOT NULL,
   `refresh` int NOT NULL DEFAULT '0',
-  `webfinger` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`uid`),
   UNIQUE KEY `actor` (`actor`),
   KEY `name` (`name`)
@@ -166,4 +165,14 @@ CREATE TABLE `meta` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- 结构版本。与代码里的 DB_VERSION 不相等时 web 全挡；只允许 worker 向前合并
-INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '6');
+INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '5');
+
+INSERT INTO `clubs` (`cid`, `name`, `public_key`, `private_key`, `timestamp`) VALUES (1, 'test', '', '', 1666972800);
+INSERT INTO `users` (`uid`, `name`, `actor`, `inbox`, `public_key`, `shared_inbox`, `timestamp`) VALUES
+  (1, 'alice@remote.example', 'https://remote.example/users/alice', 'https://remote.example/users/alice/inbox', '', 'https://remote.example/inbox', 1666972800);
+INSERT INTO `activities` (`id`, `uid`, `type`, `clubs`, `object`, `timestamp`) VALUES
+  (1, 1, 'Create', '["test"]', 'https://remote.example/users/alice/statuses/1', 1666972800);
+INSERT INTO `followers` (`id`, `cid`, `uid`, `timestamp`) VALUES (1, 1, 1, 1666972800);
+INSERT INTO `tasks` (`tid`, `cid`, `type`, `jsonld`, `timestamp`) VALUES (1, 1, 'push', '{"type":"Announce"}', 1666972800);
+INSERT INTO `queues` (`id`, `tid`, `target`, `due_at`, `retries`) VALUES (1, 1, 'https://remote.example/inbox', 1666972800, 0);
+INSERT INTO `endpoints` (`url`, `next_at`) VALUES ('https://remote.example/inbox', 1666972800);
