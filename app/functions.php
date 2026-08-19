@@ -2356,6 +2356,20 @@ function Club_DB_Version($set = null) {
     }
 }
 
+// 只看 Accept 里有没有 json，会把 text/html, application/json;q=0.1 这种判成 AP。按 q 值定夺，同分归 HTML：抓取方一定把 AP 显式排在前面，浏览器不会。
+// application/json 照 Mastodon 也算 AP，它的 actor 对这个类型同样返回 AS2；application/ld+json 则要带 ActivityStreams profile，不带的是另一份 JSON-LD，不是这里的表示
+function Club_HTTP_Accept_ActivityPub($accept) {
+    $ap = 0; $html = 0;
+    foreach (explode(',', strtolower(is_scalar($accept) ? (string)$accept : '')) as $range) {
+        $params = array_map('trim', explode(';', $range)); $type = array_shift($params); $q = 1;
+        // q=0 是「这个类型不要」，两边起点同为 0 加上末尾的严格大于，正好把它挡在外面
+        foreach ($params as $param) if (strncmp($param, 'q=', 2) === 0) $q = (float)substr($param, 2);
+        if ($type === 'application/activity+json' || $type === 'application/json' || ($type === 'application/ld+json' && strpos($range, 'activitystreams') !== false)) $ap = max($ap, $q);
+        elseif ($type === 'text/html') $html = max($html, $q);
+    }
+    return $ap > $html;
+}
+
 // 游标是「时间戳.自增id」两段，同一秒内有多条也能稳定定位
 function Club_HTTP_Cursor($cursor) {
     // ?max[]=1 这种数组参数直接挡掉，否则强制转字符串会报警告

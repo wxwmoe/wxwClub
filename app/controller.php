@@ -97,7 +97,9 @@ function controller() {
                 } else {
                     // 系统群组没有主页，浏览器访问也只给 actor
                     $actor = Club_Group_Actor($club, $pdo);
-                    if ($system || (isset($_SERVER['HTTP_ACCEPT']) && strpos($_SERVER['HTTP_ACCEPT'], 'json'))) Club_HTTP_Respond($actor, 'activity+json');
+                    // 同一个 URL 有 HTML 和 AP 两份表示，不发 Vary 的话缓存会把先取到的那份原样喂给另一种客户端
+                    header('Vary: Accept');
+                    if ($system || Club_HTTP_Accept_ActivityPub($_SERVER['HTTP_ACCEPT'] ?? '')) Club_HTTP_Respond($actor, 'activity+json');
                     else Club_Template_Render('profile', ['club' => $club, 'nickname' => $actor['name'], 'summary' => $actor['summary'], 'row' => $pdo]);
                 }
             } else Club_HTTP_Respond(['message' => 'User not found'], 'json', 404); break;

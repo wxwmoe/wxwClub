@@ -116,6 +116,27 @@ t_is(Club_HTTP_Header(['location' => 'a'], 'Location'), 'a', 'Club_HTTP_Header m
 t_is(Club_HTTP_Header([], 'Location'), '', 'Club_HTTP_Header on an empty header set');
 t_is(Club_HTTP_Header(null, 'Location'), '', 'Club_HTTP_Header on no headers at all');
 
+t_table('Club_HTTP_Accept_ActivityPub', 'Club_HTTP_Accept_ActivityPub', [
+    ['application/activity+json', true],
+    ['application/json', true],
+    ['APPLICATION/Activity+JSON', true],
+    ['application/ld+json; profile="https://www.w3.org/ns/activitystreams"', true],
+    // 不带 profile 的 ld+json 是别的 JSON-LD
+    ['application/ld+json', false],
+    ['application/activity+json, text/html;q=0.9', true],
+    ['text/html;q=0.9, application/activity+json', true],
+    // 同权重时排前也不算数，浏览器那一份优先
+    ['text/html, application/activity+json', false],
+    ['application/activity+json;q=0', false],
+    // 常见浏览器的 Accept，一个 json 都没有；*/* 也不该被当成要 AP
+    ['text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8', false],
+    ['*/*', false],
+    ['text/html', false],
+    ['', false],
+    [null, false],
+    [['application/activity+json'], false]
+]);
+
 t_table('Club_HTTP_Cursor', 'Club_HTTP_Cursor', [
     ['123.45', [123, 45]],
     ['0.0', [0, 0]],
