@@ -439,3 +439,19 @@ Club_Ban_Add('bad.example', 'host');
 t_is(t_one('select `reason` from `bans` where `target` = :target', [':target' => 'bad.example']), 'imported by hand', 'a later add without a reason leaves it alone');
 Club_Ban_Add('bad.example', 'host', null, '');
 t_is(t_one('select `reason` from `bans` where `target` = :target', [':target' => 'bad.example']), null, 'an explicit empty reason clears it');
+
+// host 维度的清理：按 URL 取 host 精确比，不能拿 like 去撞。封禁按 target 存、跟 users 没有外键，删完用户它必须还在，否则删一次等于顺手解封
+t_state_reset();
+t_exec('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`) values'.
+    ' (:n1, :a1, :i1, :k1, :s1, :now, :now), (:n2, :a2, :i2, :k2, :s2, :now2, :now2), (:n3, :a3, :i3, :k3, :s3, :now3, :now3)',
+    [':n1' => 'a@bad.example', ':a1' => 'https://bad.example/users/a', ':i1' => 'https://bad.example/users/a/inbox', ':s1' => 'https://bad.example/inbox',
+        ':n2' => 'b@bad.example', ':a2' => 'https://bad.example/users/b', ':i2' => 'https://bad.example/users/b/inbox', ':s2' => 'https://bad.example/inbox',
+        ':n3' => 'c@notbad.example', ':a3' => 'https://notbad.example/users/c', ':i3' => 'https://notbad.example/users/c/inbox', ':s3' => 'https://notbad.example/inbox',
+        ':k1' => '', ':k2' => '', ':k3' => '', ':now' => time(), ':now2' => time(), ':now3' => time()]);
+foreach (['https://bad.example/users/a', 'https://bad.example/users/b', 'https://notbad.example/users/c'] as $t_host_actor)
+    Club_Group_Follow($t_host_actor, 'test', true);
+Club_Ban_Add('bad.example', 'host');
+t_is((int)t_one('select count(*) from `followers`'), 1, 'the host ban leaves only the other instance following');
+t_exec('delete from `users` where `actor` like :like', [':like' => 'https://bad.example/%']);
+t_is((int)t_one('select count(*) from `users`'), 1, 'deleting a host keeps the users of a similarly named one');
+t_is((int)t_one('select count(*) from `bans` where `target` = :target', [':target' => 'bad.example']), 1, 'deleting the users does not lift the ban on their host');

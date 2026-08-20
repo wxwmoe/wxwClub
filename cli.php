@@ -81,12 +81,15 @@ Usage:
   php cli.php user cleanup [--yes]
   php cli.php user fetch <handle|actor-url>
   php cli.php user groups <handle|actor-url> [--json]
+  php cli.php user delete <handle|actor-url> [--yes]
   php cli.php follow add|remove <handle|actor-url> <club>
   php cli.php ban add <handle|actor-url|host> [--club CLUB,CLUB] [--reason TEXT] [--yes]
   php cli.php ban remove <handle|actor-url|host> [--club CLUB,CLUB]
   php cli.php ban list [--type actor|host] [--club CLUB] [--limit 50] [--json]
   php cli.php ban export > bans.csv
   php cli.php ban import <file.csv> [--yes]
+  php cli.php host show <host> [--json]
+  php cli.php host delete <host> [--yes]
   php cli.php dns show|refresh <host> [--json]
   php cli.php queue show <host|target> [--json]
   php cli.php queue purge <host|target> [--yes]
@@ -160,6 +163,37 @@ function cli_user($input) {
     $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
     if (count($rows) > 1 && !(int)$rows[0]['webfinger']) throw new RuntimeException('more than one cached actor uses this handle; pass the actor URL');
     return $rows ? $rows[0] : null;
+}
+
+// 某个 host 名下的所有 uid。按主键翻页，在 PHP 里按 URL 解析出的 host 精确比 —— users 没有 host 列，而 like 会误中端口、大小写和路径里的同名子串
+function cli_host_uids($host) {
+    global $db; $uids = []; $cursor = 0;
+    $pdo = $db->prepare('select `uid`, `actor` from `users` where `uid` > :cursor order by `uid` limit 500');
+    do {
+        $pdo->execute([':cursor' => $cursor]);
+        $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as $row) {
+            $cursor = (int)$row['uid'];
+            if (Club_Url_Host((string)parse_url($row['actor'], PHP_URL_HOST)) === $host) $uids[] = (int)$row['uid'];
+        }
+    } while (count($rows) === 500);
+    return $uids;
+}
+
+// 这批 uid 名下各有多少派生行。删除前要看的就是这几个数，因为它们都跟着外键一起走
+function cli_user_counts($uids) {
+    global $db;
+    $counts = ['users' => count($uids), 'followers' => 0, 'activities' => 0, 'announces' => 0, 'notices' => 0];
+    foreach (array_chunk(array_map('intval', $uids), 500) as $chunk) {
+        $in = implode(',', $chunk);
+        foreach (['followers', 'activities', 'announces', 'notices'] as $table)
+            $counts[$table] += (int)$db->query('select count(*) from `'.$table.'` where `uid` in ('.$in.')')->fetch(PDO::FETCH_COLUMN, 0);
+    }
+    return $counts;
+}
+
+function cli_user_line($counts) {
+    return 'Cascades to '.$counts['followers'].' follow(s), '.$counts['activities'].' activity(ies), '.$counts['announces'].' announce(s), '.$counts['notices'].' notice(s).';
 }
 
 // --club 收逗号分隔的群组名。null 是没给（全站），false 是给了但里面有本站没有的群组 —— 打错一个字就该报错，而不是悄悄封了个不存在的范围
@@ -426,6 +460,94 @@ function cli_manage($resource, $action, $args) {
         return 0;
     }
 
+    if ($resource === 'user' && $action === 'delete') {
+        $yes = cli_flag($args, '--yes');
+        if (count($args) !== 1) return cli_error('usage: php cli.php user delete <handle|actor-url> [--yes]');
+        if (!($user = cli_user($args[0]))) return cli_error('user is not cached', 2);
+        $counts = cli_user_counts([(int)$user['uid']]);
+        if (!$yes) {
+            cli_emit(array_merge(['preview' => true, 'actor' => $user['actor']], $counts),
+                ['Would delete '.$user['actor'].'.', cli_user_line($counts), 'Run again with --yes to apply.']);
+            return 0;
+        }
+        // 级联带走 followers / activities / announces / notices。不往外发任何东西：本站没有对端签名的 Delete 可转，
+        // 而逐条给历史投稿补发 Undo 是「投稿数 × 群组数」条活动，为一个手工删除的账号不值。
+        // delete 自己就是这行 users 上的排他锁，而且是这个事务的第一件事，锁契约照旧
+        // 数和删放同一个事务里，报的才是这次真删掉的东西：并发的 user cleanup 或者另一条同样的命令可能已经先把它收走了
+        $counts = Club_DB_Transaction('user delete', function () use ($db, $user) {
+            $counts = cli_user_counts([(int)$user['uid']]);
+            $pdo = $db->prepare('delete from `users` where `uid` = :uid');
+            $pdo->execute([':uid' => $user['uid']]);
+            $counts['users'] = $pdo->rowCount();
+            return $counts;
+        });
+        if (!$counts['users']) return cli_error('user was already gone', 2);
+        Club_Log_Event('info', 'user deleted by cli', array_merge(['actor' => $user['actor']], $counts));
+        cli_emit(array_merge(['actor' => $user['actor'], 'deleted' => true], $counts), ['Deleted '.$user['actor'].'.', cli_user_line($counts)]);
+        return 0;
+    }
+
+    if ($resource === 'host' && $action === 'show') {
+        if (count($args) !== 1) return cli_error('usage: php cli.php host show <host> [--json]');
+        if (($host = Club_Url_Host($args[0])) === false) return cli_error('expected a host');
+        $data = array_merge(['host' => $host], cli_user_counts(cli_host_uids($host)));
+        $pdo = $db->prepare('select `clubs` from `bans` where `target` = :host');
+        $pdo->execute([':host' => $host]); $ban = $pdo->fetch(PDO::FETCH_NUM);
+        $data['queues'] = 0;
+        foreach (cli_targets($host, 'queues') as $target) {
+            $pdo = $db->prepare('select count(*) from `queues` where `target` = :target');
+            $pdo->execute([':target' => $target]); $data['queues'] += (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
+        }
+        $data['endpoints'] = count(cli_targets($host, 'endpoints'));
+        $data['blacklisted'] = count(cli_targets($host, 'blacklist'));
+        // 只报这个 host 自己那条封禁；它名下某个 actor 单独被封不算在这里，那要 ban list 去看
+        $data['banned'] = $ban === false ? '-' : (isset($ban[0]) ? implode(',', json_decode($ban[0], 1) ?: []) : '*');
+        cli_emit($data, ['host:        '.$host, 'users:       '.$data['users'], 'followers:   '.$data['followers'], 'activities:  '.$data['activities'],
+            'announces:   '.$data['announces'], 'notices:     '.$data['notices'], 'queues:      '.$data['queues'], 'endpoints:   '.$data['endpoints'],
+            'blacklisted: '.$data['blacklisted'], 'banned:      '.$data['banned']]);
+        return 0;
+    }
+
+    if ($resource === 'host' && $action === 'delete') {
+        $yes = cli_flag($args, '--yes');
+        if (count($args) !== 1) return cli_error('usage: php cli.php host delete <host> [--yes]');
+        if (($host = Club_Url_Host($args[0])) === false) return cli_error('expected a host');
+        $uids = cli_host_uids($host);
+        $counts = cli_user_counts($uids);
+        if (!$yes) {
+            cli_emit(array_merge(['preview' => true, 'host' => $host], $counts),
+                ['Would delete every cached user on '.$host.'.', cli_user_line($counts), 'Run again with --yes to apply.']);
+            return $uids ? 0 : 2;
+        }
+        // 一家大实例的 users 不能压成一笔大事务：每批 100 行独立提交，级联的 activities 和 announces 跟着这一批走。
+        // 删完再扫一遍，扫到空为止：这中间对端还可以让本站缓存出这个 host 的新用户 —— 封禁挡不住那一步，验签为了取公钥就会建行 ——
+        // 照一份快照删完就报成功，等于把那几行漏在库里还说清干净了。轮数封顶，免得一家正在活跃投递的实例把这条命令永远拖住；
+        // 没收敛就照实说还剩几行、退出码给 2，让人再跑一次而不是以为完事了。封禁本身不受影响，它按 target 存、跟 users 没有外键
+        $totals = ['users' => 0, 'followers' => 0, 'activities' => 0, 'announces' => 0, 'notices' => 0]; $pass = 0;
+        while ($uids && ++$pass <= 10) {
+            foreach (array_chunk($uids, 100) as $chunk) {
+                // 数在删的同一个事务里、紧挨着 delete，报的是这次真删掉的行数而不是扫描时看到的：维护队列的 Club_Actor_Cleanup 一直在删没关注没动态的行，
+                // 拿快照当账报，撞上它就会虚报。被别人先删掉的那几行连同派生行一起没了，这里数出来就是 0，级联那几项跟着自洽
+                $batch = Club_DB_Transaction('host delete', function () use ($db, $chunk) {
+                    $counts = cli_user_counts($chunk);
+                    $counts['users'] = (int)$db->exec('delete from `users` where `uid` in ('.implode(',', $chunk).')');
+                    return $counts;
+                });
+                foreach ($batch as $key => $value) $totals[$key] += $value;
+            }
+            $uids = cli_host_uids($host);
+        }
+        Club_Log_Event($uids ? 'warning' : 'info', 'host deleted by cli', array_merge(['host' => $host, 'passes' => $pass, 'left' => count($uids)], $totals));
+        $lines = ['Deleted '.$totals['users'].' cached user(s) on '.$host.' in '.$pass.' pass(es).', cli_user_line($totals)];
+        if ($uids) $lines[] = count($uids).' more were cached while this ran; run it again.';
+        // 被封的实例照样会冒出新行：验签为了取公钥就会建一条，封禁是在那之后才拦的。不说明的话，人会以为这条命令没生效而反复重跑
+        $pdo = $db->prepare('select 1 from `bans` where `target` = :host');
+        $pdo->execute([':host' => $host]);
+        if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) $lines[] = $host.' is banned, so verifying its signatures still caches keys here; those rows carry no follows and user cleanup reaps them.';
+        cli_emit(array_merge(['host' => $host, 'deleted' => $totals['users'], 'left' => count($uids)], $totals), $lines);
+        return $uids ? 2 : 0;
+    }
+
     if ($resource === 'user' && $action === 'groups') {
         if (count($args) !== 1) return cli_error('usage: php cli.php user groups <handle|actor-url>');
         if (!($user = cli_user($args[0]))) return cli_error('user is not cached; run php cli.php user fetch first', 2);
@@ -552,6 +674,7 @@ switch ($argv[1]) {
     case 'user':
     case 'follow':
     case 'ban':
+    case 'host':
     case 'dns':
     case 'queue':
     case 'endpoint':
