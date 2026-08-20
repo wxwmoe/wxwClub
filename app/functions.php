@@ -436,14 +436,16 @@ function Club_Actor_Confirm($actor, $document) {
 }
 
 // 这次拉取要不要再发一遍 WebFinger 确认。$ask 是调用方的明说：true 必确认（人工点名），false 这一趟别确认（顺着别名探路的那次，它只为读 movedTo，不该替对方做 handle 保养），
-// null 才轮到这里判：首次落库必确认，此外只有对端自称的 handle 和库里存的不一样才有理由再问，那是远端改名唯一看得见的征兆。
+// null 才轮到这里判：首次落库必确认，还没确认过的行（$webfinger 为 0）每次拉取都补一次，此外只有对端自称的 handle 和库里存的不一样才有理由再问，那是远端改名唯一看得见的征兆。
+// 未确认的行必须单独列出来，因为改名那个征兆对它永远不成立：拉取会把 webfinger = 0 的行的 name 刷成对端当前的自称值，两边就此一致。不补的话首次确认失败一次就是永远不确认。
+// 代价是 handle 真被别人拿走的那种行会一直重试下去，收敛不了 —— 但它每次都是一个 WebFinger，上限同样是拉取本身的频率，而放着不管就是本站永远显示一个不属于这个 actor 的 handle。
 // 看见了就当场问，不另压一道冷却。自称值和库里长期不同确实有正当来源 —— 落库的权威写法是 WebFinger 答复里的 subject，host-meta 委托那种部署下它和文档里的 claim 本来就不是一回事 ——
 // 那种行会跟着每次拉取多问一遍；但拉取本身只发生在首次落库和验签失败之后（Club_Actor_Sync 的一小时冷却），多的这一个 WebFinger 比它顺带的 actor GET 还轻。
 // 冷却反过来要命：拉取本就稀少，同一个 actor 未必还有下一次 —— 对端同时改名又轮了密钥的话，新公钥一旦缓存成功就再没有验签失败，也就再没有拉取，
 // 这次看见的改名被压掉就是永远压掉。要既压又不丢，就得把「看见变了但这次没问」记在某处，那是单开一列、多扛一次迁移停机的价钱
-function Club_Actor_Confirm_Decide($ask, $fresh, $claim, $name) {
+function Club_Actor_Confirm_Decide($ask, $fresh, $claim, $name, $webfinger) {
     if ($ask !== null) return (bool)$ask;
-    return $fresh || ($claim !== '' && $claim !== $name);
+    return $fresh || $webfinger === 0 || ($claim !== '' && $claim !== $name);
 }
 
 // 拉取远端 actor 写入本地缓存，已存在则更新（对方可能轮换密钥或迁移 inbox）。
@@ -487,13 +489,13 @@ function Club_Actor_Fetch($actor, &$document = null, $confirm = null) {
         // 并发首次缓存同一 actor 可重查收敛；其他写故障不能伪装成 actor 不存在。
         if ((int)($e->errorInfo[1] ?? 0) !== 1062) throw $e;
     }
-    $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox` from `users` where `actor` = :actor');
+    $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox`,`webfinger` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     $row = $pdo->fetch(PDO::FETCH_ASSOC);
     // 该不该确认由 Club_Actor_Confirm_Decide 说了算。身份从来是 actor URL，所以远端改名就是同一行换个 name，不建新行也不合并。
     // 改名成功要把新 handle 补回 $row：这一行是确认之前读的，原样返回的话本次调用的下游（私信正文和 tag 里的 mention）会拿旧 handle 再写一遍。
     // 失败无害：webfinger 留 0，等 CLI 补，绝不因此让入站活动失败
-    if ($row && Club_Actor_Confirm_Decide($confirm, $fresh, $claim, $row['name']) && is_string($name = Club_Actor_Confirm($actor, $jsonld))) $row['name'] = $name;
+    if ($row && Club_Actor_Confirm_Decide($confirm, $fresh, $claim, $row['name'], (int)$row['webfinger']) && is_string($name = Club_Actor_Confirm($actor, $jsonld))) $row['name'] = $name;
     // 新账号第一次露面时认领的旧账号，理由和判据写在 Club_Actor_Aliased 上
     if ($row) Club_Actor_Aliased($actor, $jsonld);
     return $row;

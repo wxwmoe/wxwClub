@@ -79,6 +79,7 @@ Usage:
   php cli.php club clear <club> <nickname|infoname|summary|avatar|banner>
   php cli.php club publish <club>
   php cli.php user cleanup [--yes]
+  php cli.php user confirm [--after UID] [--limit 50] [--json]
   php cli.php user fetch <handle|actor-url>
   php cli.php user groups <handle|actor-url> [--json]
   php cli.php user delete <handle|actor-url> [--yes]
@@ -319,6 +320,39 @@ function cli_manage($resource, $action, $args) {
         }
         $deleted = Club_Actor_Cleanup();
         cli_emit(['deleted' => $deleted], ['Cleaned up '.$deleted.' unused user(s).']);
+        return 0;
+    }
+
+    // 补确认还没确认过的行。拉取那边只在这些行自己再次露面时才顺手补，一个不发帖也不换密钥的关注者可以一直不露面，这条命令是唯一主动的入口。
+    // 每行都是一次 actor 拉取加一次 WebFinger，所以出站量由 --limit 封顶，剩下的报个续跑命令 —— 全站一次跑完会在别人的日志里堆成一场扫描
+    if ($resource === 'user' && $action === 'confirm') {
+        $limit = (int)cli_option($args, '--limit', 50); $after = cli_option($args, '--after');
+        if ($args || $limit < 1 || $limit > 200 || (isset($after) && (!ctype_digit((string)$after) || (int)$after < 1)))
+            return cli_error('usage: php cli.php user confirm [--after UID] [--limit 50]');
+        $pdo = $db->prepare('select `uid`,`actor` from `users` where `webfinger` = 0 and `uid` > :cursor order by `uid` limit '.($limit + 1));
+        $pdo->execute([':cursor' => $cursor = isset($after) ? (int)$after : 0]); $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
+        $more = count($rows) > $limit; if ($more) array_pop($rows);
+        // 确认成功与否只有库里那一列算数：拉取回来的行是确认之前读的，而确认失败的原因 Club_Actor_Confirm 自己逐条记了
+        $read = $db->prepare('select `name`,`webfinger` from `users` where `uid` = :uid');
+        $items = []; $confirmed = 0;
+        foreach ($rows as $row) {
+            Club_Actor_Fetch($row['actor'], $document, true);
+            $read->execute([':uid' => $row['uid']]); $user = $read->fetch(PDO::FETCH_ASSOC);
+            $ok = $user && (int)$user['webfinger'] !== 0; $confirmed += $ok ? 1 : 0;
+            $items[] = ['uid' => (int)$row['uid'], 'actor' => $row['actor'], 'handle' => $user ? $user['name'] : '-', 'confirmed' => $ok ? 'yes' : 'no'];
+        }
+        // 待办集合会在跑的过程中长回来：确认一行会把别人对同一 handle 的旧声明置 0（Club_Actor_Confirm），那一行的 uid 完全可能比游标小。
+        // 所以「这一页之后没有了」不等于「全站没有了」，最后一页单独数一次整张表，否则它会报成跑完，而游标之后的 --after 永远够不到它们。
+        // 只有最后一页数：webfinger 上没有索引，每页数一次就是页数乘全表，而中间页有 $more 就够说明还得继续
+        $last = $items ? $items[count($items) - 1]['uid'] : $cursor;
+        $next = $more ? $last : null;
+        $pending = $more ? null : (int)$db->query('select count(*) from `users` where `webfinger` = 0')->fetchColumn();
+        $lines = cli_table($items, ['uid' => 'UID', 'handle' => 'HANDLE', 'actor' => 'ACTOR', 'confirmed' => 'CONFIRMED']);
+        $lines[] = 'Confirmed '.$confirmed.' of '.count($items).' user(s)'.(isset($pending) ? ', '.$pending.' still unconfirmed site wide.' : '.');
+        if (!$cli_json && isset($next)) $lines[] = 'Next: php cli.php user confirm --after '.$next.' --limit '.$limit;
+        elseif (!$cli_json && $pending) $lines[] = 'Those '.$pending.' sit at or before UID '.$last.' — this round\'s failures and any row invalidated while it ran;' .
+            ' run without --after to sweep them.';
+        cli_emit(['items' => $items, 'confirmed' => $confirmed, 'has_more' => $more, 'next_after' => $next, 'pending' => $pending], $lines);
         return 0;
     }
 
