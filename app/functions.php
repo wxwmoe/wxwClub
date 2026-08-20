@@ -368,8 +368,9 @@ function Club_Actor_Aliased($actor, $document) {
             $follows->execute([':actor' => $alias]);
             if (!$follows->fetch(PDO::FETCH_COLUMN, 0)) continue;
             Club_Log_Event('info', 'actor claims an alias that still follows here, confirming the move', ['actor' => $actor, 'alias' => $alias]);
-            // 拉不到就什么都不做：旧实例已经没了的话，那几行关注关系照旧交给退避和黑名单收拾。失败原因 Club_Actor_Fetch 自己记了一行
-            if (!Club_Actor_Fetch($alias, $aliased)) continue;
+            // 拉不到就什么都不做：旧实例已经没了的话，那几行关注关系照旧交给退避和黑名单收拾。失败原因 Club_Actor_Fetch 自己记了一行。
+            // 这一趟不确认 handle：触发它的是别人文档里的一句 alsoKnownAs，谁都能写、想写多少次写多少次，顺手确认等于把这个旧 actor 的 WebFinger 频率交给对端定
+            if (!Club_Actor_Fetch($alias, $aliased, false)) continue;
             if (($moved = ActivityPub_Object_Id($aliased['movedTo'] ?? '')) !== $actor) {
                 // 正常联邦里不该出现：要么迁移只做了一半（别名加了、还没真迁），要么有人想拿别名把不相干的人的关注关系认到自己名下
                 Club_Log_Event('warning', 'alias move refused, the alias does not point back', ['actor' => $actor, 'alias' => $alias, 'movedTo' => $moved ?: '-']);
@@ -434,11 +435,23 @@ function Club_Actor_Confirm($actor, $document) {
     });
 }
 
+// 这次拉取要不要再发一遍 WebFinger 确认。$ask 是调用方的明说：true 必确认（人工点名），false 这一趟别确认（顺着别名探路的那次，它只为读 movedTo，不该替对方做 handle 保养），
+// null 才轮到这里判：首次落库必确认，此外只有对端自称的 handle 和库里存的不一样才有理由再问，那是远端改名唯一看得见的征兆。
+// 看见了就当场问，不另压一道冷却。自称值和库里长期不同确实有正当来源 —— 落库的权威写法是 WebFinger 答复里的 subject，host-meta 委托那种部署下它和文档里的 claim 本来就不是一回事 ——
+// 那种行会跟着每次拉取多问一遍；但拉取本身只发生在首次落库和验签失败之后（Club_Actor_Sync 的一小时冷却），多的这一个 WebFinger 比它顺带的 actor GET 还轻。
+// 冷却反过来要命：拉取本就稀少，同一个 actor 未必还有下一次 —— 对端同时改名又轮了密钥的话，新公钥一旦缓存成功就再没有验签失败，也就再没有拉取，
+// 这次看见的改名被压掉就是永远压掉。要既压又不丢，就得把「看见变了但这次没问」记在某处，那是单开一列、多扛一次迁移停机的价钱
+function Club_Actor_Confirm_Decide($ask, $fresh, $claim, $name) {
+    if ($ask !== null) return (bool)$ask;
+    return $fresh || ($claim !== '' && $claim !== $name);
+}
+
 // 拉取远端 actor 写入本地缓存，已存在则更新（对方可能轮换密钥或迁移 inbox）。
 // users 是全站共用的一份，这行属于哪个群组无从谈起，签名统一用系统群组：同一行的建立和刷新由不同群组签本来就不一致，
 // 而随手拿投稿命中的某个群组来签，等于让对端为一次首访去拉一个它没见过、还可能单独封过的 actor。
-// $document 原样带出拉到的文档：alsoKnownAs 这类字段本站不存，只有在这里见得到；返回 false 时它的内容没有意义
-function Club_Actor_Fetch($actor, &$document = null) {
+// $document 原样带出拉到的文档：alsoKnownAs 这类字段本站不存，只有在这里见得到；返回 false 时它的内容没有意义。
+// $confirm 是调用方对 handle 确认的明说，取值和判据都在 Club_Actor_Confirm_Decide 上：确认只此一处，调用方自己再补一次就是同一个 WebFinger 发两遍
+function Club_Actor_Fetch($actor, &$document = null, $confirm = null) {
     global $db, $fetch_retry;
     if (!($club = Club_Group_Signer())) {
         Club_Log_Event('warning', 'fetch actor skipped, no system club', ['actor' => $actor]);
@@ -459,7 +472,8 @@ function Club_Actor_Fetch($actor, &$document = null) {
     $shared = $jsonld['endpoints']['sharedInbox'] ?? null;
     if (!isset($shared) || ($shared = Club_Endpoint_Require($shared, ['actor' => $actor])) === false) $shared = $inbox;
     // 形状过不了那道 ASCII 闸门的（unicode 域名之类）仍然照老样子拼一个存着：显示和 CLI 查行要有东西可用，只是它确认不了，Club_Actor_Confirm 那边会判成没有候选
-    $data = [':name' => Club_Actor_Handle($jsonld, $actor) ?: ($jsonld['preferredUsername'] ?? '').'@'.parse_url($jsonld['id'], PHP_URL_HOST), ':inbox' => $inbox,
+    $claim = Club_Actor_Handle($jsonld, $actor);
+    $data = [':name' => $claim ?: ($jsonld['preferredUsername'] ?? '').'@'.parse_url($jsonld['id'], PHP_URL_HOST), ':inbox' => $inbox,
         ':public_key' => $jsonld['publicKey']['publicKeyPem'] ?? '', ':shared_inbox' => $shared, ':actor' => $jsonld['id'], ':timestamp' => time()];
     $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
@@ -476,8 +490,10 @@ function Club_Actor_Fetch($actor, &$document = null) {
     $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     $row = $pdo->fetch(PDO::FETCH_ASSOC);
-    // 第一次缓存这个 actor 时顺手把 handle 绑定确认掉，一个 actor 一辈子多这一次 WebFinger。失败无害：webfinger 留 0，等 CLI 补，绝不因此让入站活动失败
-    if ($row && $fresh) Club_Actor_Confirm($actor, $jsonld);
+    // 该不该确认由 Club_Actor_Confirm_Decide 说了算。身份从来是 actor URL，所以远端改名就是同一行换个 name，不建新行也不合并。
+    // 改名成功要把新 handle 补回 $row：这一行是确认之前读的，原样返回的话本次调用的下游（私信正文和 tag 里的 mention）会拿旧 handle 再写一遍。
+    // 失败无害：webfinger 留 0，等 CLI 补，绝不因此让入站活动失败
+    if ($row && Club_Actor_Confirm_Decide($confirm, $fresh, $claim, $row['name']) && is_string($name = Club_Actor_Confirm($actor, $jsonld))) $row['name'] = $name;
     // 新账号第一次露面时认领的旧账号，理由和判据写在 Club_Actor_Aliased 上
     if ($row) Club_Actor_Aliased($actor, $jsonld);
     return $row;

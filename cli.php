@@ -295,9 +295,8 @@ function cli_manage($resource, $action, $args) {
     if ($resource === 'user' && $action === 'fetch') {
         if (count($args) !== 1) return cli_error('usage: php cli.php user fetch <handle|actor-url>');
         if (!($actor = Club_Actor_Resolve($args[0]))) return cli_error('could not resolve actor');
-        if (!($user = Club_Actor_Fetch($actor, $document))) return cli_error('could not fetch actor');
-        // 已经确认过的行，拉取那边不会再自动确认（它只认第一次落库），所以这条命令每次都补一次：手工点名一个 actor 时要的就是「现在到底归谁」
-        Club_Actor_Confirm($actor, $document);
+        // 强制确认：拉取那边平时只在首次落库或自称的 handle 和库里不一样时才问 WebFinger，而手工点名一个 actor 时要的就是「现在到底归谁」
+        if (!($user = Club_Actor_Fetch($actor, $document, true))) return cli_error('could not fetch actor');
         $pdo = $db->prepare('select * from `users` where `uid` = :uid'); $pdo->execute([':uid' => $user['uid']]); $user = $pdo->fetch(PDO::FETCH_ASSOC);
         $data = ['uid' => (int)$user['uid'], 'name' => $user['name'], 'actor' => $user['actor'], 'inbox' => $user['inbox'], 'shared_inbox' => $user['shared_inbox'],
             'timestamp' => (int)$user['timestamp'], 'refresh' => (int)$user['refresh'], 'webfinger' => (int)$user['webfinger'], 'public_key_sha256' => hash('sha256', $user['public_key'])];

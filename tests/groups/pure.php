@@ -362,6 +362,27 @@ t_table('Club_Resolver_Answer', 'Club_Resolver_Answer', [
     [['Status' => 0, 'Answer' => [['type' => 1, 'data' => '1.2.3.4']]], 'AAAA', []]
 ]);
 
+t_group('decide / handle confirm');
+
+// 什么时候值得为一行 users 再发一次 WebFinger。判宽了就是每次拉取都去问对端一遍，判严了就一直显示旧 handle
+t_table('Club_Actor_Confirm_Decide', 'Club_Actor_Confirm_Decide', [
+    // 调用方明说的优先：人工点名必确认，顺着别名探路的那趟一律不确认，触发频率由对端的 alsoKnownAs 决定，不能让它带出 WebFinger
+    [true, false, 'alice@a.example', 'alice@a.example', true],
+    [false, true, 'bob@a.example', 'alice@a.example', false],
+    // 首次落库不看别的
+    [null, true, 'alice@a.example', 'alice@a.example', true],
+    [null, true, '', 'alice@a.example', true],
+    // 自称值和库里一致就是没改名，稳态下一个请求都不该发
+    [null, false, 'alice@a.example', 'alice@a.example', false],
+    // 改名的样子：自称值变了，当场就问，不留到下一次拉取 —— 下一次未必还有
+    [null, false, 'bob@a.example', 'alice@a.example', true],
+    // 落库的是 WebFinger 答复的 subject，别名域部署下它和 claim 长期不同，这种行每次拉取都会多问一遍，上限就是拉取本身的频率
+    [null, false, 'alice@alias.example', 'alice@canonical.example', true],
+    // 没有候选就无从确认
+    [null, false, '', 'alice@a.example', false],
+    [null, false, 'alice@a.example', 'alice@social.a.example', true]
+]);
+
 t_group('decide / http result');
 
 // 划错一档的代价：整家实例被误判成挂了，或者一条谁都不收的活动无限重投
