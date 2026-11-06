@@ -1,7 +1,5 @@
 <?php
 
-/* 同一个头里两个 keyId。后一个覆盖前一个的话，对端就能让日志看到一个身份、让验签用另一个身份。 */
-
 return [
     'source' => ['software' => 'generic', 'version' => 'cavage-12'],
     'seq' => 60,

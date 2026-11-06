@@ -1,9 +1,3 @@
--- 合并链的起点之一：初始提交 13a8931（2021-10-25）的 tools/wxwclub.sql，逐字节照抄。
--- 自动合并是后来才有的，那之前线上结构就以各次提交的这份快照为准，没有额外手工 ALTER 可推测，所以历史快照就是唯一的事实来源。
---
--- 这一版里 src/migrate/1.php 要改的东西最多：表名还叫 activitys、infoname 拆成两列、activities 挂着 cid 和 activity_id、
--- create_time 是 datetime、唯一键还在 users.name 上、object 只是普通索引。末尾几行数据是为了让那些回填真的搬一次东西。
-
 CREATE TABLE `clubs` (
   `cid` int NOT NULL AUTO_INCREMENT,
   `name` varchar(30) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,

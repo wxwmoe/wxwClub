@@ -4,16 +4,15 @@ global $db, $base, $config;
 $club     = Club_Template_Escape($vars['club']);
 $nickname = Club_Template_Escape($vars['nickname']);
 $row      = $vars['row'];
-// summary 允许带 HTML（预设值里就有 <p>），且只有管理员能写，故不转义
+// Profile HTML and banner CSS come from administrator settings.
 $summary  = $vars['summary'];
 
 $handle = '@'.$club.'@'.Club_Template_Escape($config['base']);
 $avatar = $row['avatar'] ?: $config['default']['avatar'];
 $banner = $row['banner'] ?: $config['default']['banner'];
 
-// 游标翻页，只给上一页 / 下一页，不支持跳页，也就没有 offset 越翻越慢的问题
-$max = Club_HTTP_Cursor($_GET['max'] ?? '');   // 往旧翻
-$min = Club_HTTP_Cursor($_GET['min'] ?? '');   // 往新翻
+$max = Club_HTTP_Cursor($_GET['max'] ?? '');
+$min = Club_HTTP_Cursor($_GET['min'] ?? '');
 $asc = (bool)$min;
 $where = ''; $params = [':cid' => $row['cid']];
 if ($max) {
@@ -23,7 +22,6 @@ if ($max) {
     $where = ' and a.timestamp >= :ts and (a.timestamp > :ts or a.id > :id)';
     $params[':ts'] = $min[0]; $params[':id'] = $min[1];
 }
-// 多取一条，用来判断这个方向还有没有内容
 $pdo = $db->prepare('select a.id, a.timestamp, u.name, act.object, a.summary, a.content from `announces` as `a` left join `users` as `u` on a.uid = u.uid'.
     ' left join `activities` as `act` on a.activity = act.id where a.cid = :cid'.$where.' order by a.timestamp '.($asc ? 'asc' : 'desc').', a.id '.($asc ? 'asc' : 'desc').' limit 21');
 $pdo->execute($params);
@@ -32,7 +30,6 @@ $more = count($activities) > 20;
 $activities = array_slice($activities, 0, 20);
 if ($asc) $activities = array_reverse($activities);
 
-// 往新翻时 $more 说明还有更新的；往旧翻时带着 max 就说明来路上有更新的
 $newer = $asc ? $more : (bool)$max;
 $older = $asc ? true : $more;
 $link = $base.'/club/'.$club;
@@ -58,7 +55,6 @@ if ($activities) {
 <style>
 a{color:#000;text-decoration:none}
 details>summary{cursor:pointer;list-style:none}
-/* CSS 里实体转义无效，横幅只有管理员能设，保持原样输出 */
 .info::before{content:"";background:url(<?= $banner ?>) no-repeat center;background-size:cover;
     opacity:0.35;z-index:-1;position:absolute;width:720px;height:220px;top:0px;left:0px;border-radius:8px;}
 </style>
@@ -72,7 +68,6 @@ details>summary{cursor:pointer;list-style:none}
 <?php if (!$activities): ?>
     <p>群组还没有活动，快来发送一条吧 ~</p>
 <?php else: foreach ($activities as $activity):
-    // 以下几项都是跨站用户可控的内容，一律转义
     $time = date('Y-m-d H:i:s', $activity['timestamp']);
     $who  = Club_Template_Escape($activity['name']);
     $text = Club_Template_Escape($activity['content']);

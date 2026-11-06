@@ -1,8 +1,5 @@
 <?php
 
-/* GoToSocial 的签名形状：algorithm 写 hs2019，时效靠 (created) 而不是 Date 头。
- * hs2019 在草案里本该按 keyId 的元数据挑摘要算法，Fediverse 上它就是 RSA + SHA-256 的别名，认不出来的话整家 GoToSocial 都投不进来。 */
-
 return [
     'source' => ['software' => 'gotosocial', 'version' => '0.22.1'],
     'seq' => 10,

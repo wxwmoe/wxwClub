@@ -1,10 +1,3 @@
--- 合并链的另一个起点：52f1d01（2022-10-29）的 tools/wxwclub.sql，逐字节照抄。这是自动合并出现之前最后一版完整旧库，
--- 线上真正从这里升上来的可能性最大 —— 13a8931 那份验的是 1.php 的回填，这一份验的是 2.php 的调度重构。
---
--- 跟终态的差别集中在调度那几张表：queues 还是 inuse/retry 那套、blacklist 带自增 id、tasks 挂着已经没人读的 queues 计数、
--- 四个 URL 列还在 ascii_general_ci 上、announces 是 text 而不是 mediumtext，endpoints 和 dns 根本还不存在。
--- 数据只覆盖结构改写，URL 规范化的边界（大小写、默认端口、重复目标）还没进这份夹具。
-
 CREATE TABLE `clubs` (
   `cid` int NOT NULL AUTO_INCREMENT,
   `name` varchar(30) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,

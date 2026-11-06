@@ -1,7 +1,5 @@
 <?php
 
-/* (created) 是这条报文唯一的时效凭据，过了窗口就必须跟一个过期的 Date 头一样被拒 —— 否则谁录下一份就能永远重放。 */
-
 return [
     'source' => ['software' => 'generic', 'version' => 'cavage-12'],
     'seq' => 30,

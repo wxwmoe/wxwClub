@@ -1,11 +1,5 @@
 <?php
 
-/* 把任意历史结构补齐到调度重构之前的业务结构。
- *
- * 逐列逐索引地对齐完整目标形态：有就跳过，缺就补，类型不对就改；任何历史版本执行后都落到同一结果。
- *
- * `hosts`、`queues.host`、`tasks.queues` 属于调度结构，第 2 版会删，这里不新建；已经存在的留给第 2 版处理。 */
-
 function Club_Migrate_1() {
     Club_Migrate_1_Clubs();
     Club_Migrate_1_Users();
@@ -68,7 +62,6 @@ function Club_Migrate_1_Validate() {
 }
 
 function Club_Migrate_1_Clubs() {
-    // 早期版本把中英两个名称标签拆成两列，后来合并成一个标签到值的 JSON 对象
     if (Club_Schema_Column('clubs', 'infoname_cn')) {
         if (!Club_Schema_Column('clubs', 'infoname')) Club_Migrate_Exec('clubs add infoname',
             'alter table `clubs` add `infoname` text character set utf8mb4 collate utf8mb4_general_ci after `nickname`');
@@ -77,7 +70,6 @@ function Club_Migrate_1_Clubs() {
         Club_Migrate_Exec('clubs drop infoname_cn/en', 'alter table `clubs` drop column `infoname_cn`, drop column `infoname_en`');
     }
     Club_Migrate_Datetime('clubs', 'create_time', 'timestamp');
-    // 头像和横幅是外链，100 字节放不下带签名参数的对象存储 URL
     foreach (['avatar', 'banner'] as $column) if (($info = Club_Schema_Column('clubs', $column)) && $info['type'] !== 'varchar(255)')
         Club_Migrate_Exec('clubs widen '.$column, 'alter table `clubs` modify `'.$column.'` varchar(255) character set ascii collate ascii_general_ci default null');
     Club_Migrate_AddKeys('clubs', ['name' => 'unique `name`', 'timestamp' => '`timestamp`']);
@@ -88,8 +80,6 @@ function Club_Migrate_1_Users() {
     foreach (['actor', 'inbox', 'shared_inbox'] as $column) if (($info = Club_Schema_Column('users', $column)) && $info['type'] !== 'varchar(255)')
         Club_Migrate_Exec('users widen '.$column, 'alter table `users` modify `'.$column.'` varchar(255) character set ascii collate ascii_general_ci not null');
     if (!Club_Schema_Column('users', 'refresh')) Club_Migrate_Exec('users add refresh', 'alter table `users` add `refresh` int not null default 0');
-    // 唯一性从 name 挪到 actor：同一个 actor 只该有一行，而 name 是从 actor 推出来的展示名，不同实例的同名用户完全可能撞上。
-    // 这里不自动去重：删一行 user 会顺着外键连它的关注、转发、提醒一起删掉，撞上了宁可让合并停在这里，先把冲突打印出来给人看
     if (!(($index = Club_Schema_Index('users', 'actor')) && $index['unique'])) Club_Migrate_1_Conflicts('users', 'actor');
     Club_Migrate_AddKeys('users', ['actor' => 'unique `actor`', 'name' => '`name`']);
 }
@@ -97,7 +87,6 @@ function Club_Migrate_1_Users() {
 function Club_Migrate_1_Activities() {
     if (!Club_Schema_Table('activities') && Club_Schema_Table('activitys')) Club_Migrate_Exec('rename activitys', 'rename table `activitys` to `activities`');
     if (!Club_Schema_Table('activities')) return false;
-    // 一条投稿可以同时进多个群组，单个 cid 表达不了。改存群组名的 JSON 列表，值能从原来的外键直接还原出来
     if (Club_Schema_Column('activities', 'cid')) {
         if (!Club_Schema_Column('activities', 'clubs')) Club_Migrate_Exec('activities add clubs',
             'alter table `activities` add `clubs` varchar(255) character set ascii collate ascii_general_ci not null default \'\' after `type`');
@@ -106,7 +95,6 @@ function Club_Migrate_1_Activities() {
         Club_Migrate_DropKeys('activities', ['cid']);
         Club_Migrate_Exec('activities drop cid', 'alter table `activities` drop column `cid`, modify `clubs` varchar(255) character set ascii collate ascii_general_ci not null');
     }
-    // activity_id 当年是本地编号，现在一律用远端 object 的 URI 做唯一键
     if (Club_Schema_Column('activities', 'activity_id')) Club_Migrate_Exec('activities drop activity_id', 'alter table `activities` drop column `activity_id`');
     Club_Migrate_Datetime('activities', 'create_time', 'timestamp');
     if (($info = Club_Schema_Column('activities', 'object')) && $info['type'] !== 'varchar(255)') Club_Migrate_Exec('activities widen object',
@@ -114,7 +102,6 @@ function Club_Migrate_1_Activities() {
     if (($info = Club_Schema_Column('activities', 'clubs')) && $info['type'] !== 'varchar(255)') Club_Migrate_Exec('activities widen clubs',
         'alter table `activities` modify `clubs` varchar(255) character set ascii collate ascii_general_ci not null');
     if (!Club_Schema_Column('activities', 'updated')) Club_Migrate_Exec('activities add updated', 'alter table `activities` add `updated` int not null default 0 after `object`');
-    // 只有不存在下游引用的早期结构才能自动去重；否则必须由人决定保留哪一行
     if (!(($index = Club_Schema_Index('activities', 'object')) && $index['unique'])) {
         $conflicts = Club_Migrate_1_Conflicts('activities', 'object');
         $downstream = Club_Schema_Referenced_By('activities', 'id');
@@ -125,7 +112,6 @@ function Club_Migrate_1_Activities() {
     Club_Migrate_AddKeys('activities', ['object' => 'unique `object`', 'uid' => '`uid`']);
 }
 
-// 建唯一键前按某一列去重，保留 id 最小的那行
 function Club_Migrate_1_Dedupe($table, $column) {
     global $db;
     $where = ' where `id` not in (select `keep` from (select min(`id`) as `keep` from `'.$table.'` group by `'.$column.'`) as `k`)';
@@ -136,7 +122,6 @@ function Club_Migrate_1_Dedupe($table, $column) {
     return $rows;
 }
 
-// 只报不删。撞上唯一键的合并会在下一句 ALTER 上失败，那条报错只说「Duplicate entry」，不说是哪几行；先把它们打出来，人才知道要去修什么
 function Club_Migrate_1_Conflicts($table, $column) {
     global $db;
     $rows = $db->query('select `'.$column.'`, count(*) as `rows` from `'.$table.'` group by `'.$column.'` having `rows` > 1 limit 50')->fetchAll(PDO::FETCH_ASSOC);
@@ -146,7 +131,6 @@ function Club_Migrate_1_Conflicts($table, $column) {
 
 function Club_Migrate_1_Followers() {
     Club_Migrate_Datetime('followers', 'create_time', 'timestamp');
-    // cid 单列索引被 cid_uid 完全覆盖，留着只是多一份写入开销
     Club_Migrate_DropKeys('followers', ['cid']);
     Club_Migrate_AddKeys('followers', ['cid_uid' => 'unique `cid`,`uid`', 'uid' => '`uid`']);
 }
@@ -170,12 +154,10 @@ function Club_Migrate_1_Announces() {
         ' on delete cascade on update cascade'.
         ') engine=InnoDB default charset=utf8mb4 collate=utf8mb4_general_ci');
     if (!Club_Schema_Column('announces', 'summary')) Club_Migrate_Exec('announces add summary', 'alter table `announces` add `summary` mediumtext collate utf8mb4_general_ci after `activity`');
-    // text 上限 64KB，一条两万字的中文投稿加上 HTML 就能顶到
     foreach (['summary' => '', 'content' => ' not null'] as $column => $null) if (($info = Club_Schema_Column('announces', $column)) && $info['type'] !== 'mediumtext')
         Club_Migrate_Exec('announces widen '.$column, 'alter table `announces` modify `'.$column.'` mediumtext collate utf8mb4_general_ci'.$null);
     Club_Migrate_AddKeys('announces', ['cid_activity' => 'unique `cid`,`activity`', 'activity' => '`activity`',
         'cid_timestamp' => '`cid`,`timestamp`', 'uid_timestamp' => '`uid`,`timestamp`', 'timestamp_cid' => '`timestamp`,`cid`']);
-    // 外键列在删旧索引的整个过程中都必须有左前缀索引支撑
     Club_Migrate_DropKeys('announces', ['uid', 'timestamp']);
 }
 
@@ -192,7 +174,6 @@ function Club_Migrate_1_Tasks() {
         ') engine=InnoDB default charset=utf8mb4 collate=utf8mb4_general_ci');
     if (($info = Club_Schema_Column('tasks', 'jsonld')) && $info['type'] !== 'mediumtext') Club_Migrate_Exec('tasks widen jsonld',
         'alter table `tasks` modify `jsonld` mediumtext character set utf8mb4 collate utf8mb4_general_ci not null');
-    // queues 是早先的在途计数，代码里已经没人读写，但它带着的复合索引让过期清理的 timestamp 过滤用不上索引，每次都要扫全表
     Club_Migrate_DropKeys('tasks', ['type', 'time', 'queues', 'queues_timestamp']);
     if (Club_Schema_Column('tasks', 'queues')) Club_Migrate_Exec('tasks drop queues counter', 'alter table `tasks` drop column `queues`');
     Club_Migrate_AddKeys('tasks', ['cid' => '`cid`', 'timestamp' => '`timestamp`']);
@@ -212,7 +193,6 @@ function Club_Migrate_1_Queues() {
     if (($info = Club_Schema_Column('queues', 'target')) && $info['type'] !== 'varchar(255)') Club_Migrate_Exec('queues widen target',
         'alter table `queues` modify `target` varchar(255) character set ascii collate ascii_general_ci not null');
     if (!Club_Schema_Column('queues', 'retry')) Club_Migrate_Exec('queues add retry', 'alter table `queues` add `retry` tinyint not null default 0');
-    // 历史索引集各版本都不一样，先收敛到一套，第 2 版才知道该拆掉什么
     Club_Migrate_DropKeys('queues', ['timestamp', 'inuse', 'retry']);
     Club_Migrate_AddKeys('queues', ['tid' => '`tid`', 'pending' => '`inuse`,`timestamp`']);
 }

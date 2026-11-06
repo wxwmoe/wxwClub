@@ -1,8 +1,5 @@
 <?php
 
-/* 调度从「按 queues 行领取、按 hostname 互斥」改成「按规范化 inbox URL 领取 endpoint」。
- * endpoints 和 dns 建出来，queues/blacklist 换成新字段，四个 URL 列切成 ascii_bin，hosts 拆进 dns 和 endpoints 之后删掉。 */
-
 function Club_Migrate_2() {
     if (!Club_Schema_Table('endpoints')) Club_Migrate_Exec('create endpoints',
         'create table `endpoints` ('.
@@ -30,22 +27,18 @@ function Club_Migrate_2() {
     Club_Migrate_2_Blacklist();
     Club_Migrate_AddKeys('blacklist', ['lease_token' => 'unique `lease_token`', 'schedule' => '`restore_pending_at`,`check_at`,`lease_until`']);
 
-    // host 是 target 的生成列，它在的时候 MySQL 不让改 target 的排序规则。生成列不承载任何数据，删了只是少一个索引维度
     if (Club_Schema_Column('queues', 'host')) {
         Club_Migrate_DropKeys('queues', ['host']);
         Club_Migrate_Exec('queues drop host', 'alter table `queues` drop column `host`');
     }
 
     Club_Migrate_2_Normalize();
-    // 唯一键只能建在 ascii_bin 上，而且要等去重做完；外键要有个以 tid 打头的索引，tid_target 顶上了下面才敢删旧的 tid 键
     Club_Migrate_AddKeys('queues', ['tid_target' => 'unique `tid`,`target`', 'target_due' => '`target`,`due_at`,`id`']);
 
     Club_Migrate_2_Endpoints();
 
-    // 旧列到这一步才删：上面的回填还要读 queues 的行数和 blacklist 的旧主键
     Club_Migrate_DropKeys('queues', ['pending', 'tid']);
     foreach (['timestamp', 'inuse', 'retry'] as $column) if (Club_Schema_Column('queues', $column)) Club_Migrate_Exec('queues drop '.$column, 'alter table `queues` drop column `'.$column.'`');
-    // 主键从 id 切到 target 必须跟删 id 在同一句里：单独删主键的话，AUTO_INCREMENT 的 id 立刻就没有索引可依附，MySQL 直接拒绝
     if (Club_Schema_Column('blacklist', 'id')) {
         Club_Migrate_DropKeys('blacklist', ['pending']);
         $alter = [];
@@ -193,13 +186,10 @@ function Club_Migrate_2_Validate() {
     return true;
 }
 
-// endpoints 的初始状态。来源必须是 queues 和 blacklist 的并集：旧的放弃逻辑通常已经把 blacklist target 的 queues 删光了，只从 queues 回填会漏掉它们，那些 endpoint 一缺，探活和最终解禁都无从做起
 function Club_Migrate_2_Endpoints() {
     global $db;
     if (Club_Schema_Table('hosts')) {
-        // ips 原样搬过来，resolved 就是最近一次查询成功写缓存的时刻
         Club_Migrate_Exec('dns backfill', 'insert ignore into `dns`(`host`,`ips`,`checked_at`) select `host`, `ips`, greatest(`resolved`, 0) from `hosts`');
-        // 一个 hostname 下的多条 endpoint 共享同一份旧故障状态：它是按 host 记的，拆不出来，宁可让它们各自从同一个退避点重新开始
         Club_Migrate_Exec('endpoints backfill',
             'insert ignore into `endpoints`(`url`,`fails`,`fail_since`,`retry_at`,`next_at`) select `t`.`target`, greatest(coalesce(`h`.`fails`, 0), 0),'.
             ' greatest(coalesce(`h`.`since`, 0), 0), greatest(coalesce(`h`.`until`, 0), 0), if(`b`.`target` is not null, null, greatest(greatest(coalesce(`h`.`until`, 0), 0),'.
@@ -209,7 +199,6 @@ function Club_Migrate_2_Endpoints() {
             ' substring_index(substring_index(substring_index(`t`.`target`, \'/\', 3), \'/\', -1), \':\', 1)) collate ascii_general_ci');
         Club_Migrate_Exec('drop hosts', 'drop table `hosts`');
     }
-    // 从来没有 hosts 的老库，以及上一次合并卡在中间的情况：控制行照样要补齐
     $pdo = $db->query('select count(*) from `queues` `q` left join `endpoints` `e` on `q`.`target` = `e`.`url` where `e`.`url` is null');
     if ((int)$pdo->fetch(PDO::FETCH_COLUMN, 0)) Club_Migrate_Exec('endpoints from queues', 'insert ignore into `endpoints`(`url`,`next_at`)'.
         ' select `q`.`target`, min(`q`.`due_at`) from `queues` `q` left join `blacklist` `b` on `q`.`target` = `b`.`target` where `b`.`target` is null group by `q`.`target`');
@@ -221,7 +210,6 @@ function Club_Migrate_2_Endpoints() {
     return true;
 }
 
-// URL 列可能有远高于 PHP memory_limit 的基数；按 binary 排序做 keyset 分页，每页结束后游标只依赖最后一个值，中途重启从头扫描也不会改变结果
 function Club_Migrate_2_URL_Pages($table, $column, $run, $limit = 500) {
     global $db;
     $after = null;
@@ -253,8 +241,6 @@ function Club_Migrate_2_URL_Assert_Canonical($table, $column, $check) {
     return true;
 }
 
-// URL 规范化。映射用运行代码同一个 Club_Endpoint_Normalize() 生成 —— 这里另写一遍的话，两份实现差一个字节，数据库主键就跟代码对不上，而且是静默对不上。
-// 取值必须显式 collate ascii_bin：还在 ascii_general_ci 上的时候，distinct 会把 /Inbox 和 /inbox 并成一个，另一个的映射就丢了
 function Club_Migrate_2_Normalize() {
     global $db;
     $columns = [['users', 'inbox'], ['users', 'shared_inbox'], ['queues', 'target'], ['blacklist', 'target']];
@@ -275,7 +261,6 @@ function Club_Migrate_2_Normalize() {
             $info = Club_Migrate_Assert_Column($column[0], $column[1]);
             if ($info['collation'] === 'ascii_bin') $binary = true;
         }
-        // 一旦有业务列切到 binary，现存映射就是恢复后续数据步骤所需的原始快照
         if (!Club_Schema_Table('migrate_urls') || !$binary) Club_Migrate_2_URL_Map_Build($columns);
         else Club_Log_Console('info', 'url map resumed', ['urls' => (int)$db->query('select count(*) from `migrate_urls`')->fetch(PDO::FETCH_COLUMN, 0)]);
         Club_Migrate_2_URL_Map_Complete($columns);
@@ -385,8 +370,6 @@ function Club_Migrate_2_URL_Map_Validate($limit = 500) {
     return true;
 }
 
-// 同一个 (tid, canonical) 只留一条，due_at 取最早、retries 取最大：合并本来就是同一条活动投给同一个 inbox，留两条就是投两次。
-// blacklist 反过来留最早的 created_at、最晚的 check_at、最大的 checks —— 碰撞的结果不该是提前探活
 function Club_Migrate_2_Dedupe() {
     global $db;
     if (Club_Schema_Table('migrate_queues')) Club_Migrate_Exec('reset migrate_queues', 'drop table `migrate_queues`');
@@ -399,7 +382,6 @@ function Club_Migrate_2_Dedupe() {
         ' min(`q`.`due_at`), max(`q`.`retries`) from `queues` `q` join `migrate_urls` `m` on `q`.`target` = `m`.`old_url` group by `q`.`tid`, `m`.`new_url`');
     $pdo = $db->query('select (select count(*) from `queues`) - (select count(*) from `migrate_queues`)');
     Club_Log_Console('info', 'queues merged by canonical target', ['deleted' => (int)$pdo->fetch(PDO::FETCH_COLUMN, 0)]);
-    // 聚合值先写进 survivor；这样删重复行后强杀也不会丢掉最早 due_at 或最大 retries
     Club_Migrate_Exec('queues merge scheduling state', 'update `queues` `q` join `migrate_queues` `k` on `q`.`id` = `k`.`keep_id` set `q`.`due_at` = `k`.`due_at`, `q`.`retries` = `k`.`retries`');
     Club_Migrate_Exec('queues drop duplicates', 'delete `q` from `queues` `q` left join `migrate_queues` `k` on `q`.`id` = `k`.`keep_id` where `k`.`keep_id` is null');
     Club_Migrate_Exec('queues normalize target', 'update `queues` `q` join `migrate_queues` `k` on `q`.`id` = `k`.`keep_id` set `q`.`target` = `k`.`new_url`');
@@ -424,8 +406,6 @@ function Club_Migrate_2_Dedupe() {
     return true;
 }
 
-// 旧 blacklist.target 是大小写不敏感的唯一键，一条黑名单顺带把 path 的大小写变体一起挡住了。切成 ascii_bin 之后它们会自动解禁，等于合并过程悄悄放开了投递。
-// 安全动作是把每个已知变体各写成一条精确黑名单，要放开由人另外去删
 function Club_Migrate_2_Variants() {
     global $db;
     if (Club_Schema_Table('migrate_variants')) Club_Migrate_Exec('reset migrate_variants', 'drop table `migrate_variants`');

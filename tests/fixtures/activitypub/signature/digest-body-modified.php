@@ -1,7 +1,5 @@
 <?php
 
-/* 签名和 Digest 头彼此自洽，只有正文在路上被换掉了。签名验得过，正文却不是被签的那一份 —— Digest 是这一段唯一的把关。 */
-
 return [
     'source' => ['software' => 'generic', 'version' => 'cavage-12'],
     'seq' => 80,

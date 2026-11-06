@@ -1,12 +1,9 @@
 <?php
 
-// 三种队列各跑各的。维护要 glob 整个 logs/、还要按游标扫表，是全站一份的活，每个进程各跑一遍就是把同样的事做 N 遍；
-// 而投递和探活都会在系统 resolver 和 curl 上一卡十几秒，跟维护混在一起的话，持续的 backlog 会让维护永远轮不上。所以维护队列绝不碰 resolver、curl、endpoint 投递和黑名单探活
 function worker($type) {
     global $config;
     $now = time(); $worked = false;
     try {
-        // 长期进程要自己换天，rotate 也可能刚把当前这个文件清掉。ini_set 的作用范围是本进程，这条不能跟着类型一起跳过
         Club_Log_Sync_Error();
         switch ($type) {
             case 'maintain': $worked = worker_maintain($now, $config); break;
@@ -15,20 +12,15 @@ function worker($type) {
         }
         worker_idle($worked, $type);
     } finally {
-        // 这条任务到此为止，后面的汇总和下一轮都不算它的。汇总放这里是因为维护单元抛出的那一轮恰恰最该看见窗口计数，跟着异常一起丢掉的话，出事的那一分钟正好没有记录；
-        // 异常路径的节流由 worker_loop 负责，这里不再退避一次
         Club_Log_Ref('');
         Club_Stat_Flush();
     }
     if (($usage = memory_get_usage(1)) > 10 * 1024 * 1024) {
         global $stop; $stop = true;
-        // 退出后 master 会补一个回来，手上那条投递的租约到期由别人重领
         Club_Log_Console('error', 'memory limit exceeded, stopping', ['bytes' => $usage, 'pid' => getmypid()]);
     }
 }
 
-// 领不到活时的退避。几十个进程各自每秒查一遍数据库，光空转就是每秒上百条语句；抖动是为了它们别齐步走。投递退到 2 秒封顶，新活动最多等这么久；
-// 探活的 check_at 本来就是按天摊开的，慢半分钟没有任何影响，可以退得更狠
 function worker_idle($worked, $type) {
     static $step = 0, $wait = [50, 100, 200, 500, 1000, 2000, 5000, 15000, 30000];
     if ($worked) { $step = 0; return; }
@@ -43,17 +35,14 @@ function worker_delivery($category, $now) {
     return ($lease = Club_Endpoint_Claim($category, $now)) ? worker_endpoint($lease, $now) : false;
 }
 
-// 一条 endpoint 的完整投递。所有权在 DNS 之前就拿到了，出网之前还要再换一次 token：解析和 curl 各有超时但合起来没有上界，跨过 120 秒租约之后这条 endpoint 已经易主
 function worker_endpoint($lease, $now) {
     $url = $lease['url']; $token = $lease['token']; $category = $lease['category']; $start = microtime(true);
     if (!($task = Club_Endpoint_Queue($url, $token, $category, $now))) {
-        // 领取后的 token、退避、黑名单或 queue 已经变化，按当前状态重排后放手
         Club_Log_Event('debug', 'endpoint claim has no eligible queue', ['endpoint' => $url]);
         worker_finish('endpoint release', function () use ($url, $token) { Club_Endpoint_Release($url, $token); });
         Club_Stat('endpoint_ms', (int)((microtime(true) - $start) * 1000));
         return true;
     }
-    // worker 是长期进程，关联标记不像 web 那样每请求自动归零，每条任务都要重设。用队列行号，同一条投递的入队、重试、成功几行就能串起来
     Club_Log_Ref('queue#'.$task['id']);
     $active = $token;
     $result = ActivityPub_Push($task['target'], $task['club'], $task['jsonld'], function () use ($url, $task, $category, &$active) {
@@ -62,7 +51,6 @@ function worker_endpoint($lease, $now) {
             return true;
         });
     worker_finish('endpoint completion', function () use ($url, $active, $task, $result) {
-        // 首选出口可能已经发过请求，切到备用出口时又丢了租约；只能释放最后一次成功取得的 token。
         if ($result == 'lease-lost') Club_Endpoint_Release($url, $active);
         else Club_Endpoint_Result($url, $active, $task, $result);
     });
@@ -70,8 +58,7 @@ function worker_endpoint($lease, $now) {
     return true;
 }
 
-// HTTP 之后那段短事务的收尾。死锁重来一次就好，但重来的只有数据库这一段 —— 已经发出去的请求收不回来，绝不能跟着再发一次。
-// 重试到头也不能硬来：保留 queue 和租约，等它自然过期，由 at-least-once 重投兜底
+// Retry only the database write. The remote may have accepted the POST.
 function worker_finish($what, $run) {
     try { return Club_DB_Retry($what, $run); }
     catch (PDOException $e) {
@@ -80,12 +67,10 @@ function worker_finish($what, $run) {
     }
 }
 
-// 黑名单探活。跟投递同一套 token 协议：解析之后、出网之前换 token 并续租，失去所有权的旧 probe 不能再发请求
 function worker_probe($now) {
     if (!($lease = Club_Blacklist_Claim($now))) return false;
     $target = $lease['target']; $token = $lease['token'];
     if (!($club = Club_Group_Signer())) {
-        // 没有系统群组就签不了名，这次探活发不出去，别把 checks 记在对端头上
         worker_finish('probe defer', function () use ($target, $token) { Club_Blacklist_Defer($target, $token, 'no system club'); });
         return true;
     }
@@ -98,38 +83,25 @@ function worker_probe($now) {
         return true;
     });
     worker_finish('probe completion', function () use ($target, $active, $result) {
-        // 本站没能问到对端，只短推 check_at；代理连接失败时已过授权闸门，必须用换过的 token。
         if (in_array($result, ['local-dns', 'local-proxy', 'lease-lost'], true)) Club_Blacklist_Defer($target, $active, $result);
         else Club_Blacklist_Result($target, $active, $result == 'alive');
     });
-    // 只有总时长的话，看不出这批探活是真在问对端还是一直卡在本站 DNS 上，而这两种「慢」要加的是完全不同的东西
     Club_Stat('probe_'.$result);
     Club_Stat('probe_ms', (int)((microtime(true) - $start) * 1000));
     return true;
 }
 
-// 维护队列的一轮：按 deadline 轮转，每次最多做一个有界工作单元，做完立刻回来重新判。
-// 维护是全站一份的活，起了第二个 master 就得选一个来做，命名锁跟连接绑定，master 没了锁自然掉，落选的那个下一轮就接手，不需要外部编排。
-// 每轮都重新问一次而不是记住结果：worker_loop 撞上 PDOException 会重连，换了连接锁就不在手上了。timeout 传 0，拿不到立刻走，绝不能让连接挂在那儿等锁。
-// 锁名带库是因为命名锁在整个 MySQL 实例共享，同一台机器上的另一套部署不该被挤掉 —— migrate 那把锁只在合并期间存在，这把是长期持有的，撞上就是永久停摆。
-// 摘要在 PHP 这边算：锁名上限 64 字符而库名本身就能占满 64，拼上前缀直接越界，哈希则恒定 49 字符；用服务端的 md5() 还要看它脸色 —— FIPS 模式下那个函数返回 NULL，锁名会整个变成 NULL
 function worker_maintain($now, $config) {
     global $db;
     static $leader = null, $due = [], $cursor = 0;
     $pdo = $db->prepare('select get_lock(:lock, 0)');
     $pdo->execute([':lock' => 'wxwclub_maintain:'.md5($config['mysql']['database'])]);
     $lock = $pdo->fetch(PDO::FETCH_COLUMN, 0);
-    // 1 是拿到、0 是被别人拿着，NULL 是服务端出错。三者合并成 bool 的话，出错就伪装成正常待命：维护一直不跑，日志上却只有开头那一行 info。
-    // 交给 worker_loop 的数据库错误路径，那里本来就负责记错、探连接、退避一秒，比在这里另起一套状态机诚实
     if ($lock === null) throw new PDOException('maintenance lock returned null');
     $held = (bool)$lock;
-    // 初值是 null，所以进程起来的第一轮必写一行：待命的 master 什么也不做，没有这行就完全看不出它是在待命还是维护队列压根没起来。之后只有易主才写，不会跟着轮次刷
     if ($held !== $leader) Club_Log_Event('info', $held ? 'maintenance leader acquired' : 'maintenance standby, another master holds the lock', ['pid' => getmypid()]);
-    // 落选就退化成空转，由 worker_idle 退避到 2 秒再问一次，对面一挂这边最多 2 秒接手
     if (!$held) { $leader = false; return false; }
-    // 到期表和监控窗口都属于一次任期；旧 leader 再次接管时不能沿用待命前的时间，否则快照会把没有观测到的待命期算进窗口
     if ($leader !== true) { $due = []; Club_Monitor_Count(null); Club_Monitor_Snapshot(true); } $leader = true;
-    // 周期只在这里决定，具体工作不再各带一层节流，否则调度表写的是询问频率而不是实际执行频率
     $every = ['rotate' => 3600, 'reconcile' => 60, 'cleanup' => 30, 'dns' => 600, 'tasks' => 60, 'monitor' => 300];
     foreach ($every as $unit => $interval) if (!isset($due[$unit])) $due[$unit] = 0;
     $units = array_keys($every); $count = count($units);
@@ -144,14 +116,12 @@ function worker_maintain($now, $config) {
                     case 'rotate': Club_Log_Rotate($config['node']['log-retention'] ?? 30); break;
                     case 'monitor': Club_Monitor_Snapshot(); break;
                     case 'reconcile': Club_Endpoint_Sweep(); break;
-                    case 'cleanup': if (Club_Blacklist_Cleanup($batch = 500) >= $batch) $due[$unit] = $now; break;  // 删满一批说明可能还有 backlog，下轮继续或确认收尾
+                    case 'cleanup': if (Club_Blacklist_Cleanup($batch = 500) >= $batch) $due[$unit] = $now; break;
                     case 'dns': Club_Resolver_Cleanup(); break;
                     case 'tasks': if (worker_expire()) $due[$unit] = $now; break;
                 }
             });
         } catch (PDOException $e) {
-            // Club_DB_Retry 已经重试过了，还失败就不是瞬时争用。立刻重排的话，配上 worker_loop 的 1 秒退避就是同一行 ERROR 每秒刷一条。
-            // 取当前时间而不是进本轮时的 $now：锁等待本身可能已经烧掉几十秒，那样 $now + 5 早就是过去时，退避等于没加
             $due[$unit] = time() + 5;
             Club_Monitor_Count($unit.'_errors');
             Club_Log_Event('error', 'maintenance unit failed', ['unit' => $unit, 'error' => $e->getMessage()]);
@@ -168,13 +138,11 @@ function worker_maintain($now, $config) {
     return false;
 }
 
-// 过期清理。撤回提醒会新入队活动，所以它必须排在只认 queues 的 task 清理前面
 function worker_expire() {
     static $notice_pending = false;
     global $config;
     $notices = Club_Notice_Expire($config['notice']['retention'] ?? 30, 20, $notice_pending ? 0 : 600);
     $notice_pending = $notices;
-    // tasks 只认真实 queues 行，详细判据和批次上限收在同一个清理入口
     $tasks = Club_Task_Cleanup();
     return $notices || $tasks;
 }

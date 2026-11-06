@@ -1,7 +1,5 @@
 <?php
 
-/* (created) 还在窗口里，但对端自己声明的 (expires) 已经过去了。签了这一项就得认，它比本站的 300 秒更严。 */
-
 return [
     'source' => ['software' => 'generic', 'version' => 'cavage-12'],
     'seq' => 40,

@@ -1,9 +1,5 @@
 <?php
 
-/* endpoints 加四类最早到期提示，queues 带上 task.type 并按 target/type/due_at 建索引。type 冗余避免每投一行都 JOIN 并扫描同 endpoint 的整个 backlog；共享 lease_token 继续保证同一 inbox 只有一个请求在途。
- *
- * 存量 tasks.type 全是 push，按最低的 relay 消化，不为短期 backlog 重写 tasks。分类提示从 queues 分页重建，避免对百万行队列做一次无界 GROUP BY。 */
-
 function Club_Migrate_5() {
     global $db;
     $pdo = $db->query('select count(*) from `tasks` where char_length(`type`) > 8');

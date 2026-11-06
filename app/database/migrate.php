@@ -1,14 +1,7 @@
 <?php
 
-/* 数据库合并的执行框架。步骤本身在 app/database/steps/<版本号>.php 里，一个文件一个版本，函数名固定为 Club_Migrate_<版本号>()。
- * 加一次升级就是加一个文件加 DB_VERSION 加一，老库照样能从任何一个历史版本一路跑上来。
- *
- * 只有 worker 会走到这里，而且是在没有任何 web 请求和投递进程的时候：web 见到版本落后就整个入口挡住，worker 见到落后就先合并、合并完直接退出，由容器重启带起队列进程。
- *
- * DDL 会 implicit commit，中途崩了没有事务能回滚，所以不追求原子性，只追求可重入：每一小步都先问一次 information_schema，做过就跳过。
- * 库里没有 meta 表的一律当版本 0，从第一个步骤开始跑，靠这些判断逐个跳过它已经有的东西 —— 版本号只决定从哪里开始试，真正的依据永远是库当前长什么样 */
+// MySQL commits DDL implicitly. Each step must be safe to repeat.
 
-// 合并期间不能有第二个进程同时动结构。命名锁跟连接绑定，进程没了锁自然就掉，比在表里放一个要自己收拾的标志位可靠
 function Club_Migrate_Run() {
     global $db;
     $from = Club_DB_Version();
@@ -21,14 +14,12 @@ function Club_Migrate_Run() {
     }
     try {
         Club_Migrate_Ensure_Meta();
-        // 等锁期间别人可能刚合并完，重新读一次才算数
         $from = Club_DB_Version();
         Club_Migrate_Reject_Newer($from);
         for ($version = $from + 1; $version <= DB_VERSION; $version++) {
             $file = APP_ROOT.'/app/database/steps/'.$version.'.php';
             $step = 'Club_Migrate_'.$version;
             if (!is_file($file)) {
-                // 版本号和步骤文件对不上是部署问题，装了一半的代码继续跑更危险
                 Club_Log_Console('error', 'migration step is missing', ['version' => $version, 'file' => $file]);
                 throw new RuntimeException('Migration step '.$version.' is missing');
             }
@@ -49,7 +40,6 @@ function Club_Migrate_Run() {
     } finally {
         try { $db->query('select release_lock(\'wxwclub_migrate\')'); }
         catch (PDOException $e) {
-            // 命名锁随连接断开自动释放，这里的失败不该覆盖真正的合并结果
             Club_Log_Console('warning', 'migration lock release failed', ['error' => $e->getMessage()]);
         }
     }
@@ -97,7 +87,6 @@ function Club_Schema_Table($table) {
     return (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
 }
 
-// 列存不存在，以及它现在是什么类型和排序规则。URL 那几列改没改 collation 就是「规范化做过没有」的判据，旧库的 varchar(100) 也要靠 type 认出来
 function Club_Schema_Column($table, $column) {
     global $db;
     $pdo = $db->prepare('select `column_type`, `collation_name`, `is_nullable`, `column_default`, `extra` from `information_schema`.`columns`'.
@@ -105,7 +94,6 @@ function Club_Schema_Column($table, $column) {
     $pdo->execute([':table' => $table, ':column' => $column]);
     $row = $pdo->fetch(PDO::FETCH_NUM);
     if ($row === false) return false;
-    // MySQL 5.7 仍把整数显示宽度写进 column_type，8.0 则已经省略
     $type = preg_replace('/^(tinyint|smallint|mediumint|int|bigint)\([0-9]+\)/', '$1', strtolower($row[0]));
     return ['type' => $type, 'collation' => $row[1] === null ? null : strtolower($row[1]), 'nullable' => $row[2] === 'YES', 'default' => $row[3], 'extra' => strtolower($row[4])];
 }
@@ -122,7 +110,6 @@ function Club_Schema_Index($table, $index) {
     return ['unique' => !$rows[0][0], 'columns' => $columns];
 }
 
-// 外键名各版本不一样（activitys_ibfk_4 之类），按列反查才靠得住
 function Club_Schema_Foreign($table, $column) {
     $names = [];
     foreach (Club_Schema_Foreign_Info($table, $column) as $row) $names[] = $row['name'];
@@ -151,7 +138,6 @@ function Club_Schema_Referenced_By($table, $column) {
     return $rows;
 }
 
-// 一句 DDL 加一行日志。合并要跑多久、卡在哪一步，事后只能靠这些行还原
 function Club_Migrate_Exec($what, $sql) {
     global $db; $start = microtime(true);
     Club_Log_Console('info', 'migration step', ['step' => $what]);
@@ -159,7 +145,6 @@ function Club_Migrate_Exec($what, $sql) {
     Club_Log_Console('info', 'migration step done', ['step' => $what, 'seconds' => round(microtime(true) - $start, 1)]);
 }
 
-// 一步要跑好几条语句、或者跑的根本不是 DDL 时用它包一层，日志跟 Club_Migrate_Exec 同形
 function Club_Migrate_Step($what, $run) {
     $start = microtime(true);
     Club_Log_Console('info', 'migration step', ['step' => $what]);
@@ -168,7 +153,6 @@ function Club_Migrate_Step($what, $run) {
     return $result;
 }
 
-// 只删存在的索引。历史版本的索引集各不相同，写死名字的 DROP KEY 一撞就整步失败
 function Club_Migrate_DropKeys($table, $keys) {
     $drop = [];
     foreach ((array)$keys as $key) if (Club_Schema_Index($table, $key)) $drop[] = 'drop key `'.$key.'`';
@@ -177,7 +161,6 @@ function Club_Migrate_DropKeys($table, $keys) {
     return true;
 }
 
-// 只加缺的索引，已经在的按 unique 与否判断要不要重建
 function Club_Migrate_AddKeys($table, $keys) {
     $add = [];
     foreach ($keys as $name => $spec) {
@@ -237,7 +220,6 @@ function Club_Migrate_Ensure_Foreign($table, $column, $name, $referencedTable, $
     return true;
 }
 
-// 旧的有符号列进 unsigned 之前先看一眼。抬到 0 是有损的，不能不吭声
 function Club_Migrate_Negative($table, $columns) {
     global $db;
     $where = [];
@@ -247,7 +229,6 @@ function Club_Migrate_Negative($table, $columns) {
     return $rows;
 }
 
-// datetime 存的是本地时间文本，int 存的是 epoch，直接 MODIFY 会得到 20260805120000 这样的数字。只能新开一列、UNIX_TIMESTAMP() 转过去，再把旧列删掉
 function Club_Migrate_Datetime($table, $from, $to) {
     if (!Club_Schema_Column($table, $from)) return false;
     if (!Club_Schema_Column($table, $to)) Club_Migrate_Exec($table.' add '.$to, 'alter table `'.$table.'` add `'.$to.'` int not null default 0 after `'.$from.'`');

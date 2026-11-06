@@ -164,7 +164,6 @@ CREATE TABLE `meta` (
   PRIMARY KEY (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
--- 结构版本。与代码里的 DB_VERSION 不相等时 web 全挡；只允许 worker 向前合并
 INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '5');
 
 INSERT INTO `clubs` (`cid`, `name`, `public_key`, `private_key`, `timestamp`) VALUES (1, 'test', '', '', 1666972800);

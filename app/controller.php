@@ -24,16 +24,13 @@ function controller() {
                 if (isset($uri[3])) switch ($uri[3]) {
                     case 'inbox':
                         if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Receive($club);
-                        // actor 里 inbox 是公开地址，抓取方跟过来时得拿到能解析的集合，不能是空响应体
                         else ActivityPub_Collection($club_url.'/inbox'); break;
 
                     case 'outbox':
                         if (isset($_GET['page'])) {
-                            // 游标分页，page 只表示「这是一页」，方向由 max / min 决定
                             $tail = ($_GET['page'] ?? '') === 'last';
                             $max = Club_HTTP_Cursor($_GET['max'] ?? '');
                             $min = Club_HTTP_Cursor($_GET['min'] ?? '');
-                            // 往新翻要先升序取够再倒回来，页内顺序始终是新到旧
                             $asc = $tail || $min;
                             $where = ''; $params = [':club' => $club];
                             if ($max) {
@@ -43,7 +40,6 @@ function controller() {
                                 $where = ' and a.timestamp >= :ts and (a.timestamp > :ts or a.id > :id)';
                                 $params[':ts'] = $min[0]; $params[':id'] = $min[1];
                             }
-                            // 排序键取自 announces 才能吃到 (cid,timestamp) 索引，换成 b.timestamp 会 filesort
                             $pdo = $db->prepare('select a.id, a.timestamp, a.activity, u.actor, b.object, b.timestamp as `announced`'.
                             ' from `announces` `a` join `clubs` `c` on a.cid = c.cid left join `users` `u` on a.uid = u.uid left join `activities` `b` on a.activity = b.id'.
                             ' where c.name = :club'.$where.' order by a.timestamp '.($asc ? 'asc' : 'desc').', a.id '.($asc ? 'asc' : 'desc').' limit 20');
@@ -57,7 +53,6 @@ function controller() {
                             $arr = ['@context' => 'https://www.w3.org/ns/activitystreams', 'id' => $self, 'type' => 'OrderedCollectionPage', 'partOf' => $club_url.'/outbox', 'orderedItems' => []];
                             if ($rows) {
                                 $head = $rows[0]; $foot = $rows[count($rows) - 1];
-                                // 取满一页才给 next，抓取方据此判断到底了
                                 if (!$tail && count($rows) == 20) $arr['next'] = $club_url.'/outbox?page=true&max='.$foot['timestamp'].'.'.$foot['id'];
                                 $arr['prev'] = $club_url.'/outbox?page=true&min='.$head['timestamp'].'.'.$head['id'];
                             }
@@ -95,9 +90,7 @@ function controller() {
                         } break;
                     default: Club_HTTP_Respond(['message' => 'Error: Route Not Found!'], 'json', 404); break;
                 } else {
-                    // 系统群组没有主页，浏览器访问也只给 actor
                     $actor = Club_Group_Actor($club, $pdo);
-                    // 同一个 URL 有 HTML 和 AP 两份表示，不发 Vary 的话缓存会把先取到的那份原样喂给另一种客户端
                     header('Vary: Accept');
                     if ($system || Club_HTTP_Accept_ActivityPub($_SERVER['HTTP_ACCEPT'] ?? '')) Club_HTTP_Respond($actor, 'activity+json');
                     else Club_Template_Render('profile', ['club' => $club, 'nickname' => $actor['name'], 'summary' => $actor['summary'], 'row' => $pdo]);
@@ -137,7 +130,6 @@ function controller() {
             ]); break;
 
         case 'webfinger':
-            // ?resource[]=x 这种数组参数直接当空处理，否则 preg_match 会收到数组报错
             $resource = is_scalar($_GET['resource'] ?? null) ? (string)$_GET['resource'] : '';
             Club_Log_Write('debug', 'webfinger', [$resource], $_SERVER);
             $resource_identifier = ActivityPub_WebFinger_Resource($resource, $base, $config['base']);
@@ -149,7 +141,6 @@ function controller() {
                 break;
             }
 
-            // 系统群组也要应答，对端验签时会拿 keyId 反查 WebFinger，404 会让私信被回 401；不进目录靠 actor 的 discoverable = false，不靠这里藏
             if ($club = Club_Group_Ensure($resource_identifier)) {
                 $club_url = $base.'/club/'.$club;
                 Club_HTTP_Respond([

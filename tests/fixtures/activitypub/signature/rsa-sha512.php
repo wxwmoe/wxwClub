@@ -1,7 +1,5 @@
 <?php
 
-/* rsa-sha512：算法名和真正用的摘要必须一起换，签名串本身跟 rsa-sha256 的形状完全一样。 */
-
 return [
     'source' => ['software' => 'generic', 'version' => 'cavage-12'],
     'seq' => 20,

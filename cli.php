@@ -18,11 +18,9 @@ declare(ticks = 1);
 
 function shutdown() {
     global $stop; $stop = true;
-    // master 和几个子进程都会各记一行，看的就是谁还没收到
     Club_Log_Console('info', 'shutdown requested, finishing current task', ['pid' => getmypid()]);
 };
 
-// 子进程的去向：正常退出记 code，被信号带走记 signal，9 多半是宽限期不够被强杀的。补进程和关停收尾两处都要记，抄两遍迟早漏一处
 function worker_reaped($slot, $pid, $status) {
     global $slots;
     if (pcntl_wifsignaled($status)) {
@@ -36,19 +34,14 @@ function worker_reaped($slot, $pid, $status) {
     Club_Log_Console($level, 'worker exited', ['slot' => $slot, 'type' => $slots[$slot] ?? '?', 'pid' => $pid, 'status' => $result]);
 }
 
-// 一个 worker 的主循环。多进程模式下这就是子进程的全部工作，declare(ticks) 是文件作用域的，循环留在这个文件里信号才收得到
 function worker_loop($type) {
     global $stop, $db;
-    // 在第一条任务开始前打开统计窗口；否则首条慢请求刚结束就停机时，force flush 只能看到一秒窗口，busy_ratio 和吞吐率都会被夸大。
     Club_Stat_Flush();
     while (!$stop) {
         try { worker($type); }
-        // 只 echo 到 stdout 的话，进程被托管起来跑时这些报错等于没有
         catch (PDOException $e) {
-            // 多进程抢同一张队列表，偶尔会撞出死锁，重来一次就好；连成片才是真出事了
             Club_Log_Console('error', 'database error', ['error' => $e->getMessage(), 'pid' => getmypid()]);
             Club_Stat('db_retries');
-            // 连接断了就重连。长期进程握着一个失效的 PDO 只会每秒重复报同一行错，而队列那边看起来只是没人在投递
             try { if ($db) $db->query('select 1'); else Club_DB_Connect(); }
             catch (PDOException $lost) {
                 try {
@@ -61,7 +54,6 @@ function worker_loop($type) {
             sleep(1);
         }
     }
-    // 退出前把这一窗口攒下的计数写出去，不然最后一段时间等于没有记录
     Club_Stat_Flush(true);
 }
 
@@ -129,7 +121,6 @@ function cli_time($timestamp, $never = false) {
     return date('Y-m-d H:i:s', (int)$timestamp);
 }
 
-// LIKE 只负责缩小候选，最后必须按 URL 解析出的 host 精确比较；否则 example.com 会误中 notexample.com，甚至 path/query 里的同名字符串。
 function cli_targets($input, $source) {
     global $db;
     if (($target = Club_Endpoint_Normalize($input)) !== false) return [$target];
@@ -159,14 +150,12 @@ function cli_user($input) {
         return $pdo->fetch(PDO::FETCH_ASSOC) ?: null;
     }
     $name = ltrim($input, '@');
-    // 确认过的那行拥有这个 handle：域名的 WebFinger 答复说了算，而 Club_Actor_Confirm 会把别人对同一个 handle 的旧声明置 0。一个确认过的都没有才是真歧义
     $pdo = $db->prepare('select * from `users` where `name` = :name order by `webfinger` desc, `uid` limit 2'); $pdo->execute([':name' => $name]);
     $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
     if (count($rows) > 1 && !(int)$rows[0]['webfinger']) throw new RuntimeException('more than one cached actor uses this handle; pass the actor URL');
     return $rows ? $rows[0] : null;
 }
 
-// 某个 host 名下的所有 uid。按主键翻页，在 PHP 里按 URL 解析出的 host 精确比 —— users 没有 host 列，而 like 会误中端口、大小写和路径里的同名子串
 function cli_host_uids($host) {
     global $db; $uids = []; $cursor = 0;
     $pdo = $db->prepare('select `uid`, `actor` from `users` where `uid` > :cursor order by `uid` limit 500');
@@ -181,7 +170,6 @@ function cli_host_uids($host) {
     return $uids;
 }
 
-// 这批 uid 名下各有多少派生行。删除前要看的就是这几个数，因为它们都跟着外键一起走
 function cli_user_counts($uids) {
     global $db;
     $counts = ['users' => count($uids), 'followers' => 0, 'activities' => 0, 'announces' => 0, 'notices' => 0];
@@ -197,7 +185,6 @@ function cli_user_line($counts) {
     return 'Cascades to '.$counts['followers'].' follow(s), '.$counts['activities'].' activity(ies), '.$counts['announces'].' announce(s), '.$counts['notices'].' notice(s).';
 }
 
-// --club 收逗号分隔的群组名。null 是没给（全站），false 是给了但里面有本站没有的群组 —— 打错一个字就该报错，而不是悄悄封了个不存在的范围
 function cli_ban_clubs($input) {
     global $db;
     if (!isset($input)) return null;
@@ -210,7 +197,6 @@ function cli_ban_clubs($input) {
     return count($found = $pdo->fetchAll(PDO::FETCH_COLUMN, 0)) === count($clubs) ? $found : false;
 }
 
-// 封禁目标。handle 先走 WebFinger 解析成 actor URL —— 那是本站的身份键，handle 只是它此刻的标签。导入时 $resolve 关掉：一份上万行的名单不能每行出一次网
 function cli_ban_target($input, $resolve = true) {
     $input = trim((string)$input);
     if (strpos($input, '@') !== false) {
@@ -296,7 +282,6 @@ function cli_manage($resource, $action, $args) {
     if ($resource === 'user' && $action === 'fetch') {
         if (count($args) !== 1) return cli_error('usage: php cli.php user fetch <handle|actor-url>');
         if (!($actor = Club_Actor_Resolve($args[0]))) return cli_error('could not resolve actor');
-        // 强制确认：拉取那边平时只在首次落库或自称的 handle 和库里不一样时才问 WebFinger，而手工点名一个 actor 时要的就是「现在到底归谁」
         if (!($user = Club_Actor_Fetch($actor, $document, true))) return cli_error('could not fetch actor');
         $pdo = $db->prepare('select * from `users` where `uid` = :uid'); $pdo->execute([':uid' => $user['uid']]); $user = $pdo->fetch(PDO::FETCH_ASSOC);
         $data = ['uid' => (int)$user['uid'], 'name' => $user['name'], 'actor' => $user['actor'], 'inbox' => $user['inbox'], 'shared_inbox' => $user['shared_inbox'],
@@ -323,8 +308,6 @@ function cli_manage($resource, $action, $args) {
         return 0;
     }
 
-    // 补确认还没确认过的行。拉取那边只在这些行自己再次露面时才顺手补，一个不发帖也不换密钥的关注者可以一直不露面，这条命令是唯一主动的入口。
-    // 每行都是一次 actor 拉取加一次 WebFinger，所以出站量由 --limit 封顶，剩下的报个续跑命令 —— 全站一次跑完会在别人的日志里堆成一场扫描
     if ($resource === 'user' && $action === 'confirm') {
         $limit = (int)cli_option($args, '--limit', 50); $after = cli_option($args, '--after');
         if ($args || $limit < 1 || $limit > 200 || (isset($after) && (!ctype_digit((string)$after) || (int)$after < 1)))
@@ -332,7 +315,6 @@ function cli_manage($resource, $action, $args) {
         $pdo = $db->prepare('select `uid`,`actor` from `users` where `webfinger` = 0 and `uid` > :cursor order by `uid` limit '.($limit + 1));
         $pdo->execute([':cursor' => $cursor = isset($after) ? (int)$after : 0]); $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
         $more = count($rows) > $limit; if ($more) array_pop($rows);
-        // 确认成功与否只有库里那一列算数：拉取回来的行是确认之前读的，而确认失败的原因 Club_Actor_Confirm 自己逐条记了
         $read = $db->prepare('select `name`,`webfinger` from `users` where `uid` = :uid');
         $items = []; $confirmed = 0;
         foreach ($rows as $row) {
@@ -341,9 +323,6 @@ function cli_manage($resource, $action, $args) {
             $ok = $user && (int)$user['webfinger'] !== 0; $confirmed += $ok ? 1 : 0;
             $items[] = ['uid' => (int)$row['uid'], 'actor' => $row['actor'], 'handle' => $user ? $user['name'] : '-', 'confirmed' => $ok ? 'yes' : 'no'];
         }
-        // 待办集合会在跑的过程中长回来：确认一行会把别人对同一 handle 的旧声明置 0（Club_Actor_Confirm），那一行的 uid 完全可能比游标小。
-        // 所以「这一页之后没有了」不等于「全站没有了」，最后一页单独数一次整张表，否则它会报成跑完，而游标之后的 --after 永远够不到它们。
-        // 只有最后一页数：webfinger 上没有索引，每页数一次就是页数乘全表，而中间页有 $more 就够说明还得继续
         $last = $items ? $items[count($items) - 1]['uid'] : $cursor;
         $next = $more ? $last : null;
         $pending = $more ? null : (int)$db->query('select count(*) from `users` where `webfinger` = 0')->fetchColumn();
@@ -361,8 +340,6 @@ function cli_manage($resource, $action, $args) {
         if (count($args) !== 1 || $clubs === false) return cli_error('usage: php cli.php ban add <handle|actor-url|host> [--club CLUB,CLUB] [--reason TEXT] [--yes]');
         if (!($ban = cli_ban_target($args[0]))) return cli_error('could not read a target actor or host from '.$args[0]);
         list($type, $target) = $ban;
-        // 预览要按「执行之后的作用域」来数：Club_Ban_Add 会跟库里已有的取并集，只按这次传的 --club 数的话，
-        // 原本封了 test 的目标再来一条 --club other，预览只报 other 那一份，执行却把两个群组的关注都解除
         $pdo = $db->prepare('select `clubs` from `bans` where `target` = :target');
         $pdo->execute([':target' => $target]);
         $effective = ($old = $pdo->fetch(PDO::FETCH_COLUMN, 0)) === false ? $clubs
@@ -384,7 +361,6 @@ function cli_manage($resource, $action, $args) {
         $clubs = cli_ban_clubs(cli_option($args, '--club'));
         if (count($args) !== 1 || $clubs === false) return cli_error('usage: php cli.php ban remove <handle|actor-url|host> [--club CLUB,CLUB]');
         if (!($ban = cli_ban_target($args[0]))) return cli_error('could not read a target actor or host from '.$args[0]);
-        // 解封不重建关注关系：本站没有原始 Follow，伪造不了 Accept，对方要回来得自己再关注一次
         $state = Club_Ban_Remove($ban[1], $clubs);
         if ($state === 'absent') return cli_error('target is not banned', 2);
         if ($state === 'site-wide') return cli_error($ban[1].' is banned across every club; lift the whole ban and add it back per club', 2);
@@ -400,8 +376,6 @@ function cli_manage($resource, $action, $args) {
         if ($args || $limit < 1 || $limit > 200 || (isset($type) && !in_array($type, ['actor', 'host'], true)))
             return cli_error('usage: php cli.php ban list [--type actor|host] [--club CLUB] [--limit 50]');
         $where = isset($type) ? ' where `type` = :type' : '';
-        // 作用域是一列 JSON，过滤只能在 PHP 这边做，所以按群组筛时不能先 limit 再筛 —— 最新的那 limit 条要是都不属于这个群组，更旧的匹配项根本读不到，结果会假装是空的。
-        // 不筛群组时照旧交给 SQL 限量；筛群组时整张表读进来再切，bans 是运维规模的表，一条手动命令不值得为它加索引或者拿 like 去猜 JSON 的形状
         $pdo = $db->prepare('select `target`, `type`, `clubs`, `reason`, `timestamp` from `bans`'.$where.' order by `timestamp` desc, `target`'.(isset($club) ? '' : ' limit '.$limit));
         $pdo->execute(isset($type) ? [':type' => $type] : []); $rows = [];
         foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $row) {
@@ -415,12 +389,9 @@ function cli_manage($resource, $action, $args) {
         return 0;
     }
 
-    // 导出的就是导入认得的那份 CSV，两边同一组列，来回一趟不丢东西。写到 stdout，落盘交给 shell 的重定向
     if ($resource === 'ban' && $action === 'export') {
         if ($args) return cli_error('usage: php cli.php ban export > bans.csv');
         $pdo = $db->query('select `target`, `type`, `clubs`, `reason` from `bans` order by `target` collate ascii_bin');
-        // 四个参数都显式传：8.4 起省掉 $escape 会发 Deprecated，而这条命令的 stdout 就是文件本身，任何一行提示都会混进 CSV，导入时读到的表头就成了那句提示。
-        // escape 保持 PHP 的默认反斜杠而不是空串 —— 空串要 7.4 才认，而这个仓库的语法下限是 7.3
         $out = fopen('php://output', 'w');
         fputcsv($out, ['target', 'type', 'clubs', 'reason'], ',', '"', '\\');
         foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $row)
@@ -429,13 +400,11 @@ function cli_manage($resource, $action, $args) {
         return 0;
     }
 
-    // 导入。domain 列当 target 的别名，社区里流传的那些封禁名单就能直接喂进来；已经在库里的靠 Club_Ban_Add 的并集收敛，不会把已有的作用域缩小
     if ($resource === 'ban' && $action === 'import') {
         $yes = cli_flag($args, '--yes');
         if (count($args) !== 1) return cli_error('usage: php cli.php ban import <file.csv> [--yes]');
         if (!is_readable($args[0]) || !($in = fopen($args[0], 'r'))) return cli_error('cannot read '.$args[0]);
         if (!($head = fgetcsv($in, 0, ',', '"', '\\'))) return cli_error('the file has no header row');
-        // 空单元格在 fgetcsv 里是 null，直接 trim 在 8.4 上是一条 Deprecated
         $head = array_flip(array_map('strtolower', array_map('trim', array_map('strval', $head))));
         $column = isset($head['target']) ? $head['target'] : (isset($head['domain']) ? $head['domain'] : null);
         if (!isset($column)) return cli_error('the header needs a target or domain column');
@@ -443,22 +412,16 @@ function cli_manage($resource, $action, $args) {
         while (($line = fgetcsv($in, 0, ',', '"', '\\')) !== false) {
             if (count($rows) >= $cap) { fclose($in); return cli_error('refusing to import more than '.$cap.' rows in one run'); }
             if (!isset($line[$column]) || trim($line[$column]) === '') continue;
-            // 目标的形状说了算，CSV 里那一列 type 只是记录：带 scheme 的值不会因为那里写着 host 就变成 host
             if (!($ban = cli_ban_target($line[$column], false))) { $invalid++; continue; }
-            // 空的 clubs 格就是「全站」，那正是导出写出来的形状；当成错误的话，导出再导入会把所有全站封禁判成无效跳过，往返直接丢一大半
             $cell = isset($head['clubs']) && isset($line[$head['clubs']]) ? trim($line[$head['clubs']]) : '';
             $scope = $cell === '' ? null : cli_ban_clubs($cell);
             if ($scope === false) { $invalid++; continue; }
             $reason = isset($head['reason']) && isset($line[$head['reason']]) ? trim($line[$head['reason']]) : '';
             if ($reason === '' && isset($head['public_comment']) && isset($line[$head['public_comment']])) $reason = trim($line[$head['public_comment']]);
-            // 同一个 target 在文件里出现多次是合并不是覆盖，否则前面几行的作用域和理由会被最后一行悄悄吃掉
-            // reason 那列是 255 个字符不是 255 字节，但截断不走 mbstring：全仓库别处都用 preg 的 /u 数字符，把 CLI 跑在容器外时扩展集不由 Dockerfile 说了算。
-            // 不是合法 UTF-8 时退回按字节截，那种值本来也写不进 utf8mb4 的列
             $key = $ban[1];
             if ($reason === '') $reason = null;
             elseif (preg_match('/^.{0,255}/us', $reason, $cut)) $reason = $cut[0];
             else $reason = substr($reason, 0, 255);
-            // 空的理由格是「这份名单没说」，不是「把原来那条清掉」
             if (isset($rows[$key])) { $scope = Club_Ban_Scope($rows[$key][2], $scope); $reason = isset($rows[$key][3]) ? $rows[$key][3] : $reason; }
             $rows[$key] = [$ban[1], $ban[0], $scope, $reason];
         }
@@ -469,10 +432,7 @@ function cli_manage($resource, $action, $args) {
             $seen->execute([':target' => $row[0]]);
             $old = $seen->fetch(PDO::FETCH_COLUMN, 0);
             if ($old === false) $added++;
-            // 已经在库里的也要进扫描：执行时 Club_Ban_Add 会把作用域取并集，扩大之后照样解除关注关系。
-            // 预览要是跳过它们就会报「Matched 0 follow(s)」而实际删掉一批 —— 预览和执行必须扫同一批、用同一个合并后的作用域
             else { $existing++; $row[2] = Club_Ban_Scope(isset($old) ? (json_decode($old, 1) ?: []) : null, $row[2]); }
-            // 同类型同作用域的归成一组，整组一次扫描：一个目标扫一遍 users 的话，一份上万条的名单就是上万遍全表
             $groups[$row[1].'|'.(isset($row[2]) ? implode(',', $row[2]) : '*')][] = $row[0];
         }
         $follows = 0;
@@ -485,7 +445,6 @@ function cli_manage($resource, $action, $args) {
                 ['Would add '.$added.' ban(s), '.$existing.' already present, '.$invalid.' unusable row(s).', 'Matched '.$follows.' follow(s) to drop.', 'Run again with --yes to apply.']);
             return 0;
         }
-        // 已经在库里的也过一遍 Club_Ban_Add：作用域取并集，导入一份群组名单不会把原来的全站封禁悄悄缩小
         foreach ($rows as $row) Club_Ban_Add($row[0], $row[1], $row[2], $row[3]);
         Club_Log_Event('info', 'bans imported by cli', ['added' => $added, 'existing' => $existing, 'invalid' => $invalid, 'follows dropped' => $follows]);
         cli_emit(['added' => $added, 'existing' => $existing, 'invalid' => $invalid, 'follows_dropped' => $follows],
@@ -503,10 +462,6 @@ function cli_manage($resource, $action, $args) {
                 ['Would delete '.$user['actor'].'.', cli_user_line($counts), 'Run again with --yes to apply.']);
             return 0;
         }
-        // 级联带走 followers / activities / announces / notices。不往外发任何东西：本站没有对端签名的 Delete 可转，
-        // 而逐条给历史投稿补发 Undo 是「投稿数 × 群组数」条活动，为一个手工删除的账号不值。
-        // delete 自己就是这行 users 上的排他锁，而且是这个事务的第一件事，锁契约照旧
-        // 数和删放同一个事务里，报的才是这次真删掉的东西：并发的 user cleanup 或者另一条同样的命令可能已经先把它收走了
         $counts = Club_DB_Transaction('user delete', function () use ($db, $user) {
             $counts = cli_user_counts([(int)$user['uid']]);
             $pdo = $db->prepare('delete from `users` where `uid` = :uid');
@@ -533,7 +488,6 @@ function cli_manage($resource, $action, $args) {
         }
         $data['endpoints'] = count(cli_targets($host, 'endpoints'));
         $data['blacklisted'] = count(cli_targets($host, 'blacklist'));
-        // 只报这个 host 自己那条封禁；它名下某个 actor 单独被封不算在这里，那要 ban list 去看
         $data['banned'] = $ban === false ? '-' : (isset($ban[0]) ? implode(',', json_decode($ban[0], 1) ?: []) : '*');
         cli_emit($data, ['host:        '.$host, 'users:       '.$data['users'], 'followers:   '.$data['followers'], 'activities:  '.$data['activities'],
             'announces:   '.$data['announces'], 'notices:     '.$data['notices'], 'queues:      '.$data['queues'], 'endpoints:   '.$data['endpoints'],
@@ -552,15 +506,9 @@ function cli_manage($resource, $action, $args) {
                 ['Would delete every cached user on '.$host.'.', cli_user_line($counts), 'Run again with --yes to apply.']);
             return $uids ? 0 : 2;
         }
-        // 一家大实例的 users 不能压成一笔大事务：每批 100 行独立提交，级联的 activities 和 announces 跟着这一批走。
-        // 删完再扫一遍，扫到空为止：这中间对端还可以让本站缓存出这个 host 的新用户 —— 封禁挡不住那一步，验签为了取公钥就会建行 ——
-        // 照一份快照删完就报成功，等于把那几行漏在库里还说清干净了。轮数封顶，免得一家正在活跃投递的实例把这条命令永远拖住；
-        // 没收敛就照实说还剩几行、退出码给 2，让人再跑一次而不是以为完事了。封禁本身不受影响，它按 target 存、跟 users 没有外键
         $totals = ['users' => 0, 'followers' => 0, 'activities' => 0, 'announces' => 0, 'notices' => 0]; $pass = 0;
         while ($uids && ++$pass <= 10) {
             foreach (array_chunk($uids, 100) as $chunk) {
-                // 数在删的同一个事务里、紧挨着 delete，报的是这次真删掉的行数而不是扫描时看到的：维护队列的 Club_Actor_Cleanup 一直在删没关注没动态的行，
-                // 拿快照当账报，撞上它就会虚报。被别人先删掉的那几行连同派生行一起没了，这里数出来就是 0，级联那几项跟着自洽
                 $batch = Club_DB_Transaction('host delete', function () use ($db, $chunk) {
                     $counts = cli_user_counts($chunk);
                     $counts['users'] = (int)$db->exec('delete from `users` where `uid` in ('.implode(',', $chunk).')');
@@ -573,7 +521,6 @@ function cli_manage($resource, $action, $args) {
         Club_Log_Event($uids ? 'warning' : 'info', 'host deleted by cli', array_merge(['host' => $host, 'passes' => $pass, 'left' => count($uids)], $totals));
         $lines = ['Deleted '.$totals['users'].' cached user(s) on '.$host.' in '.$pass.' pass(es).', cli_user_line($totals)];
         if ($uids) $lines[] = count($uids).' more were cached while this ran; run it again.';
-        // 被封的实例照样会冒出新行：验签为了取公钥就会建一条，封禁是在那之后才拦的。不说明的话，人会以为这条命令没生效而反复重跑
         $pdo = $db->prepare('select 1 from `bans` where `target` = :host');
         $pdo->execute([':host' => $host]);
         if ($pdo->fetch(PDO::FETCH_COLUMN, 0)) $lines[] = $host.' is banned, so verifying its signatures still caches keys here; those rows carry no follows and user cleanup reaps them.';
@@ -716,8 +663,6 @@ switch ($argv[1]) {
         catch (InvalidArgumentException $e) { exit(cli_error($e->getMessage())); }
         catch (RuntimeException $e) { exit(cli_error($e->getMessage())); }
     case 'worker':
-        // 库里的结构与这份代码不一致时，先进入结构合并闸门。合并期间 web 那边整个入口是 503，这里也不能起队列进程 —— 半新半旧的结构下投递会写出对不上的行。
-        // 合并完直接退出，让容器按 restart 策略把正常的队列进程带起来
         try { $version = Club_DB_Version(); }
         catch (Throwable $e) {
             Club_Log_Console('error', 'database schema check failed', ['error' => $e->getMessage(), 'pid' => getmypid()]);
@@ -725,7 +670,6 @@ switch ($argv[1]) {
         }
         if ($version !== DB_VERSION) {
             require_once(APP_ROOT.'/app/database/migrate.php');
-            // 合并中途崩了没有事务能回滚，但每一步都会先问一次 information_schema，重启后接着跑不会把已经合并好的部分改坏。这里只负责把原因记下来
             try { $version = Club_Migrate_Run(); }
             catch (Throwable $e) {
                 Club_Log_Console('error', 'database merge failed', ['error' => $e->getMessage(), 'pid' => getmypid()]);
@@ -738,8 +682,6 @@ switch ($argv[1]) {
             Club_Log_Console('info', 'database merged, exiting for restart', ['schema' => $version]);
             break;
         }
-        // 维护是全站一份的活，多开只是把同样的事做 N 遍，所以固定一个、不作配置；起了第二个 master 时它们之间靠命名锁选出一个真正干活，见 worker_maintain。
-        // 投递和探活都靠 token 租约互斥，加进程就是加并发，队列逻辑一行都不用改
         $slots = ['maintain.0' => 'maintain'];
         foreach (Club_Config_Delivery_Workers() as $type => $n) for ($i = 0; $i < $n; $i++) $slots[$type.'.'.$i] = $type;
         for ($i = 0, $n = (int)($config['worker']['probe'] ?? 1); $i < $n; $i++) $slots['probe.'.$i] = 'probe';
@@ -747,22 +689,18 @@ switch ($argv[1]) {
             Club_Log_Console('error', 'worker unavailable, ext-pcntl missing');
             exit(1);
         }
-        // 停止时要靠它把 SIGTERM 转发给子进程（docker stop 只发给 master）。缺了的话直到关停那一刻才发作，子进程会变成谁也收不到通知的孤儿，先拦下来
         if (!function_exists('posix_kill')) {
             Club_Log_Console('error', 'worker unavailable, ext-posix missing');
             exit(1);
         }
         pcntl_signal(SIGINT, 'shutdown');
         pcntl_signal(SIGTERM, 'shutdown');
-        // master 只管 fork 和收尸，先把 bootstrap 建的连接关掉：带着连接 fork 的话父子共享同一个 socket，谁先断开都会把别人的一起带走
+        // Forking with an open PDO connection would share the MySQL socket.
         $db = null;
-        // 挪在 master started 之前，那一行是这次运行的起点标记，但不保证是文件第一行：debug 下 shift 自己的早退记录、切分失败的 warning 都排在它前面，级别低于 info 时它压根不落盘
         Club_Log_Shift();
         Club_Log_Console('info', 'master started', ['slots' => array_count_values($slots), 'pid' => getmypid()]);
-        // 进了黑名单的对端只有探活能把它捞回来，一个都不开就是永久拉黑。
-        // 放在切分之后：它说的是刚起来的这个 master，写在前面就会被稳定地归档进上一段，而 warning 级别下 master started 不写，当天的 .log 那时还没生成，tail 也就看不到这条
         if (!in_array('probe', $slots, true)) Club_Log_Console('warning', 'no probe process configured, blacklisted endpoints will never be restored');
-        $children = [];     // pid => 槽位，槽位空出来就补一个回去
+        $children = [];
         while (!$stop) {
             $taken = array_flip($children);
             foreach ($slots as $slot => $type) {
@@ -772,18 +710,14 @@ switch ($argv[1]) {
                     Club_Log_Console('error', 'fork failed, will retry', ['slot' => $slot]); sleep(1); break;
                 }
                 if ($pid === 0) {
-                    // 子进程：继承来的名单是父进程的，留着会拿它去 kill 别人的兄弟
                     $children = []; Club_DB_Connect();
-                    // 类型加序号：pid 每次重启都变，按这个名字才对得上是哪个位置
                     Club_Worker_Slot($slot);
                     worker_loop($type); exit(0);
                 }
                 $children[$pid] = $slot; $taken[$slot] = $pid;
                 Club_Log_Console('info', 'worker started', ['slot' => $slot, 'type' => $type, 'pid' => $pid]);
             }
-            // 不用阻塞版的 wait：SIGTERM 在它进去之后才到的话，得等到有子进程退出才醒得过来，而 docker stop 只给 10 秒。sleep 会被信号打断
             if (($pid = pcntl_wait($status, WNOHANG)) > 0) {
-                // 内存超限自杀、或者崩溃，都在这里补回去，不用整个容器重启
                 worker_reaped($children[$pid] ?? '?', $pid, $status);
                 unset($children[$pid]);
             } elseif (!$stop) sleep(1);
@@ -791,14 +725,12 @@ switch ($argv[1]) {
         if ($children) {
             Club_Log_Console('info', 'stopping workers', ['jobs' => count($children)]);
             foreach (array_keys($children) as $pid) posix_kill($pid, SIGTERM);
-            // 子进程要跑完手上那条投递才退。宽限期不够被 SIGKILL 也不丢任务，它握着的租约 120 秒后自然过期，别人重新领走就是；那之后旧进程就算复活也拿不到出网权，token 已经不是它的了
             while ($children && ($pid = pcntl_wait($status)) > 0) {
                 worker_reaped($children[$pid] ?? '?', $pid, $status);
                 unset($children[$pid]);
             }
         }
         Club_Log_Console('info', 'master stopped', ['pid' => getmypid()]); break;
-    // 手动合并。worker 启动时会自己判断并合并，这条只是给不方便重启容器的场合留的口子
     case 'migrate':
         require_once(APP_ROOT.'/app/database/migrate.php');
         try { $version = Club_Migrate_Run(); }

@@ -1,8 +1,5 @@
 <?php
 
-/* mastodon 4.3.22 发来的真实 Follow 报文，域名和用户名已改写成 example 域，其余字节原样保留。
- * 变的只有发送者：ban 那一段让 t_ap_seed 先把它封掉，验的是「封禁在验签之前挡住活动，但提醒私信照发」这条路。 */
-
 return [
     'source' => ['software' => 'mastodon', 'version' => '4.3.22'],
     'seq' => 60,
@@ -18,7 +15,6 @@ JSON
     'expect' => [
         'status' => 202,
         'follower_created' => false,
-        // 提醒私信就是这次入队的东西：被封的人多半不知道自己被封了
         'delivery_enqueued' => true
     ]
 ];
