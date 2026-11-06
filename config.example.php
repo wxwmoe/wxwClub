@@ -47,6 +47,12 @@
         'language' => 'en',
         // 安全模式，关掉等于谁都能往 inbox 里塞消息，不建议
         'inbox-verify' => true,
+        // 出站代理，留空直连，不读取环境代理。支持 http://proxy:3128 或 socks5://user:password@proxy:1080，账号和口令中的特殊字符需做 URL 编码。
+        'proxy' => '',
+        // all = 联邦请求和 DoH 共用代理，federation = 仅联邦请求，doh = 仅 DoH。
+        'proxy-scope' => 'all',
+        // proxy-only = 仅代理；direct-first = 优先直连，proxy-first = 优先代理。后两种允许失败时换一次出口，投递只在确定未送达或收到 403 时切换。
+        'proxy-mode' => 'proxy-only',
         // 日志级别，由少到多（ silent / error / warning / info / debug ）
         // logs/event/ 是事件流，logs/stat/ 是各进程的定期汇总和心跳，都按天一个文件；其余目录按请求或事件切成单独文件
         // 这两个流在 worker 每次启动时还会再切一刀：当天已有的那份挪成 .log.001，再启动一次挪成 .log.002，序号越大越晚，补零对齐所以按文件名排序就是时间顺序
@@ -64,7 +70,7 @@
             ['url' => 'https://one.one.one.one/dns-query', 'ip' => ['1.1.1.1', '1.0.0.1', '2606:4700:4700::1111', '2606:4700:4700::1001']],
             ['url' => 'https://dns.google/resolve', 'ip' => ['8.8.8.8', '8.8.4.4', '2001:4860:4860::8888', '2001:4860:4860::8844']]
         ],
-        // 单次查询超时，秒。A 和 AAAA 各查一次，最坏耗时是它乘二再乘 resolver 条数
+        // 每个出口的单次查询超时，秒。A 和 AAAA 各查一次，最坏耗时还要乘 resolver 条数和允许尝试的出口数。
         'timeout' => 5,
         // 连接超时，秒
         'connect-timeout' => 3

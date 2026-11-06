@@ -86,8 +86,54 @@ t_is(Club_Url_Public('http://127.0.0.1/inbox'), false, 'Club_Url_Public blocks l
 t_is(Club_Url_Public('https://[::1]/inbox'), false, 'Club_Url_Public blocks IPv6 loopback');
 t_is(Club_Url_Public('https://169.254.169.254/latest/meta-data/'), false, 'Club_Url_Public blocks link-local metadata');
 t_is(Club_Url_Public('file:///etc/passwd'), false, 'Club_Url_Public blocks non-http schemes');
+$unverified = false;
+try { ActivityPub_Request('http://127.0.0.1/inbox', '', [], null, []); } catch (InvalidArgumentException $e) { $unverified = true; }
+t_ok($unverified, 'federation transport refuses an empty pin list before opening a connection');
 
 t_group('pure / http and json shapes');
+
+t_table('Club_HTTP_Fallback', 'Club_HTTP_Fallback', [
+    [false, 403, false, false, true],
+    [false, 503, false, false, true],
+    [false, 501, false, false, false],
+    [false, 401, false, false, false],
+    [false, 429, false, false, false],
+    [false, 404, false, false, false],
+    [false, 0, true, false, true],
+    [false, 200, false, false, false],
+    [true, 403, false, false, true],
+    [true, 503, false, false, false],
+    [true, 0, true, true, true],
+    [true, 0, true, false, false],
+    [true, 202, true, false, false]
+]);
+
+// 代理只拿到核准的地址。两个出站句柄都会跨请求复用，前一个目标的 pin 必须撤掉。
+if (defined('CURLOPT_CONNECT_TO')) {
+    $pin = null;
+    $route = Club_HTTP_Route('https://a.example:8443/inbox', ['1.1.1.1', '2606:4700:4700::1111'], '', $pin);
+    t_is($route, [CURLOPT_PROXY => '', CURLOPT_RESOLVE => ['a.example:8443:1.1.1.1,[2606:4700:4700::1111]']], 'direct requests pin every vetted address and ignore environment proxies');
+    foreach (['http://proxy:3128', 'socks5://proxy:1080'] as $proxy) {
+        $pin = 'a.example:8443';
+        $route = Club_HTTP_Route('https://b.example/inbox', ['2606:4700:4700::1111'], $proxy, $pin);
+        t_is($route[CURLOPT_CONNECT_TO], ['::[2606:4700:4700::1111]:'], 'a proxy tunnel connects to the vetted IPv6 literal');
+        t_is([$route[CURLOPT_PROXY], $route[CURLOPT_NOPROXY], $route[CURLOPT_HTTPPROXYTUNNEL]], [$proxy, '', true], 'explicit proxies require a tunnel and override NO_PROXY');
+        t_is([$route[CURLOPT_RESOLVE], $pin], [['-a.example:8443'], null], 'switching targets removes the old DNS pin');
+    }
+    t_table('Club_HTTP_Proxy_Result', 'Club_HTTP_Proxy_Result', [
+        [CURLE_COULDNT_RESOLVE_PROXY, '', 0, false, false, 'local-proxy'],
+        [CURLE_COULDNT_CONNECT, '', 0, false, false, 'local-proxy'],
+        [CURLE_OPERATION_TIMEOUTED, '', 0, true, true, 'failed'],
+        [CURLE_RECV_ERROR, '', 407, true, false, 'local-proxy'],
+        [CURLE_RECV_ERROR, '', 503, true, false, 'local-proxy'],
+        [CURLE_RECV_ERROR, '', 502, true, false, 'next-address'],
+        [CURLE_RECV_ERROR, '', 502, true, true, 'failed'],
+        [97, 'cannot complete SOCKS5 connection to 1.1.1.1. (5)', 0, true, false, 'next-address'],
+        [97, 'cannot complete SOCKS5 connection to 1.1.1.1. (2)', 0, true, false, 'local-proxy'],
+        [97, 'failed to receive SOCKS5 initial response', 0, true, false, 'local-proxy'],
+        [CURLE_GOT_NOTHING, '', 200, true, true, 'failed']
+    ]);
+}
 
 t_table('ActivityPub_Sign_Fields', 'ActivityPub_Sign_Fields', [
     ['https://a.example/inbox', ['authority' => 'a.example', 'target' => '/inbox']],
@@ -466,6 +512,7 @@ t_is($plan['retry_at'], $now + 300, 'local-dns pushes the whole endpoint');
 $plan = Club_Endpoint_Decide('local-dns', 4, $now - 900, $now + 9000, 1, $now, 0);
 t_is($plan['retry_at'], $now + 9000, 'local-dns never pulls a longer backoff forward');
 t_is($plan['endpoint'], false, 'local-dns writes nothing when the backoff is already longer');
+t_is(Club_Endpoint_Decide('local-proxy', 4, $now - 900, $now + 9000, 1, $now, 0), $plan, 'a local proxy failure preserves queue retries and endpoint health');
 
 // 故障段的第一笔
 $plan = Club_Endpoint_Decide('failed', 0, 0, 0, 0, $now, 0);
@@ -614,6 +661,23 @@ function t_config_mentions($problems, $needle) {
 list($fatal, $warn) = t_config_problems([]);
 t_is($fatal, [], 'a good config has no fatal problems');
 t_is($warn, [], 'a good config has no warnings');
+foreach (['http://proxy:3128', 'socks5://user:p%40ss@[::1]:1080', 'http://user:password@proxy_service:8000/'] as $proxy)
+    t_is(t_config_problems(['node' => ['proxy' => $proxy]]), [[], []], 'a valid proxy URL passes startup validation');
+$saved_node = $config['node']; $proxy = 'socks5://proxy:1080'; $dns_budget = Club_Resolver_Budget();
+foreach (['proxy-only' => [$proxy], 'direct-first' => ['', $proxy], 'proxy-first' => [$proxy, '']] as $mode => $routes) {
+    $config['node']['proxy-mode'] = $mode;
+    foreach (['federation', 'doh', 'all'] as $scope) {
+        $config['node']['proxy'] = $proxy; $config['node']['proxy-scope'] = $scope;
+        t_is(Club_Config_Proxy_Routes('federation'), $scope === 'doh' ? [''] : $routes, $scope.'/'.$mode.' federation route order');
+        t_is(Club_Config_Proxy_Routes('doh'), $scope === 'federation' ? [''] : $routes, $scope.'/'.$mode.' DoH route order');
+        t_is(Club_Resolver_Budget(), $dns_budget * ($scope === 'federation' ? 1 : count($routes)), $scope.'/'.$mode.' DNS lease covers all attempts');
+        $config['node']['proxy'] = '';
+        t_is([Club_Config_Proxy_Routes('federation'), Club_Config_Proxy_Routes('doh')], [[''], ['']], $scope.'/'.$mode.' stays direct without a proxy URL');
+    }
+}
+$config['node']['proxy'] = $proxy; unset($config['node']['proxy-scope'], $config['node']['proxy-mode']);
+t_is([Club_Config_Proxy_Routes('federation'), Club_Config_Proxy_Routes('doh')], [[$proxy], [$proxy]], 'a proxy URL alone covers both with no direct fallback');
+$config['node'] = $saved_node;
 
 // 无遮拦读到的那几项：缺了本来就起不来，校验只是把崩溃换成一句话
 foreach ([
@@ -623,6 +687,15 @@ foreach ([
     ['config.mysql.password', ['mysql' => ['password' => null]]],
     ['config.node.timezone', ['node' => ['timezone' => 'Mars/Olympus']]],
     ['config.node.timezone', ['node' => ['timezone' => '@unset']]],
+    ['config.node.proxy', ['node' => ['proxy' => 'socks5h://proxy:1080']]],
+    ['config.node.proxy', ['node' => ['proxy' => 'http://proxy:65536']]],
+    ['config.node.proxy', ['node' => ['proxy' => 'http://:3128']]],
+    ['config.node.proxy', ['node' => ['proxy' => 'http://proxy:3128/path']]],
+    ['config.node.proxy', ['node' => ['proxy' => []]]],
+    ['config.node.proxy', ['node' => ['proxy' => null]]],
+    ['config.node.proxy-scope', ['node' => ['proxy-scope' => 'dns']]],
+    ['config.node.proxy-scope', ['node' => ['proxy-scope' => null]]],
+    ['config.node.proxy-mode', ['node' => ['proxy-mode' => 'auto']]],
     ['config.club.suspended-names', ['club' => ['suspended-names' => '@unset']]]
 ] as $case) {
     list($fatal, $warn) = t_config_problems($case[1]);
@@ -632,6 +705,9 @@ foreach ([
 // 有回退的那些：跑得起来，但跑的不是配置里写的那套
 foreach ([
     ['config.node.log-level', ['node' => ['log-level' => 'verbose']]],
+    ['config.node.proxy', ['node' => ['proxy' => '@unset']]],
+    ['config.node.proxy-scope', ['node' => ['proxy' => 'http://proxy:3128', 'proxy-scope' => '@unset']]],
+    ['config.node.proxy-mode', ['node' => ['proxy' => 'http://proxy:3128', 'proxy-mode' => '@unset']]],
     ['config.node.language', ['node' => ['language' => 'kl']]],
     ['config.node.log-retention', ['node' => ['log-retention' => '30 days']]],
     ['config.worker.delivery', ['worker' => ['delivery' => 0]]],

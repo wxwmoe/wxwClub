@@ -28,7 +28,7 @@ $config = [
     'node' => [
         'name' => 'test', 'description' => 'test', 'timezone' => 'UTC',
         'maintainer' => ['name' => '@admin@local.example', 'email' => 'admin@local.example'],
-        'language' => 'en', 'inbox-verify' => true,
+        'language' => 'en', 'inbox-verify' => true, 'proxy' => '', 'proxy-scope' => 'all', 'proxy-mode' => 'proxy-only',
         'log-level' => getenv('CLUB_TEST_LOG') ?: 'silent', 'log-retention' => 30
     ],
     'dns' => ['resolver' => [['url' => 'https://one.one.one.one/dns-query', 'ip' => ['1.1.1.1']]], 'timeout' => 5, 'connect-timeout' => 3],

@@ -75,8 +75,8 @@ function ActivityPub_Object_Id($object) {
 function ActivityPub_Probe($url, $club, $authorize = null) {
     global $curl, $base;
     $result = ActivityPub_Push($url, $club, Club_Json_Encode(['@context' => 'https://www.w3.org/ns/activitystreams', 'type' => 'Activity', 'actor' => $base.'/club/'.$club]), $authorize);
-    // 这些结果都发生在授权 callback 之前，调用方必须继续使用第一阶段 token。折叠成 dead 会让 completion 误拿尚未安装的新 token，结果永远被 fencing 丢掉。
-    if (in_array($result, ['blocked', 'unresolved', 'local-dns', 'lease-lost'], true)) return $result;
+    // 本站 DNS、代理或租约的问题都不能当成对端已死；调用方用当时有效的 token 收尾，代理故障发生在授权之后。
+    if (in_array($result, ['blocked', 'unresolved', 'local-dns', 'local-proxy', 'lease-lost'], true)) return $result;
     if (!isset($curl) || $curl['curl_error']) return 'dead';
     $code = $curl['status'];
     return ($code >= 200 && $code < 300) || ($code >= 400 && $code < 500 && !in_array($code, [404, 405, 410])) ? 'alive' : 'dead';
@@ -89,8 +89,9 @@ function ActivityPub_Probe($url, $club, $authorize = null) {
 //   unresolved 域名解析不出来，而本站 DNS 是好的
 //   blocked    目标指向内网或协议不对，该拦
 //   local-dns  本站自己解析不动、或刷新锁在别人手上，什么都没证明，不能算在对端头上
-//   lease-lost $authorize 没放行，这次请求根本没发出去
-// $authorize 在解析之后、真正出网之前调用。
+//   local-proxy 本站连不上代理或被代理拒绝，还没投到对端
+//   lease-lost $authorize 没放行，当前出口没有发送权
+// $authorize 在解析之后、每次选择出口真正出网之前调用。
 // 解析、签名、curl 各有各的超时，但合起来没有上界，跨过租约之后这条 endpoint 已经易主，旧 worker 醒过来再发一次，就是同一秒两个进程打同一家 —— 只在落库时验 token 拦不住已经出网的请求
 function ActivityPub_Push($url, $club, $jsonld, $authorize = null) {
     global $curl;
@@ -121,7 +122,9 @@ function ActivityPub_Push($url, $club, $jsonld, $authorize = null) {
     $head = ['Signature' => ActivityPub_Sign($url, $club, $date, $digest), 'Digest' => 'SHA-256='.$digest];
     if (isset($authorize) && !$authorize()) return 'lease-lost';
     Club_Stat('http_requests');
-    ActivityPub_Request($url, $date, $head, $jsonld, $public);
+    ActivityPub_Request($url, $date, $head, $jsonld, $public, 'application/activity+json', $authorize);
+    if (!empty($curl['lease_lost'])) return 'lease-lost';
+    if ($curl['proxy_error']) return 'local-proxy';
     return ActivityPub_Push_State(isset($curl) ? $curl['status'] : 0);
 }
 
@@ -140,29 +143,19 @@ function ActivityPub_Push_State($code) {
     return 'failed';
 }
 
-function ActivityPub_Request($url, $date, $head, $data = null, $ips = null, $accept = 'application/activity+json') {
+// 联邦目标必须已过 Club_Url_Public；空地址在 HTTP 出口表示允许代理解析，只能用于管理员配置的 DoH 服务器。
+function ActivityPub_Request($url, $date, $head, $data, array $ips, $accept = 'application/activity+json', $reauthorize = null) {
     global $ver, $base, $curl; static $handle = null, $pinned = null;
+    if (!$ips) throw new InvalidArgumentException('ActivityPub requests require a verified destination address');
     if (!isset($handle)) $handle = curl_init();
-    // 内网检查的另一半：Club_Url_Public 只交上来公网地址，私网那些是靠「curl 拿不到就连不上」拦住的。不钉的话 curl 会拿 URL 自己再解析一遍，既把剔掉的地址捡回来，也留下 DNS rebinding 的空子。
-    // 钉进去的条目在 curl 自己的 DNS 缓存里是永久的，所以每次先撤掉上一条，否则长期进程会越积越多，还会拿旧地址去连
-    $resolve = [];
-    if (isset($pinned)) { $resolve[] = '-'.$pinned; $pinned = null; }
-    // URL 里直接写 IP 的不钉：本来就没有解析这一步，没有可乘之机，而且 host:port:addr 这个格式塞进一个 IPv6 字面量就分不出哪个冒号是分隔符了
-    if ($ips && !empty(($parts = parse_url($url))['host']) && !filter_var($host = trim($parts['host'], '[]'), FILTER_VALIDATE_IP)) {
-        $port = $parts['port'] ?? (strtolower($parts['scheme'] ?? '') == 'http' ? 80 : 443);
-        // 地址侧的 IPv6 要套方括号，不然跟格式自己的冒号分不开
-        foreach ($ips as $i => $ip) if (strpos($ip, ':') !== false) $ips[$i] = '['.$ip.']';
-        $resolve[] = ($pinned = $host.':'.$port).':'.implode(',', $ips);
-    }
     $options = [CURLOPT_TIMEOUT => 10, CURLOPT_CONNECTTIMEOUT => 3, CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS, CURLOPT_USERAGENT => 'wxwClub '.$ver.'; '.$base];
-    if ($resolve) $options[CURLOPT_RESOLVE] = $resolve;
     // 跳转由 ActivityPub_Fetch 自己跟，POST 则完全不跟：curl 会把它降级成 GET
     // 只放行 http(s)，否则能把我们带到 file:// 之类的协议上
     $headers = ['Accept' => $accept, 'Content-Type' => 'application/activity+json', 'Date' => $date] + $head;
-    $curl = Club_HTTP_Request($handle, $url, $headers, $options, $data);
+    $curl = Club_HTTP_Request($handle, $url, $headers, $options, $data, $ips, $pinned, 'federation', $reauthorize);
     Club_Log_Write('debug', 'curl', [isset($data) ? 'post' : 'get', strtolower($curl['headers']['Status-Line'] ?? ''),
-        preg_replace('#^https?://#i', '', $url)], ['header' => $curl['headers'], 'result' => $curl['response'], 'error' => $curl['error']]);
+        preg_replace('#^https?://#i', '', $url)], ['header' => $curl['headers'], 'result' => $curl['response'], 'error' => $curl['error']] + ($curl['error'] ? ['message' => $curl['message']] : []));
     return $curl['error'] ? false : ($curl['response'] ?: true);
 }
 
@@ -1945,8 +1938,8 @@ function Club_Endpoint_Decide($result, $fails, $since, $retry_at, $retries, $now
             } return $plan;
         // 本地就处理不掉的一行，一个字节都没出网。删掉它，但绝不能顺手清故障段：上面那两种清零的依据是「已经通到远端应用层」，这里什么都没证明，一条脏 queue 就能把一家真在挂的实例从退避里放出来
         case 'dropped': $plan['queue'] = 'delete'; return $plan;
-        // 本站自己解析不动，什么都没证明：retries 和 fails 都不加，只把这行往后推。记在对端头上的话，本站 DNS 挂几天就能把关注的实例全拉黑一遍
-        case 'local-dns': $plan['queue'] = 'defer'; $plan['due_at'] = $now + 300; $plan['state'] = 'deferred';
+        // 本站 DNS 或代理不可用时没有对端的健康证据，整站共用的出口挂掉不能让所有目标一起进黑名单。
+        case 'local-dns': case 'local-proxy': $plan['queue'] = 'defer'; $plan['due_at'] = $now + 300; $plan['state'] = 'deferred';
             // 同 target 的其他 queue 立刻重判也是同一个结论，整条 endpoint 一起推
             if ($retry_at < $now + 300) { $plan['retry_at'] = $now + 300; $plan['endpoint'] = true; }
             return $plan;
@@ -2227,6 +2220,7 @@ function Club_Endpoint_Result($url, $token, $task, $result) {
     if ($result == 'ok') Club_Log_Event('debug', 'push delivered', ['club' => $task['club'], 'target' => $url, 'retries' => (int)$task['retries']]);
     elseif ($result == 'rejected') Club_Log_Event('info', 'push dropped, target refused the activity', ['club' => $task['club'], 'target' => $url, 'code' => isset($curl) ? $curl['status'] : 0]);
     elseif ($result == 'local-dns') Club_Log_Event('debug', 'push deferred, waiting for local dns', ['club' => $task['club'], 'target' => $url, 'retry' => 300]);
+    elseif ($result == 'local-proxy') Club_Log_Event('warning', 'push deferred, outbound proxy unavailable', ['club' => $task['club'], 'target' => $url, 'retry' => 300]);
     elseif ($result == 'dropped') Club_Log_Event('debug', 'queue dropped without contacting the target', ['club' => $task['club'], 'target' => $url]);
     elseif ($state == 'exhausted') Club_Log_Event('warning', 'push dropped after '.$task['retries'].' failed attempts', ['club' => $task['club'], 'target' => $url, 'reason' => $result]);
     elseif ($state == 'blacklisted') Club_Log_Event('debug', 'push held, endpoint was blacklisted', ['club' => $task['club'], 'target' => $url, 'reason' => $result]);
@@ -2478,7 +2472,7 @@ function Club_Blacklist_Decide($alive, $checks, $queued, $now, $jitter = null) {
     return ['state' => 'dead', 'checks' => $checks, 'check_at' => $now + $wait + (isset($jitter) ? (int)$jitter : mt_rand(0, (int)($wait / 4)))];
 }
 
-// resolver 没给出结果就退回来。这一轮既没问过 DNS 也没问过对端，checks 不能加，check_at 也只短推一会儿：本站 DNS 抖一下不该把恢复推迟一整天
+// 本站没能探到对端时不加 checks，check_at 也只短推一会儿：DNS 或代理故障不该把恢复推迟一整天。
 function Club_Blacklist_Defer($target, $token, $reason) {
     global $db; $check = time() + 300 + mt_rand(0, 75);
     $pdo = $db->prepare('update `blacklist` set `check_at` = :check, `lease_token` = null, `lease_until` = 0 where `target` = :target and `lease_token` = unhex(:token)');
@@ -2712,15 +2706,83 @@ function Club_HTTP_Cursor($cursor) {
     return is_scalar($cursor) && preg_match('/^(\d+)\.(\d+)$/', (string)$cursor, $m) ? [(int)$m[1], (int)$m[2]] : false;
 }
 
+// 403 是明确拒绝，可以换出口；其余 HTTP 答复优先于传输错误。GET 可以重读，POST 只有确定尚未送达时才能立即重发。
+function Club_HTTP_Fallback($post, $status, $network_error, $unsent) {
+    if ($status === 403) return true;
+    if ($post) return !$status && $network_error && $unsent;
+    if ($status >= 400) return $status >= 500 && $status < 600 && $status !== 501;
+    return $network_error;
+}
+
 // HTTP/2 的响应头名全是小写，按名字取头要忽略大小写
 function Club_HTTP_Header($headers, $name) {
     foreach ((array)$headers as $k => $v) if (strcasecmp($k, $name) === 0) return $v;
     return '';
 }
 
-// 两条 HTTP 出口只共用执行和响应头解析；目标校验、协议限制、超时与 DNS pin 仍由各自调用点显式给出。
-function Club_HTTP_Request($handle, $url, $headers, $options, $data = null) {
-    $response_headers = [];
+// 只在代理握手失败时换地址。隧道一旦建成并开始传输，哪怕一个响应字节都没收到，也不能断言 POST 没有送达。
+function Club_HTTP_Proxy_Result($errno, $message, $connect, $connected, $sent) {
+    if ($sent) return 'failed';
+    if ($connect && ($connect < 200 || $connect >= 300)) return in_array($connect, [502, 504]) ? 'next-address' : 'local-proxy';
+    // PHP 7 没有 CURLINFO_PROXY_ERROR；仅在建连或代理握手失败（CURLE_PROXY = 97）时读取 libcurl 错误末尾的 SOCKS5 REP 字节。
+    if (in_array($errno, [CURLE_COULDNT_CONNECT, 97]) && preg_match('/SOCKS5 connection to .+ \((\d+)\)/i', $message, $reply))
+        return in_array((int)$reply[1], [3, 4, 5, 6, 8]) ? 'next-address' : 'local-proxy';
+    if ($errno == 97 || $errno == CURLE_COULDNT_RESOLVE_PROXY || (!$connected && in_array($errno, [CURLE_COULDNT_CONNECT, CURLE_OPERATION_TIMEOUTED]))
+        || stripos($message, 'authentication method') !== false || stripos($message, 'rejected by the SOCKS5 server') !== false) return 'local-proxy';
+    return 'failed';
+}
+
+// 联邦与 DoH 按用途选路，同一域名可能同时提供两种服务。两个出口都没走通时，另一路的 403 不能把暂时的故障变成终局而丢掉队列。
+function Club_HTTP_Request($handle, $url, $headers, $options, $data = null, $ips = [], &$pinned = null, $traffic = 'federation', $reauthorize = null) {
+    $routes = Club_Config_Proxy_Routes($traffic);
+    $first = Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, $pinned, $routes[0]);
+    if (!isset($routes[1]) || !$first['fallback']) return $first;
+    Club_Log_Event('debug', 'outbound request switching route', ['traffic' => $traffic, 'url' => $url, 'next' => $routes[1] === '' ? 'direct' : 'proxy', 'http' => $first['status'], 'error' => $first['message']]);
+    if (isset($reauthorize) && !$reauthorize()) return $first + ['lease_lost' => true];
+    if (isset($data) && $traffic === 'federation') Club_Stat('http_requests');
+    $second = Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, $pinned, $routes[1]);
+    if ($second['status'] === 403 && $first['status'] !== 403) {
+        Club_Log_Event('debug', 'alternate route returned 403, keeping retryable failure', ['traffic' => $traffic, 'url' => $url]);
+        return $first;
+    }
+    return $second;
+}
+
+function Club_HTTP_Respond($data, $type = 'json', $status = 200) {
+    header('Content-type: application/'.$type.'; charset=utf-8');
+
+    if ($status != 200) {
+        http_response_code($status);
+        $data = array_merge(['code' => $status], $data);
+    } echo Club_Json_Encode($data);
+}
+
+// RESOLVE 只约束本站的解析器；HTTP 代理拿到域名会自己再查一次。隧道直接指定已核准的 IP，原 URL 仍用于 Host、TLS 验证和签名。
+// 空代理显式禁用环境代理，指定代理时也不受 NO_PROXY 绕过。每个句柄记住上次的直连 pin，撤掉后再装新的，避免长期 worker 累积永久 DNS 条目。
+function Club_HTTP_Route($url, $ips, $proxy, &$pinned) {
+    $options = [CURLOPT_PROXY => $proxy];
+    $resolve = isset($pinned) ? ['-'.$pinned] : []; $pinned = null;
+    $parts = parse_url($url);
+    if ($proxy !== '') {
+        $options[CURLOPT_NOPROXY] = '';
+        $options[CURLOPT_HTTPPROXYTUNNEL] = true;
+        if (defined('CURLOPT_SUPPRESS_CONNECT_HEADERS')) $options[CURLOPT_SUPPRESS_CONNECT_HEADERS] = true;
+        if ($ips) {
+            $ip = reset($ips);
+            $options[CURLOPT_CONNECT_TO] = ['::'.(strpos($ip, ':') === false ? $ip : '['.$ip.']').':'];
+        }
+    } elseif ($ips && !filter_var(trim($parts['host'], '[]'), FILTER_VALIDATE_IP)) {
+        $port = $parts['port'] ?? (strtolower($parts['scheme']) === 'http' ? 80 : 443);
+        foreach ($ips as $i => $ip) if (strpos($ip, ':') !== false) $ips[$i] = '['.$ip.']';
+        $resolve[] = ($pinned = $parts['host'].':'.$port).':'.implode(',', $ips);
+    }
+    if ($resolve) $options[CURLOPT_RESOLVE] = $resolve;
+    return $options;
+}
+
+// 单个出口有自己的超时，清掉上一跳的隧道目标，同时保留句柄的连接池。
+function Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, &$pinned, $proxy) {
+    curl_reset($handle);
     $options[CURLOPT_URL] = $url;
     $options[CURLOPT_RETURNTRANSFER] = true;
     $options[CURLOPT_HTTPHEADER] = array_map(function ($key, $value) { return $key.': '.$value; }, array_keys($headers), array_values($headers));
@@ -2737,20 +2799,46 @@ function Club_HTTP_Request($handle, $url, $headers, $options, $data = null) {
     $options[CURLOPT_POST] = isset($data);
     $options[CURLOPT_HTTPGET] = !isset($data);
     if (isset($data)) $options[CURLOPT_POSTFIELDS] = $data;
-    curl_setopt_array($handle, $options);
-    $response = curl_exec($handle); $curl_error = curl_errno($handle); $status = (int)curl_getinfo($handle, CURLINFO_HTTP_CODE);
+    // 直连一次交给 curl 全部地址；一条代理隧道只能给一个。只有代理明说没连上这个 IP 才换下一个，且所有尝试共用原来的超时，收不到 POST 的响应绝不能换 IP 重发。
+    $candidates = $proxy !== '' && $ips ? array_values($ips) : [null];
+    $deadline = microtime(true) + ($options[CURLOPT_TIMEOUT] ?? 10);
+    $proxy_error = false; $unsent = false;
+    foreach ($candidates as $index => $ip) {
+        if ($index) {
+            $left = (int)(($deadline - microtime(true)) * 1000);
+            if ($left < 1) break;
+            $options[CURLOPT_TIMEOUT_MS] = $left;
+        }
+        $response_headers = [];
+        // 任何一项失败都不能再执行：余下的选项里可能正是 DNS pin 或代理隧道。
+        if (!curl_setopt_array($handle, Club_HTTP_Route($url, isset($ip) ? [$ip] : $ips, $proxy, $pinned) + $options))
+            return ['status' => 0, 'headers' => [], 'response' => false, 'curl_error' => true, 'error' => true, 'proxy_error' => $proxy !== '', 'fallback' => false, 'message' => 'could not configure outbound request'];
+        $response = curl_exec($handle); $curl_error = curl_errno($handle); $status = (int)curl_getinfo($handle, CURLINFO_HTTP_CODE);
+        $message = $curl_error ? curl_error($handle) : '';
+        $unsent = false;
+        if (!$curl_error) break;
+        $sent = $status || (isset($data) && curl_getinfo($handle, CURLINFO_SIZE_UPLOAD) > 0);
+        $connected = (bool)curl_getinfo($handle, CURLINFO_PRIMARY_IP);
+        // 已写出请求后超时或断开，不能拿「没有响应」当作「没有发送」。连接阶段的超时还要确认连请求头都没写过。
+        $written = curl_getinfo($handle, CURLINFO_REQUEST_SIZE);
+        $unsent = !$sent && !$written && (in_array($curl_error, [CURLE_COULDNT_RESOLVE_HOST, CURLE_COULDNT_CONNECT, CURLE_SSL_CONNECT_ERROR, CURLE_SSL_CACERT])
+            || ($curl_error === CURLE_OPERATION_TIMEOUTED && !$connected && !curl_getinfo($handle, CURLINFO_CONNECT_TIME)));
+        if ($proxy === '') break;
+        $connect = (int)curl_getinfo($handle, CURLINFO_HTTP_CONNECTCODE);
+        $result = Club_HTTP_Proxy_Result($curl_error, $message, $connect, $connected, $sent || (!$connect && $written));
+        // libcurl 的原始错误可能引用带口令的代理 URL，日志只返回通用错误和隧道状态码。
+        $proxy_error = $result === 'local-proxy';
+        if ($proxy_error || $result === 'next-address') $unsent = true;
+        $message = ($proxy_error ? 'outbound proxy unavailable' : curl_strerror($curl_error)).' (curl '.$curl_error.', CONNECT '.$connect.')';
+        if ($result !== 'next-address') break;
+    }
     $http_error = in_array((int)floor($status / 100), [4, 5], true); $error = (bool)$curl_error || $http_error;
-    return ['status' => $status, 'headers' => $response_headers, 'response' => $response, 'curl_error' => (bool)$curl_error,
-        'error' => $error, 'message' => $curl_error ? curl_error($handle) : ($http_error ? ($response_headers['Status-Line'] ?? '') : '')];
-}
-
-function Club_HTTP_Respond($data, $type = 'json', $status = 200) {
-    header('Content-type: application/'.$type.'; charset=utf-8');
-
-    if ($status != 200) {
-        http_response_code($status);
-        $data = array_merge(['code' => $status], $data);
-    } echo Club_Json_Encode($data);
+    if (!$curl_error && $http_error) $message = $response_headers['Status-Line'] ?? '';
+    // 只有网络或代理故障值得换出口，本地写入失败、CA 文件配置错误等不能触发直连。PHP 7 没有导出 libcurl 的 HTTP2 (16)、HTTP2_STREAM (92) 和 PROXY (97) 常量。
+    $network_error = $proxy_error || in_array($curl_error, [CURLE_COULDNT_RESOLVE_PROXY, CURLE_COULDNT_RESOLVE_HOST, CURLE_COULDNT_CONNECT, CURLE_WEIRD_SERVER_REPLY, CURLE_PARTIAL_FILE,
+        CURLE_OPERATION_TIMEOUTED, CURLE_SSL_CONNECT_ERROR, CURLE_GOT_NOTHING, CURLE_SEND_ERROR, CURLE_RECV_ERROR, CURLE_SSL_CACERT, 16, 92, 97], true);
+    return ['status' => $status, 'headers' => $response_headers, 'response' => $response, 'curl_error' => (bool)$curl_error, 'error' => $error, 'proxy_error' => $proxy_error,
+        'fallback' => Club_HTTP_Fallback(isset($data), $status, $network_error, $unsent), 'message' => $message];
 }
 
 // DoH 报文的解析，单拎出来是为了能不出网地验：这段是整套东西里最该有检查的一节，而本机没有 curl 扩展，连不上就什么都跑不了。三态，含义同上
@@ -2788,11 +2876,11 @@ function Club_Resolver_Answer($json, $type) {
     return $ips;
 }
 
-// 一次解析最坏能花多久：每家顺序问 A 和 AAAA（A 就失败的话直接换下一家，所以是乘二不是乘查询数），一家问不出来再换下一家。
+// 每家顺序问 A 和 AAAA，每次 HTTP 查询若允许切换出口，备用出口还有一次完整的超时。一家问不出来再换下一家。
 // 刷新锁的窗口由它算出来，不能写死：窗口短于这个预算的话，第一个进程还没问完锁就到期，第二个进程接手重问一遍，而它同样问不完 —— resolver 出故障的那一刻恰好是查询被放大的时刻
 function Club_Resolver_Budget() {
     global $config;
-    return max(1, (int)($config['dns']['timeout'] ?? 5)) * 2 * max(1, count(Club_Resolver_List()));
+    return max(1, (int)($config['dns']['timeout'] ?? 5)) * 2 * max(1, count(Club_Resolver_List())) * count(Club_Config_Proxy_Routes('doh'));
 }
 
 // 命中已提交缓存的共同出口：正缓存顺带给本站 DNS 记一笔实据，但成功的时刻是写缓存那个进程的，不是此刻
@@ -2866,21 +2954,15 @@ function Club_Resolver_Deferred($set = null) {
 //   false  这家没答上来（连不上、4xx/5xx、报文坏、REFUSED），什么都没证明，是本站这一侧的事
 function Club_Resolver_DoH($resolver, $host, $type) {
     global $config;
-    static $handle = null;
+    static $handle = null, $pinned = null;
     // 不复用 ActivityPub_Request 那个全局句柄：那边的调用方在请求之后还要读 headers 和 status 判跳转，套进同一个句柄会把判断依据冲掉
     if (!isset($handle)) $handle = curl_init();
     // 期限由 curl 自己执行，不经过 PHP 的检查点，两个 SAPI 都算数 —— 这正是换掉系统 resolver 的理由。
     // 必须夹到 1 以上：libcurl 把 0 定义成「永不超时」，配置里手滑写个 0 或负数就等于把刚拆掉的无限等待原样装回来，而那种故障要等到线上卡住才发作
     $options = [CURLOPT_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_TIMEOUT => max(1, (int)($config['dns']['timeout'] ?? 5)), CURLOPT_CONNECTTIMEOUT => max(1, (int)($config['dns']['connect-timeout'] ?? 3))];
-    // 钉住 resolver 自己的地址。没配 ip 就交给 curl 去解析：那仍然是系统 resolver，但走在 curl 里，超时管得住，不像 gethostbynamel 那样能把整个进程挂死。
-    // 不像 ActivityPub_Request 那样每次先用 '-' 撤掉上一条：那边钉的 host 是对端域名，一个长期进程会经手几千个，这边钉的只有 resolver 列表里那两三个，条目数是常数，攒不起来
-    if (!empty($resolver['ip']) && !empty(($parts = parse_url($resolver['url']))['host'])) {
-        $ips = $resolver['ip'];
-        foreach ($ips as $i => $ip) if (strpos($ip, ':') !== false) $ips[$i] = '['.$ip.']';
-        $options[CURLOPT_RESOLVE] = [$parts['host'].':'.($parts['port'] ?? 443).':'.implode(',', $ips)];
-    }
-    $curl = Club_HTTP_Request($handle, $resolver['url'].'?name='.urlencode($host).'&type='.$type, ['Accept' => 'application/dns-json'], $options);
+    // resolver 是管理员指定的，只有它允许省略固定 IP；联邦目标始终要带 Club_Url_Public 已校验的地址。
+    $curl = Club_HTTP_Request($handle, $resolver['url'].'?name='.urlencode($host).'&type='.$type, ['Accept' => 'application/dns-json'], $options, null, $resolver['ip'] ?? [], $pinned, 'doh');
     $json = json_decode((string)$curl['response'], 1);
     // 传输失败和 4xx/5xx 都由 Club_HTTP_Request 兜住。错误页的正文一般也过不了 Club_Resolver_Answer 那关，但那是巧合不是保证，状态码该自己看
     $answer = $curl['error'] ? false : Club_Resolver_Answer($json, $type);
@@ -3062,6 +3144,19 @@ function Club_Config_Number($value, $min) {
     return (int)$value >= $min ? (int)$value : false;
 }
 
+// 未选中的用途显式直连。只有管理员选择了允许直连的策略，代理故障才可以暴露本站的出口 IP。
+function Club_Config_Proxy_Routes($traffic) {
+    global $config;
+    $scope = $config['node']['proxy-scope'] ?? 'all';
+    $proxy = $config['node']['proxy'] ?? '';
+    if ($proxy === '' || ($scope !== 'all' && $scope !== $traffic)) return [''];
+    switch ($config['node']['proxy-mode'] ?? 'proxy-only') {
+        case 'direct-first': return ['', $proxy];
+        case 'proxy-first': return [$proxy, ''];
+        default: return [$proxy];
+    }
+}
+
 // 启动时把 config.php 整个过一遍。缺一项现在的表现取决于它被怎么读：无遮拦的那几个是一串对不上号的 PHP warning 加一句 PDO 报错，有回退的则一声不吭按默认值跑几个小时，
 // 最后从队列的异常反推回配置。两档正是照着这个区别划的 —— fatal 是本来就起不来的，把说不清楚的崩溃换成一句话；warning 是跑得起来但跑的不是配置里写的那套。
 // 判据只看键本身，不碰数据库也不出网：它排在建连接之前，而配置错的时候连接八成也连不上。返回 [fatal, warning] 两个字符串列表
@@ -3077,6 +3172,23 @@ function Club_Config_Validate() {
     if (!is_array($config['club']['suspended-names'] ?? null)) $fatal[] = 'config.club.suspended-names must be an array, Club_Group_Create passes it to in_array unguarded';
     // 缺扩展的报错发生在第一次真正用到它的地方：pdo_mysql 是启动，curl 和 openssl 要等到第一次出网或第一次建群，那时候看到的是一句 undefined function
     foreach (['pdo_mysql', 'curl', 'openssl', 'json'] as $ext) if (!extension_loaded($ext)) $fatal[] = 'ext-'.$ext.' is required but not loaded';
+
+    // 旧配置缺键时直连；显式填坏的代理必须阻止启动，否则私钥签过的请求会从意外的出口发出。报错不带可能含口令的配置值。
+    $node = (array)($config['node'] ?? []);
+    if (!array_key_exists('proxy', $node)) $warn[] = 'config.node.proxy is missing, outbound requests use a direct connection';
+    elseif (($proxy = $node['proxy']) !== '') {
+        $userinfo = '(?:[a-z0-9._~!$&\'()*+,;=:-]|%[0-9a-f]{2})+';
+        if (!is_string($proxy) || !preg_match('#\A(?:http|socks5)://(?:'.$userinfo.'@)?(\[[0-9a-f:.]+\]|[a-z0-9._-]+):([0-9]{1,5})/?\z#i', $proxy, $m)
+            || (int)$m[2] < 1 || (int)$m[2] > 65535 || !($m[1][0] === '[' ? filter_var(substr($m[1], 1, -1), FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) : Club_Url_Host($m[1])))
+            $fatal[] = 'config.node.proxy must be empty or an http:// or socks5:// proxy URL with a host and port';
+        elseif (extension_loaded('curl') && !defined('CURLOPT_CONNECT_TO')) $fatal[] = 'config.node.proxy requires libcurl with CURLOPT_CONNECT_TO';
+    }
+    if (array_key_exists('proxy-scope', $node)) {
+        if (!in_array($node['proxy-scope'], ['all', 'federation', 'doh'], true)) $fatal[] = 'config.node.proxy-scope must be all, federation or doh';
+    } elseif (!empty($node['proxy'])) $warn[] = 'config.node.proxy-scope is missing, federation and DoH both use the configured proxy';
+    if (array_key_exists('proxy-mode', $node)) {
+        if (!in_array($node['proxy-mode'], ['direct-first', 'proxy-first', 'proxy-only'], true)) $fatal[] = 'config.node.proxy-mode must be direct-first, proxy-first or proxy-only';
+    } elseif (!empty($node['proxy'])) $warn[] = 'config.node.proxy-mode is missing, traffic selected for the proxy uses the proxy only';
 
     if (!is_string($level = $config['node']['log-level'] ?? 'info') || !in_array(strtolower($level), ['silent', 'error', 'warning', 'info', 'debug'], true))
         $warn[] = 'config.node.log-level is not one of silent/error/warning/info/debug, falling back to info';

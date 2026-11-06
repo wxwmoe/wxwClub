@@ -55,16 +55,15 @@ function worker_endpoint($lease, $now) {
     }
     // worker 是长期进程，关联标记不像 web 那样每请求自动归零，每条任务都要重设。用队列行号，同一条投递的入队、重试、成功几行就能串起来
     Club_Log_Ref('queue#'.$task['id']);
-    $next = Club_Lease_Token(); $active = $token;
-    $result = ActivityPub_Push($task['target'], $task['club'], $task['jsonld'], function () use ($url, $token, $next, $task, $category, &$active) {
-            if (!Club_Endpoint_Authorize($url, $token, $next, $task['id'], $category)) return false;
+    $active = $token;
+    $result = ActivityPub_Push($task['target'], $task['club'], $task['jsonld'], function () use ($url, $task, $category, &$active) {
+            if (!Club_Endpoint_Authorize($url, $active, $next = Club_Lease_Token(), $task['id'], $category)) return false;
             $active = $next;
             return true;
         });
-    worker_finish('endpoint completion', function () use ($url, $token, $active, $task, $result) {
-        // 没拿到发送权：这次一个字节都没出网，旧 token 还能不能放掉由数据库说了算
-        if ($result == 'lease-lost') Club_Endpoint_Release($url, $token);
-        // authorize 之前返回时仍认领取 token，出网闸门通过后只认新 token
+    worker_finish('endpoint completion', function () use ($url, $active, $task, $result) {
+        // 首选出口可能已经发过请求，切到备用出口时又丢了租约；只能释放最后一次成功取得的 token。
+        if ($result == 'lease-lost') Club_Endpoint_Release($url, $active);
         else Club_Endpoint_Result($url, $active, $task, $result);
     });
     Club_Stat('endpoint_ms', (int)((microtime(true) - $start) * 1000));
@@ -92,15 +91,15 @@ function worker_probe($now) {
     }
     $start = microtime(true);
     Club_Log_Ref('probe '.$target);
-    $next = Club_Lease_Token(); $active = $token;
-    $result = ActivityPub_Probe($target, $club, function () use ($target, $token, $next, &$active) {
-        if (!Club_Blacklist_Authorize($target, $token, $next)) return false;
+    $active = $token;
+    $result = ActivityPub_Probe($target, $club, function () use ($target, &$active) {
+        if (!Club_Blacklist_Authorize($target, $active, $next = Club_Lease_Token())) return false;
         $active = $next;
         return true;
     });
-    worker_finish('probe completion', function () use ($target, $token, $active, $result) {
-        // 本站 DNS 的事，对端一个字都没说过：checks 不动，只短推 check_at，也不能把租约留到自然过期 —— 那 120 秒里这一行谁都探不了
-        if ($result == 'local-dns' || $result == 'lease-lost') Club_Blacklist_Defer($target, $token, $result);
+    worker_finish('probe completion', function () use ($target, $active, $result) {
+        // 本站没能问到对端，只短推 check_at；代理连接失败时已过授权闸门，必须用换过的 token。
+        if (in_array($result, ['local-dns', 'local-proxy', 'lease-lost'], true)) Club_Blacklist_Defer($target, $active, $result);
         else Club_Blacklist_Result($target, $active, $result == 'alive');
     });
     // 只有总时长的话，看不出这批探活是真在问对端还是一直卡在本站 DNS 上，而这两种「慢」要加的是完全不同的东西

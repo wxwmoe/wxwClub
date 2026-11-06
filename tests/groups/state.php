@@ -127,7 +127,11 @@ t_is(Club_Endpoint_Authorize($t_url, $claim['token'], $next, $id, 'relay'), true
 t_is(Club_Endpoint_Authorize($t_url, $claim['token'], Club_Lease_Token(), $id, 'relay'), false, 'the superseded token is no longer authorized');
 t_is(Club_Endpoint_Result($t_url, $claim['token'], ['id' => $id, 'club' => 'test'], 'ok'), false, 'a stale token cannot write a result');
 t_is((int)t_one('select count(*) from `queues`'), 1, 'a stale result deletes nothing');
-t_is(Club_Endpoint_Result($t_url, $next, ['id' => $id, 'club' => 'test'], 'ok'), true, 'the current token can write its result');
+// 首选出口回了 403，备用出口必须从当前 token 再领一次；第一趟的结果不能抢走第二趟的队列。
+$fallback = Club_Lease_Token();
+t_is(Club_Endpoint_Authorize($t_url, $next, $fallback, $id, 'relay'), true, 'the current owner can authorize the alternate route');
+t_is(Club_Endpoint_Result($t_url, $next, ['id' => $id, 'club' => 'test'], 'ok'), false, 'the first route cannot complete after the alternate route is authorized');
+t_is(Club_Endpoint_Result($t_url, $fallback, ['id' => $id, 'club' => 'test'], 'ok'), true, 'the current token can write its result');
 
 t_group('state / delivery categories');
 
