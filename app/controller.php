@@ -1,7 +1,7 @@
 <?php
 
 function controller() {
-    global $db, $ver, $base, $config, $public_streams;
+    global $db, $ver, $base, $config;
 
     $path = explode('?', $_SERVER['REQUEST_URI'], 2)[0];
     $routes = ['/' => 'index', '/inbox' => 'inbox', '/nodeinfo/2.0' => 'nodeinfo2', '/.well-known/nodeinfo' => 'nodeinfo', '/.well-known/webfinger' => 'webfinger'];
@@ -43,16 +43,8 @@ function controller() {
                                 if ($newer) $arr['prev'] = $club_url.'/outbox?page=true&min='.$head['timestamp'].'.'.$head['id'];
                             }
                             foreach ($rows as $announce) {
-                                $arr['orderedItems'][] = [
-                                    '@context' => 'https://www.w3.org/ns/activitystreams',
-                                    'id' => $club_url.'/activity#'.$announce['activity'].'/announce',
-                                    'type' => 'Announce',
-                                    'actor' => $club_url,
-                                    'published' => gmdate('Y-m-d\TH:i:s\Z', $announce['announced']),
-                                    'to' => [$club_url.'/followers'],
-                                    'cc' => [$announce['actor'], $public_streams],
-                                    'object' => $announce['object']
-                                ];
+                                $arr['orderedItems'][] = ['@context' => 'https://www.w3.org/ns/activitystreams'] +
+                                    Club_Group_Announce($club, $announce['activity'], $announce['announced'], $announce['actor'], $announce['object']);
                             } Club_HTTP_Respond($arr, 'activity+json');
                         } else {
                             $pdo = $db->prepare('select count(a.id) from `announces` `a` join `clubs` `c` on a.cid = c.cid where c.name = :club');

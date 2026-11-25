@@ -75,6 +75,7 @@ Usage:
   php cli.php club set <club> <nickname|infoname|summary|avatar|banner> <value>
   php cli.php club clear <club> <nickname|infoname|summary|avatar|banner>
   php cli.php club publish <club>
+  php cli.php club unannounce <club> <object-url> [--yes] [--json]
   php cli.php user cleanup [--yes]
   php cli.php user confirm [--after UID] [--limit 50] [--json]
   php cli.php user fetch <handle|actor-url>
@@ -267,6 +268,16 @@ function cli_manage($resource, $action, $args) {
             'followers:          '.$data['followers'], 'announces:          '.$data['announces'], 'pending tasks:      '.$data['tasks'], 'created:            '.cli_time($data['created_at']),
             'public key sha256:  '.$data['public_key_sha256']]);
         return 0;
+    }
+
+    if ($resource === 'club' && $action === 'unannounce') {
+        $yes = cli_flag($args, '--yes');
+        if (count($args) !== 2) return cli_error('usage: php cli.php club unannounce <club> <object-url> [--yes] [--json]');
+        $data = Club_Group_Unannounce($args[0], $args[1], $yes);
+        if ($data['withdrawn']) Club_Log_Event('info', 'club announcement withdrawn by cli', ['club' => $data['club'], 'object' => $data['object']]);
+        $message = !$data['matched'] ? 'No matching announcement.' : ($yes ? 'Announcement withdrawn.' : 'Matched one announcement. Run again with --yes to withdraw it.');
+        cli_emit($data, [$message]);
+        return !$yes && $data['matched'] ? 2 : 0;
     }
 
     if ($resource === 'club' && ($action === 'set' || $action === 'clear')) {

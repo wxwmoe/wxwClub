@@ -23,7 +23,7 @@ function t_controller_run() {
     $config_file = $dir.'/config.php'; file_put_contents($config_file, '<?php $config = '.var_export($config, true).';');
     $socket = stream_socket_server('tcp://127.0.0.1:0'); $address = stream_socket_get_name($socket, false); fclose($socket);
     t_tls_keys($dir);
-    $process = t_php_process(['-d', 'opcache.enable_cli=0', '-d', 'curl.cainfo='.$dir.'/ca.pem', '-S', $address, 'index.php'], $dir);
+    $process = t_php_process(['-d', 'opcache.enable=0', '-d', 'curl.cainfo='.$dir.'/ca.pem', '-S', $address, 'index.php'], $dir);
     try {
         t_wait_ready($process, function () use ($address) { $s = @stream_socket_client('tcp://'.$address, $errno, $msg, 0.1); if (!$s) return false; fclose($s); return true; });
         foreach ([['/club/newname/followers', 'GET', 404], ['/club/newname/missing', 'GET', 404], ['/club/newname', 'PUT', 405], ['/club/newname/outbox?page=wrong', 'GET', 400],
@@ -76,12 +76,72 @@ function t_controller_run() {
         $out = []; exec($cli.' host delete import000.example --yes --json', $out, $code); $counts = json_decode(implode("\n", $out), true);
         t_is([$code, $counts['deleted'], $counts['left']], [0, 1, 0], 'host deletion counts only the exact authority');
         t_is((int)t_one("select count(*) from `users` where `actor` = 'https://notimport000.example/user'"), 1, 'similarly named host survives');
+        t_controller_unannounce($cli, $address);
         t_controller_actor($dir, $address, $config);
         $offline = $config; $offline['mysql']['host'] = '127.0.0.1'; $offline['mysql']['database'] = 'wxwclub_offline_test'; $offline['mysql']['username'] = 'unavailable_user';
         file_put_contents($config_file, '<?php $config = '.var_export($offline, true).';');
         list($status, $body, $headers) = t_http_page($address, '/');
         t_is([$status, json_decode($body, true)['message'], strpos($headers, 'retry-after: 60') !== false], [503, 'Database unavailable', true], 'offline database returns a generic retryable response');
     } finally { proc_terminate($process); proc_close($process); }
+}
+
+function t_controller_unannounce($cli, $address) {
+    global $base, $public_streams;
+    t_group('controller / club announcement withdrawal');
+    $author = 'https://writer.example/user'; $object = $author.'/post';
+    foreach (['alpha', 'bravo', 'writer'] as $name) {
+        $url = 'https://'.$name.'.example';
+        t_exec('insert into `users` (`name`,`actor`,`inbox`,`shared_inbox`,`public_key`,`timestamp`) values (:name,:actor,:inbox,:shared,:key,1)',
+            [':name' => $name, ':actor' => $url.'/user', ':inbox' => $url.'/inbox', ':shared' => $url.'/inbox', ':key' => '']);
+        if ($name === 'writer') continue;
+        Club_Group_Ensure($name);
+        t_exec('insert into `followers` (`cid`,`uid`,`timestamp`) select c.cid,u.uid,1 from `clubs` `c`, `users` `u` where c.name = :club and u.actor = :actor',
+            [':club' => $name, ':actor' => $url.'/user']);
+    }
+    $create = ['actor' => $author, 'to' => [$public_streams, $base.'/club/alpha', $base.'/club/bravo'], 'object' => ['id' => $object, 'attributedTo' => $author]];
+    Club_Inbox_Create($create);
+    $other = $create; $other['to'] = [$public_streams, $base.'/club/alpha']; $other['object']['id'] .= '/other'; Club_Inbox_Create($other);
+    $outbox = function ($club) use ($address) { return json_decode(t_http_page($address, '/club/'.$club.'/outbox?page=true')[1], true)['orderedItems']; };
+    $before = $outbox('alpha'); $second = $outbox('bravo');
+    t_is(array_column($before, 'object'), [$other['object']['id'], $object], 'both posts appear in the first group');
+    $announce = $before[1]; unset($announce['@context']);
+    $task = t_one('select `tid` from `tasks` where json_unquote(json_extract(`jsonld`, :path)) = :id', [':path' => '$.id', ':id' => $announce['id']]);
+    t_exec('update `queues` set `retries` = 1, `due_at` = :due where `tid` = :tid', [':due' => time() + 300, ':tid' => $task]);
+    $endpoint = 'https://alpha.example/inbox'; $lease = Club_Lease_Token();
+    $queue = t_one('select `id` from `queues` where `tid` = :tid and `target` = :url', [':tid' => $task, ':url' => $endpoint]);
+    t_exec('update `queues` set `due_at` = :now where `id` = :id', [':now' => time(), ':id' => $queue]);
+    t_exec('update `endpoints` set `lease_token` = unhex(:token), `lease_until` = :until where `url` = :url', [':token' => $lease, ':until' => time() + 120, ':url' => $endpoint]);
+    $run = function ($club, $yes) use ($cli, $object) {
+        exec($cli.' club unannounce '.escapeshellarg($club).' '.escapeshellarg($object).' --json'.($yes ? ' --yes' : ''), $out, $code);
+        $data = json_decode(implode("\n", $out), true);
+        return [$code, $data['matched'], $data['withdrawn']];
+    };
+    t_is($run('Alpha', false), [2, true, false], 'preview finds the canonical group');
+    t_is($outbox('alpha'), $before, 'preview leaves both posts visible');
+    t_is((int)t_one('select count(*) from `queues` where `tid` = :tid', [':tid' => $task]), 2, 'preview preserves pending retries');
+    t_is($run('Alpha', true), [0, true, true], 'CLI withdraws one announcement');
+    t_is($outbox('alpha'), [$before[0]], 'other post in the same group stays visible');
+    t_is($outbox('bravo'), $second, 'second group retains its original announcement');
+    t_is((int)t_one('select count(*) from `queues` where `tid` = :tid', [':tid' => $task]), 0, 'delayed retries are cancelled');
+    t_is(Club_Endpoint_Authorize($endpoint, $lease, Club_Lease_Token(), $queue, 'announce'), false, 'a worker holding the old claim cannot start a send');
+    t_is(Club_Endpoint_Result($endpoint, $lease, ['id' => $queue, 'club' => 'alpha'], 'timeout'), false, 'a late delivery failure cannot requeue the withdrawn announcement');
+    $undo = t_row('select `tid`, `jsonld` from `tasks` where json_unquote(json_extract(`jsonld`, :path)) = :id',
+        [':path' => '$.id', ':id' => substr($announce['id'], 0, -8).'undo']);
+    t_is(json_decode($undo['jsonld'], true)['object'], $announce, 'Undo embeds the exact announcement from the outbox');
+    $targets = function ($tid) { return t_one('select group_concat(`target` order by `target`) from `queues` where `tid` = :tid', [':tid' => $tid]); };
+    t_is($targets($undo['tid']), 'https://alpha.example/inbox,https://writer.example/inbox', 'withdrawal reaches only group followers and the author');
+    $count = (int)t_one('select count(*) from `tasks`'); Club_Inbox_Create($create);
+    t_is($run('alpha', true), [0, false, false], 'repeating withdrawal is a no-op');
+    t_is((int)t_one('select count(*) from `tasks`'), $count, 'replayed Create and repeated withdrawal add no deliveries');
+    $update = ['type' => 'Update', 'actor' => $author, 'signature' => ['signatureValue' => 'fixture'],
+        'object' => ['id' => $object, 'updated' => gmdate('Y-m-d\TH:i:s\Z'), 'content' => 'Updated post']];
+    Club_Inbox_Update($update, Club_Json_Encode($update));
+    t_is($targets(t_one('select max(`tid`) from `tasks`')), 'https://bravo.example/inbox', 'later author edits reach the remaining group');
+    Club_Inbox_Delete(['actor' => $author, 'object' => ['id' => $object]]);
+    t_is((int)t_one('select count(*) from `tasks` where `tid` > :first and json_unquote(json_extract(`jsonld`, :path)) = :type',
+        [':first' => $undo['tid'], ':path' => '$.type', ':type' => 'Undo']), 1, 'author withdrawal undoes only the remaining group');
+    Club_Group_Unannounce('alpha', $other['object']['id'], true); Club_Inbox_Create($other);
+    t_is($outbox('alpha'), [], 'after the last group withdraws a replayed Create cannot republish the post');
 }
 
 function t_controller_actor($dir, $address, $config) {

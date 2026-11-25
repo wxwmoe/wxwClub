@@ -665,6 +665,19 @@ function Club_Group_Actor($club, &$row = null) {
     ];
 }
 
+function Club_Group_Announce($club, $id, $time, $actor, $object) {
+    global $base, $public_streams; $url = $base.'/club/'.$club;
+    return [
+        'id' => $url.'/activity#'.$id.'/announce',
+        'type' => 'Announce',
+        'actor' => $url,
+        'published' => gmdate('Y-m-d\TH:i:s\Z', $time),
+        'to' => [$url.'/followers'],
+        'cc' => [$actor, $public_streams],
+        'object' => $object
+    ];
+}
+
 function Club_Group_Create($club, $system = false) {
     global $db, $config;
     return Club_DB_Transaction('create club', function () use ($db, $config, $club, $system) {
@@ -824,8 +837,55 @@ function Club_Group_System($club = null) {
     return isset($club) ? strtolower($club) === strtolower($name) : $name;
 }
 
+function Club_Group_Unannounce($club, $object, $apply) {
+    global $db;
+    if (!($club = Club_Group_Ensure($club, false)) || Club_Group_System($club)) throw new InvalidArgumentException('Unknown public club');
+    if (!ActivityPub_Object_URI($object)) throw new InvalidArgumentException('Invalid object URL');
+    return Club_DB_Transaction('club unannounce', function () use ($db, $club, $object, $apply) {
+        $result = ['club' => $club, 'object' => $object, 'preview' => !$apply, 'matched' => false, 'withdrawn' => false];
+        $pdo = $db->prepare('select a.id, a.timestamp, a.object, u.actor, u.shared_inbox from `activities` `a` join `users` `u` on a.uid = u.uid where a.type = :type and a.object = :object');
+        $pdo->execute([':type' => 'Create', ':object' => $object]);
+        if (!($activity = $pdo->fetch(PDO::FETCH_ASSOC))) return $result;
+        $clubs = Club_Inbox_Announced_Clubs($activity['id'], $apply);
+        if (!in_array($club, $clubs, true)) return $result;
+        $result['matched'] = true;
+        if (!$apply) return $result;
+        $undo = Club_Group_Undo($club, $activity, $activity['actor']);
+        $identity = ['type' => 'Announce', 'id' => $undo['object']['id'], 'actor' => $undo['actor'], 'object' => $activity['object']];
+        $pdo = $db->prepare('delete from `tasks` where `cid` = (select `cid` from `clubs` where `name` = :club)'.
+            ' and json_contains(if(json_valid(`jsonld`), `jsonld`, :empty), :identity)');
+        $pdo->execute([':club' => $club, ':empty' => '{}', ':identity' => Club_Json_Encode($identity)]);
+        if (!Club_Delivery_Queue($club, $undo, $activity['shared_inbox'])) throw new RuntimeException('Could not queue the withdrawal');
+        $pdo = $db->prepare('delete from `announces` where `activity` = :id and `cid` = (select `cid` from `clubs` where `name` = :club)');
+        $pdo->execute([':id' => $activity['id'], ':club' => $club]);
+        $pdo = $db->prepare('update `activities` set `clubs` = :clubs where `id` = :id');
+        $pdo->execute([':id' => $activity['id'], ':clubs' => Club_Json_Encode(array_values(array_diff($clubs, [$club])))]);
+        $result['withdrawn'] = true;
+        return $result;
+    });
+}
+
+function Club_Group_Undo($club, $activity, $actor) {
+    global $base, $public_streams; $url = $base.'/club/'.$club;
+    return [
+        '@context' => 'https://www.w3.org/ns/activitystreams',
+        'id' => $url.'/activity#'.$activity['id'].'/undo',
+        'type' => 'Undo',
+        'actor' => $url,
+        'to' => [$public_streams],
+        'object' => Club_Group_Announce($club, $activity['id'], $activity['timestamp'], $actor, $activity['object'])
+    ];
+}
+
+function Club_Inbox_Announced_Clubs($activity, $lock) {
+    global $db;
+    $pdo = $db->prepare('select (select c.name from `clubs` `c` where c.cid = a.cid) from `announces` `a` where a.activity = :activity order by a.id'.($lock ? ' for update' : ''));
+    $pdo->execute([':activity' => $activity]);
+    return $pdo->fetchAll(PDO::FETCH_COLUMN);
+}
+
 function Club_Inbox_Create($jsonld) {
-    global $db, $base, $config, $public_streams, $club_reason;
+    global $db, $public_streams, $club_reason;
     if (!is_array($jsonld['object'] ?? null) || !($object = ActivityPub_Object_Id($jsonld['object']['id'] ?? ''))) return Club_Inbox_Skip('create without object id', ['actor' => $jsonld['actor']]);
     $authors = $jsonld['object']['attributedTo'] ?? [];
     if (!is_array($authors) || isset($authors['id'])) $authors = [$authors];
@@ -848,7 +908,7 @@ function Club_Inbox_Create($jsonld) {
         if ($clubs) {
             $clubs = array_keys($clubs);
             sort($clubs, SORT_STRING);
-            return Club_DB_Transaction('create inbox', function () use ($db, $base, $public_streams, $clubs, $actor, $jsonld, $object, $lang) {
+            return Club_DB_Transaction('create inbox', function () use ($db, $clubs, $actor, $jsonld, $object, $lang) {
                 $pdo = $db->prepare('select `uid` from `users` where `uid` = :uid for update');
                 $pdo->execute([':uid' => $actor['uid']]);
                 if (!$pdo->fetchColumn()) return Club_Inbox_Skip('sender removed before submission');
@@ -874,17 +934,9 @@ function Club_Inbox_Create($jsonld) {
                             Club_Log_Event('info', 'announce filtered, '.$reject[0], ['club' => $club, 'actor' => $jsonld['actor'], 'object' => $object]);
                             if (empty($notified) && ($notified = true)) Club_Notice_Send($jsonld['actor'], $reject[0], $reject[1], $lang, $object);
                             continue;
-                        } $club_url = $base.'/club/'.$club;
-                        if (!Club_Delivery_Queue($club, [
-                            '@context' => 'https://www.w3.org/ns/activitystreams',
-                            'id' => $club_url.'/activity#'.$activity_id.'/announce',
-                            'type' => 'Announce',
-                            'actor' => $club_url,
-                            'published' => gmdate('Y-m-d\TH:i:s\Z', $time),
-                            'to' => [$club_url.'/followers'],
-                            'cc' => [$jsonld['actor'], $public_streams],
-                            'object' => $object
-                        ], $actor['shared_inbox'])) continue;
+                        }
+                        $announce = Club_Group_Announce($club, $activity_id, $time, $jsonld['actor'], $object);
+                        if (!Club_Delivery_Queue($club, ['@context' => 'https://www.w3.org/ns/activitystreams'] + $announce, $actor['shared_inbox'])) continue;
                         $announced[] = $club;
                         $pdo = $db->prepare('insert ignore into `announces`(`cid`,`uid`,`activity`,`summary`,`content`,`timestamp`) select `cid`, :uid as `uid`,'.
                             ' :activity as `activity`, :summary as `summary`, :content as `content`, :timestamp as `timestamp` from `clubs` where `name` = :club');
@@ -903,7 +955,7 @@ function Club_Inbox_Create($jsonld) {
 }
 
 function Club_Inbox_Delete($jsonld, $input = null) {
-    global $db, $base, $public_streams;
+    global $db;
     if (!is_array($jsonld['object'] ?? null) || !($object = ActivityPub_Object_Id($jsonld['object']['id'] ?? ''))) return Club_Inbox_Skip('delete without object id', ['actor' => $jsonld['actor']]);
     if (!ActivityPub_Object_URI($object)) throw new Club_Inbox_Rejected('Invalid object identifier');
     $id = 'urn:wxwclub:delete:'.hash('sha256', $jsonld['actor']."\0".$object);
@@ -912,38 +964,16 @@ function Club_Inbox_Delete($jsonld, $input = null) {
     $pdo->execute([':object' => $id]);
     if ($pdo->fetch(PDO::FETCH_ASSOC)) Club_Inbox_Skip('delete already processed', ['object' => $object, 'key' => $id]);
     else {
-        $pdo = $db->prepare('select a.id, a.uid, a.clubs, a.object, a.timestamp, u.shared_inbox from `activities` `a` join `users` `u` on a.uid = u.uid where a.object = :object and u.actor = :actor');
+        $pdo = $db->prepare('select a.id, a.uid, a.object, a.timestamp, u.shared_inbox from `activities` `a` join `users` `u` on a.uid = u.uid where a.object = :object and u.actor = :actor');
         $pdo->execute([':object' => $object, ':actor' => $jsonld['actor']]);
         if ($activity = $pdo->fetch(PDO::FETCH_ASSOC)) {
-            return Club_DB_Transaction('delete inbox', function () use ($db, $base, $public_streams, $jsonld, $input, $object, $id, $activity) {
-            if (!Club_Inbox_Lock_Announces($activity['id'])) return Club_Inbox_Skip('announcement already withdrawn', ['object' => $object]);
+            return Club_DB_Transaction('delete inbox', function () use ($db, $jsonld, $input, $object, $id, $activity) {
+            if (!($clubs = Club_Inbox_Announced_Clubs($activity['id'], true))) return Club_Inbox_Skip('announcement already withdrawn', ['object' => $object]);
             $pdo = $db->prepare('insert ignore into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`) values(:uid, :type, :clubs, :object, :timestamp)');
-            $pdo->execute([':uid' => $activity['uid'], ':type' => 'Delete', ':clubs' => $activity['clubs'], ':object' => $id, ':timestamp' => time()]);
+            $pdo->execute([':uid' => $activity['uid'], ':type' => 'Delete', ':clubs' => Club_Json_Encode($clubs), ':object' => $id, ':timestamp' => time()]);
             if (!$pdo->rowCount()) return Club_Inbox_Skip('delete claimed by a concurrent delivery', ['object' => $object]);
             $relay = isset($input) && Club_Inbox_Relayable($jsonld, $input, $object, 'Delete');
-            $clubs = json_decode($activity['clubs'], 1) ?: [];
-            foreach ($clubs as $club) {
-                $club_url = $base.'/club/'.$club;
-                Club_Delivery_Queue($club, [
-                    '@context' => 'https://www.w3.org/ns/activitystreams',
-                    'id' => $club_url.'/activity#'.$activity['id'].'/undo',
-                    'type' => 'Undo',
-                    'actor' => $club_url,
-                    'to' => [$public_streams],
-                    'object' => [
-                        'id' => $club_url.'/activity#'.$activity['id'].'/announce',
-                        'type' => 'Announce',
-                        'actor' => $club_url,
-                        'published' => gmdate('Y-m-d\TH:i:s\Z', $activity['timestamp']),
-                        'to' => [$club_url.'/followers'],
-                        'cc' => [
-                            $jsonld['actor'],
-                            $public_streams
-                        ],
-                        'object' => $activity['object']
-                    ]
-                ]);
-            }
+            foreach ($clubs as $club) Club_Delivery_Queue($club, Club_Group_Undo($club, $activity, $jsonld['actor']));
             if ($relay && $clubs) Club_Delivery_Queue($clubs, $input, false, false, 'Delete-relay', $activity['shared_inbox']);
             Club_Log_Event('info', 'announce revoked', ['object' => $object, 'clubs' => $clubs, 'delete relayed' => $relay]);
             $pdo = $db->prepare('delete from `announces` where `activity` = :activity');
@@ -1110,13 +1140,6 @@ function Club_Inbox_Follow($jsonld) {
     });
 }
 
-function Club_Inbox_Lock_Announces($activity) {
-    global $db;
-    $pdo = $db->prepare('select `id` from `announces` where `activity` = :activity order by `id` for update');
-    $pdo->execute([':activity' => $activity]);
-    return $pdo->fetchColumn() !== false;
-}
-
 function Club_Inbox_Log($name, $input, $verify) {
     global $verify_reason, $verify_signed;
     Club_Log_Write($verify ? 'info' : 'warning', 'inbox', $name.'_input', $input);
@@ -1226,7 +1249,7 @@ function Club_Inbox_Update($jsonld, $input) {
     if (is_string($updated) && preg_match('/^\d{4}-(\d\d)-(\d\d)T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/D', $updated, $m)
         && checkdate((int)$m[1], (int)$m[2], (int)substr($updated, 0, 4))) $edited = strtotime($updated) ?: 0;
     if ($edited > min(2147483647, time() + 86400) || $edited < 0) $edited = 0;
-    $pdo = $db->prepare('select a.id, a.updated, a.clubs, u.shared_inbox from `activities` `a` join `users` `u` on a.uid = u.uid where a.object = :object and a.type = :type and u.actor = :actor');
+    $pdo = $db->prepare('select a.id, a.updated, u.shared_inbox from `activities` `a` join `users` `u` on a.uid = u.uid where a.object = :object and a.type = :type and u.actor = :actor');
     $pdo->execute([':object' => $id, ':type' => 'Create', ':actor' => $jsonld['actor']]);
     if (!($activity = $pdo->fetch(PDO::FETCH_ASSOC))) return Club_Inbox_Skip('update for a post we never announced, or not from its author', ['actor' => $jsonld['actor'], 'object' => $id]);
     $poll = (bool)($revision = Club_Inbox_Poll($jsonld, $object));
@@ -1237,12 +1260,11 @@ function Club_Inbox_Update($jsonld, $input) {
     }
     $content = strip_tags(is_string($c = $object['content'] ?? '') ? $c : '');
     $summary = is_string($s = $object['summary'] ?? null) ? $s : null;
-    $clubs = json_decode($activity['clubs'], 1) ?: [];
     $what = $poll ? 'poll update' : 'update';
     $column = $poll ? 'polled' : 'updated';
-    $vars = ['object' => $id, 'clubs' => $clubs, 'revision' => gmdate('Y-m-d\TH:i:s\Z', $revision)];
-    return Club_DB_Transaction($what.' inbox', function () use ($db, $activity, $revision, $content, $summary, $clubs, $vars, $jsonld, $input, $id, $poll, $edit, $edited, $what, $column) {
-        if (!Club_Inbox_Lock_Announces($activity['id'])) return Club_Inbox_Skip('update after withdrawal', ['object' => $id]);
+    return Club_DB_Transaction($what.' inbox', function () use ($db, $activity, $revision, $content, $summary, $jsonld, $input, $id, $poll, $edit, $edited, $what, $column) {
+        if (!($clubs = Club_Inbox_Announced_Clubs($activity['id'], true))) return Club_Inbox_Skip('update after withdrawal', ['object' => $id]);
+        $vars = ['object' => $id, 'clubs' => $clubs, 'revision' => gmdate('Y-m-d\TH:i:s\Z', $revision)];
         $pdo = $db->prepare('update `activities` set `'.$column.'` = :revision where `id` = :id and `'.$column.'` < :revision');
         $pdo->execute([':id' => $activity['id'], ':revision' => $revision]);
         if (!$pdo->rowCount()) return Club_Inbox_Skip($what.' is a duplicate or older than what we relayed', ['object' => $id, 'revision' => gmdate('Y-m-d\TH:i:s\Z', $revision)]);
