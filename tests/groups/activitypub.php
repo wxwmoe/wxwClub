@@ -8,6 +8,16 @@ function t_ap_dir() {
 
 function t_ap_list() {
     $all = [];
+    $common = 'announce-note announce-question delete-note follow-basic undo-follow';
+    $required = [
+        'gotosocial' => $common.' announce-note-cw announce-note-markdown update-note',
+        'mastodon' => $common.' delete-actor follow-banned update-note update-question-tally',
+        'misskey' => $common.' announce-note-cw announce-note-hashtag',
+        'pleroma' => 'announce-note announce-note-cw announce-note-html delete-note follow-basic undo-follow update-note',
+        'signature' => 'created-stale digest-body-modified duplicate-param expires-past header-missing hs2019-created key-not-rsa rsa-sha512 signature-base64'
+    ];
+    foreach ($required as $family => $names) foreach (explode(' ', $names) as $name)
+        if (!is_file(t_ap_dir().'/'.$family.'/'.$name.'.php')) t_abort('Missing ActivityPub fixture '.$family.'/'.$name);
     foreach (glob(t_ap_dir().'/*', GLOB_ONLYDIR) as $dir) {
         if (basename($dir) === 'keys') continue;
         $fixtures = [];
@@ -46,10 +56,12 @@ function t_ap_run() {
         t_group('activitypub / '.$software);
         t_ap_seed($fixtures);
         foreach ($fixtures as $name => $fixture) {
+            if (empty($fixture['expect']) || !is_array($fixture['expect'])) t_abort('Missing assertions for '.$software.'/'.$name);
             foreach (array_keys($fixture['expect']) as $key) if (!in_array($key, $t_ap_keys, true)) t_ok(false, $software.'/'.$name.': unknown expect key "'.$key.'"');
             list($output, $code) = t_ap_spawn($software, $name);
-            if (preg_match('/^#counts (\d+) (\d+)$/m', $output, $m)) {
-                $t_pass += (int)$m[1]; $t_fail += (int)$m[2];
+            $expected = count($fixture['expect']) + (isset($fixture['expect']['stored']) && $fixture['expect']['stored'] !== false ? 1 : 0);
+            if ($code === 0 && preg_match_all('/^#counts (\d+) (\d+)\r?$/m', $output, $m) === 1 && (int)$m[1][0] === $expected && (int)$m[2][0] === 0) {
+                $t_pass += $expected;
                 $output = trim(preg_replace('/^#counts .*$/m', '', $output));
             } else {
                 $t_fail++;
@@ -62,11 +74,20 @@ function t_ap_run() {
 
 function t_ap_spawn($software, $name) {
     $command = escapeshellarg(PHP_BINARY).' '.escapeshellarg(APP_ROOT.'/cli.php').' test replay '.escapeshellarg($software).' '.escapeshellarg($name);
-    $process = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    $process = proc_open((DIRECTORY_SEPARATOR === '/' ? 'exec ' : '').$command.' 2>&1', [1 => ['pipe', 'w']], $pipes);
     if (!is_resource($process)) return ['', -1];
-    $output = stream_get_contents($pipes[1]).stream_get_contents($pipes[2]);
-    fclose($pipes[1]); fclose($pipes[2]);
-    return [rtrim($output, "\r\n"), proc_close($process)];
+    stream_set_blocking($pipes[1], false);
+    $output = ''; $deadline = microtime(true) + 60;
+    do {
+        $output .= stream_get_contents($pipes[1], 65536);
+        $status = proc_get_status($process);
+        if (!$status['running']) break;
+        if (microtime(true) >= $deadline || strlen($output) > 1048576) { proc_terminate($process, 9); break; }
+        usleep(10000);
+    } while (true);
+    $output .= stream_get_contents($pipes[1], 65536);
+    fclose($pipes[1]); $closed = proc_close($process);
+    return [rtrim($output, "\r\n"), $status['running'] ? -1 : ($status['exitcode'] >= 0 ? $status['exitcode'] : $closed)];
 }
 
 function t_ap_seed($fixtures) {

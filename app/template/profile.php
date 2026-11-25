@@ -11,27 +11,7 @@ $handle = '@'.$club.'@'.Club_Template_Escape($config['base']);
 $avatar = $row['avatar'] ?: $config['default']['avatar'];
 $banner = $row['banner'] ?: $config['default']['banner'];
 
-$max = Club_HTTP_Cursor($_GET['max'] ?? '');
-$min = Club_HTTP_Cursor($_GET['min'] ?? '');
-$asc = (bool)$min;
-$where = ''; $params = [':cid' => $row['cid']];
-if ($max) {
-    $where = ' and a.timestamp <= :ts and (a.timestamp < :ts or a.id < :id)';
-    $params[':ts'] = $max[0]; $params[':id'] = $max[1];
-} elseif ($min) {
-    $where = ' and a.timestamp >= :ts and (a.timestamp > :ts or a.id > :id)';
-    $params[':ts'] = $min[0]; $params[':id'] = $min[1];
-}
-$pdo = $db->prepare('select a.id, a.timestamp, u.name, act.object, a.summary, a.content from `announces` as `a` left join `users` as `u` on a.uid = u.uid'.
-    ' left join `activities` as `act` on a.activity = act.id where a.cid = :cid'.$where.' order by a.timestamp '.($asc ? 'asc' : 'desc').', a.id '.($asc ? 'asc' : 'desc').' limit 21');
-$pdo->execute($params);
-$activities = $pdo->fetchAll(PDO::FETCH_ASSOC);
-$more = count($activities) > 20;
-$activities = array_slice($activities, 0, 20);
-if ($asc) $activities = array_reverse($activities);
-
-$newer = $asc ? $more : (bool)$max;
-$older = $asc ? true : $more;
+list($activities, $newer, $older) = Club_Group_Page($vars['club'], $vars['page']);
 $link = $base.'/club/'.$club;
 if ($activities) {
     $head = $activities[0]; $foot = $activities[count($activities) - 1];

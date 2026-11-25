@@ -13,6 +13,7 @@ if ($config_fatal) {
     }
     http_response_code(500); exit('Error: config.php is invalid');
 }
+if (PHP_SAPI == 'cli' && $config_warn) fwrite(STDERR, "Configuration warnings:\n  ".implode("\n  ", $config_warn)."\n");
 
 $ver = '0.0.7'; $base = 'https://'.$config['base'];
 $public_streams = 'https://www.w3.org/ns/activitystreams#Public';
@@ -38,7 +39,9 @@ try {
         fwrite(STDERR, 'Error: '.$e->getMessage()."\n");
         exit(1);
     }
-    http_response_code(500); exit('Error: '.$e->getMessage());
+    header('Retry-After: 60');
+    Club_HTTP_Respond(['message' => 'Database unavailable'], 'json', 503);
+    exit;
 }
 
 if (PHP_SAPI != 'cli' && ($schema = Club_DB_Version()) !== DB_VERSION) {

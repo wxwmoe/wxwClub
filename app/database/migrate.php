@@ -8,12 +8,13 @@ function Club_Migrate_Run() {
     Club_Migrate_Reject_Newer($from);
     if ($from === DB_VERSION) return $from;
     $pdo = $db->query('select get_lock(\'wxwclub_migrate\', 0)');
-    if (!$pdo->fetch(PDO::FETCH_COLUMN, 0)) {
+    $lock = $pdo->fetchColumn();
+    if ($lock === null || $lock === false) throw new RuntimeException('Could not acquire the migration lock');
+    if (!(int)$lock) {
         Club_Log_Console('info', 'migration skipped, another process holds the lock', ['from' => $from]);
         return $from;
     }
     try {
-        Club_Migrate_Ensure_Meta();
         $from = Club_DB_Version();
         Club_Migrate_Reject_Newer($from);
         for ($version = $from + 1; $version <= DB_VERSION; $version++) {
@@ -24,15 +25,19 @@ function Club_Migrate_Run() {
                 throw new RuntimeException('Migration step '.$version.' is missing');
             }
             require_once($file);
-            if (!function_exists($step)) {
+            if (!is_callable($step) || !is_callable($step.'_Validate')) {
                 Club_Log_Console('error', 'migration step is not callable', ['version' => $version, 'function' => $step]);
                 throw new RuntimeException('Migration step '.$version.' is not callable');
             }
+        }
+        Club_Migrate_Ensure_Meta();
+        for ($version = $from + 1; $version <= DB_VERSION; $version++) {
+            $step = 'Club_Migrate_'.$version;
             Club_Log_Console('info', 'migration started', ['to' => $version, 'from' => $version - 1]);
             $start = microtime(true);
             $step();
             $validate = $step.'_Validate';
-            if (function_exists($validate)) $validate();
+            $validate();
             Club_DB_Version($version);
             Club_Migrate_Assert(Club_DB_Version() === $version, 'schema version was not stored', ['expected' => $version]);
             Club_Log_Console('info', 'migration finished', ['to' => $version, 'seconds' => round(microtime(true) - $start, 1)]);
@@ -100,14 +105,14 @@ function Club_Schema_Column($table, $column) {
 
 function Club_Schema_Index($table, $index) {
     global $db;
-    $pdo = $db->prepare('select `non_unique`, `column_name` from `information_schema`.`statistics`'.
+    $pdo = $db->prepare('select `non_unique`, `column_name`, `sub_part`, `index_type`, `collation` from `information_schema`.`statistics`'.
         ' where `table_schema` = database() and `table_name` = :table and `index_name` = :index order by `seq_in_index`');
     $pdo->execute([':table' => $table, ':index' => $index]);
     $rows = $pdo->fetchAll(PDO::FETCH_NUM);
     if (!$rows) return false;
-    $columns = [];
-    foreach ($rows as $row) $columns[] = $row[1];
-    return ['unique' => !$rows[0][0], 'columns' => $columns];
+    $columns = []; $full = true;
+    foreach ($rows as $row) { $columns[] = $row[1]; if ($row[2] !== null || strtoupper($row[3]) !== 'BTREE' || $row[4] !== 'A') $full = false; }
+    return ['unique' => !$rows[0][0], 'columns' => $columns, 'full' => $full];
 }
 
 function Club_Schema_Foreign($table, $column) {
@@ -168,7 +173,7 @@ function Club_Migrate_AddKeys($table, $keys) {
         $columns = $unique ? substr($spec, 7) : $spec;
         preg_match_all('/`([^`]+)`/', $columns, $matches);
         if ($index = Club_Schema_Index($table, $name)) {
-            if ($index['unique'] === $unique && $index['columns'] === $matches[1]) continue;
+            if ($index['full'] && $index['unique'] === $unique && $index['columns'] === $matches[1]) continue;
             $add[] = 'drop key `'.$name.'`';
         }
         $add[] = 'add '.($unique ? 'unique ' : '').'key `'.$name.'` ('.$columns.')';
@@ -196,7 +201,7 @@ function Club_Migrate_Assert_Column($table, $column, $type = null, $collation = 
 function Club_Migrate_Assert_Index($table, $index, $unique, $columns) {
     $info = Club_Schema_Index($table, $index);
     Club_Migrate_Assert($info !== false, $table.'.'.$index.' index exists');
-    Club_Migrate_Assert($info['unique'] === $unique && $info['columns'] === $columns, $table.'.'.$index.' index definition',
+    Club_Migrate_Assert($info['full'] && $info['unique'] === $unique && $info['columns'] === $columns, $table.'.'.$index.' index definition',
         ['actual' => $info, 'expected' => ['unique' => $unique, 'columns' => $columns]]);
     return $info;
 }

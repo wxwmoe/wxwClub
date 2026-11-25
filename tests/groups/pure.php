@@ -135,6 +135,12 @@ t_table('ActivityPub_Sign_Fields', 'ActivityPub_Sign_Fields', [
 ]);
 
 t_table('Club_Url_Absolute', 'Club_Url_Absolute', [
+    ['?next', 'https://a.example/a/b?old', 'https://a.example/a/b?next'],
+    ['', 'https://a.example/a/b?old#item', 'https://a.example/a/b?old'],
+    ['#f', 'https://a.example/a/b?old', 'https://a.example/a/b?old#f'],
+    ['../c/.', 'https://a.example/a/b', 'https://a.example/c/'],
+    ['../%2e/x//y', 'https://a.example/a/b', 'https://a.example/%2e/x//y'],
+    ['?', 'https://a.example:8011/a', 'https://a.example:8011/a?'],
     ['https://b.example/x', 'https://a.example/y', 'https://b.example/x'],
     ['/x', 'https://a.example/a/b', 'https://a.example/x'],
     ['//b.example/x', 'https://a.example/a/b', 'https://b.example/x'],
@@ -188,9 +194,11 @@ t_table('ActivityPub_Object_Id', 'ActivityPub_Object_Id', [
 ]);
 
 t_table('Club_Group_From_Object', 'Club_Group_From_Object', [
-    ['https://a.example/club/test', 'test'],
-    ['https://a.example/club/test/followers', 'test'],
-    [['id' => 'https://a.example/club/test'], 'test'],
+    ['https://local.example/club/test', 'test'],
+    ['https://local.example/club/test/followers', false],
+    [['id' => 'https://LOCAL.example/club/test'], 'test'],
+    ['https://a.example/club/test', false],
+    ['https://local.example/club/system', false],
     ['https://a.example/users/test', false],
     ['', false]
 ]);
@@ -299,7 +307,15 @@ t_is(ActivityPub_Verify_Date(gmdate('D, d M Y H:i:s T')), true, 'ActivityPub_Ver
 t_is(ActivityPub_Verify_Date(gmdate('D, d M Y H:i:s T', time() - 299)), true, 'ActivityPub_Verify_Date accepts the edge of the window');
 t_is(ActivityPub_Verify_Date(gmdate('D, d M Y H:i:s T', time() - 400)), false, 'ActivityPub_Verify_Date rejects a stale date');
 t_is(ActivityPub_Verify_Date(gmdate('D, d M Y H:i:s T', time() + 400)), false, 'ActivityPub_Verify_Date rejects a future date');
-t_is(ActivityPub_Verify_Date((string)time()), true, 'ActivityPub_Verify_Date accepts a unix timestamp');
+t_is(ActivityPub_Verify_Date((string)time()), false, 'HTTP Date requires an absolute HTTP date');
+foreach (['Sun, 06 Nov 1994 08:49:37 GMT', 'Sunday, 06-Nov-94 08:49:37 GMT', 'Sun Nov  6 08:49:37 1994'] as $date)
+    t_is(ActivityPub_Verify_Date($date, 0, 784111777), true, 'HTTP date round trip '.$date);
+t_is(ActivityPub_Verify_Date('Sat, 31 Dec 2016 23:59:60 GMT', 0, 1483228800), true, 'HTTP date accepts the leap second');
+t_is(ActivityPub_Verify_Date('now'), false, 'HTTP date requires a calendar date');
+t_is(ActivityPub_Verify_Date('Sunday, 06-Nov-94 08:49:37 GMT', 0, 784111777 + 300), false, 'fixed clock uses the requested window');
+t_is(ActivityPub_Verify_Date('Sun, 06 Nov 1994 08:49:37 GMT', 300, 784111777 + 300), true, 'exact skew boundary is inclusive');
+foreach (['Mon, 06 Nov 1994 08:49:37 GMT', 'Sun, 31 Feb 1994 08:49:37 GMT', 'Sun, 06 Nov 1994 08:49:37 UTC'] as $date)
+    t_is(ActivityPub_Verify_Date($date, 1000000000, 784111777), false, 'calendar and timezone must round trip');
 t_is(ActivityPub_Verify_Date((string)(time() - 1000)), false, 'ActivityPub_Verify_Date rejects a stale unix timestamp');
 t_is(ActivityPub_Verify_Date(''), false, 'ActivityPub_Verify_Date rejects an empty date');
 t_is(ActivityPub_Verify_Date('garbage'), false, 'ActivityPub_Verify_Date rejects an unparsable date');
@@ -346,12 +362,13 @@ unset($_SERVER['HTTP_DIGEST']);
 t_group('pure / doh answers');
 
 t_table('Club_Resolver_Answer', 'Club_Resolver_Answer', [
+    [['Status' => 0, 'Answer' => [['type' => 1, 'data' => '2001:db8::1']]], 'A', false],
     [null, 'A', false],
     [['nostatus' => 1], 'A', false],
     [['Status' => 2], 'A', null],
     [['Status' => 5], 'A', false],
     [['Status' => 3], 'A', []],
-    [['Status' => 3, 'Answer' => [['type' => 1, 'data' => '1.2.3.4']]], 'A', []],
+    [['Status' => 3, 'Answer' => [['type' => 1, 'data' => '1.2.3.4']]], 'A', false],
     [['Status' => 0, 'TC' => true, 'Answer' => [['type' => 1, 'data' => '1.2.3.4']]], 'A', false],
     [['Status' => 0, 'Answer' => 'not-a-list'], 'A', false],
     [['Status' => 0], 'A', []],
@@ -659,3 +676,32 @@ t_is(Club_Config_Number(0, 1), false, 'Club_Config_Number rejects below the mini
 t_is(Club_Config_Number(true, 0), false, 'Club_Config_Number rejects a boolean');
 t_is(Club_Config_Number('10 hours', 1), false, 'Club_Config_Number rejects a trailing unit');
 t_is(Club_Config_Number(1.5, 1), false, 'Club_Config_Number rejects a float');
+
+t_group('pure / identifier and configuration boundaries');
+$id = 'https://remote.example/';
+foreach ([[$id.str_repeat('x', 255 - strlen($id)), true, true], [$id.str_repeat('x', 256 - strlen($id)), true, false],
+    [$id.str_repeat('字', 255 - strlen($id)), false, true], [$id.str_repeat('字', 256 - strlen($id)), false, false], [$id.'a b', false, false],
+    [$id.'%20', false, true], ['urn:wxwclub:delete:test', false, false], [$id.'#id', true, false]] as $case)
+    t_is(ActivityPub_Object_URI($case[0], $case[1]), $case[2], 'raw identity length and URI grammar');
+$pem = file_get_contents(TEST_ROOT.'/fixtures/activitypub/keys/actor-public.pem'); $actor = $id.'users/test';
+$key = ['id' => $actor.'#main-key', 'owner' => $actor, 'publicKeyPem' => $pem];
+t_ok((bool)Club_Actor_Key(['publicKey' => $key], $actor), 'sample RSA key is usable for its owner');
+t_is(Club_Actor_Key(['publicKey' => ['owner' => $id.'users/other'] + $key], $actor), false, 'key owner must match');
+t_is(Club_Actor_Key(['publicKey' => ['publicKeyPem' => ''] + $key], $actor), false, 'empty key cannot replace a cached key');
+$saved_config = $config;
+foreach ([[], null] as $resolvers) {
+    if ($resolvers === null) unset($config['dns']['resolver']); else $config['dns']['resolver'] = [];
+    list($fatal, $warn) = Club_Config_Validate();
+    t_ok(!$fatal && $warn && count(Club_Resolver_List()) === 2, 'omitted and empty resolvers both use defaults');
+}
+$config = $saved_config; $config['base'] = 'LOCAL.example:8443'; $config['dns']['resolver'][0]['ip'] = '1.1.1.1';
+Club_Config_Validate();
+t_is([$config['base'], $config['dns']['resolver'][0]['ip']], ['local.example:8443', ['1.1.1.1']], 'authority and legacy resolver IP normalize at startup');
+$config['node']['log-level'] = false; $config['club']['relay-limit'] = 0;
+Club_Config_Validate();
+t_is([$config['node']['log-level'], $config['club']['relay-limit']], ['silent', 0], 'legacy configuration can disable logs and raw relay');
+$config = $saved_config;
+foreach ([['base' => 'local.example/page'], ['node' => ['inbox-verify' => 'false']], ['default' => ['infoname' => 'text']], ['notice' => ['enabled' => 1]]] as $override)
+    t_ok((bool)t_config_problems($override)[0], 'invalid configuration shape stops startup');
+$answer = []; for ($i = 1; $i <= 12; $i++) $answer[] = ['type' => 1, 'data' => '192.0.2.'.$i];
+t_is(count(Club_Resolver_Answer(['Status' => 0, 'Answer' => $answer], 'A')), 8, 'resolver caps unique IPv4 addresses per family');

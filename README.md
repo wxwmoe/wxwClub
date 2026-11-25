@@ -20,43 +20,48 @@ A simple social groups compatible with ActivityPub.
 - 投稿限流，支持按用户、群组、实例、重复内容设置规则
 - 触发限流时私信提醒投稿者，原消息删除后自动撤回提醒
 - 提醒文案支持多语言，按消息 `contentMap` 自动选择语言
-- 站点首页、群组页、Outbox 使用游标翻页，避免深分页扫描
 - 投递队列自动重试，持续失败的实例进入黑名单并定期探测恢复
 - 校验跨站消息的 HTTP Signature
   - 校验 Date / Digest，签名主体与 Actor 绑定
   - 出站请求只允许访问公网地址，跳转逐跳校验并重新签名
 - 兼容 Mastodon、Misskey、Pleroma、GoToSocial 互操作
+- 站点首页展示近 30 天活跃度前 20 的群组，群组页和 Outbox 使用游标翻页
 
 ## 使用
 
 ### 环境要求
-- MySQL 数据库
-- PHP 版本 >= 7.3
-- 依赖 PHP 扩展：curl, json, pcntl, posix, openssl, pdo_mysql
+- MySQL 数据库，已验证 5.7、8.0 和 8.4 版本
+- PHP >= 7.3，依赖 curl, json, pcntl, posix, openssl, pdo_mysql 扩展
 
 ### 安装步骤
 1. 编辑 `config.php` 参数
 2. 导入 `app/database/schema.sql` 数据表
 3. 重写请求至 `index.php`，例如 Nginx：
-```
-    location / {
-        try_files $uri $uri/ /index.php$is_args$args;
-    }
-```
+
+   ```nginx
+   location ^~ / {
+       include fastcgi_params;
+       fastcgi_param SCRIPT_FILENAME /data/wxwclub/index.php;
+       fastcgi_pass php-fpm:9000;
+   }
+   ```
+
 4. 运行 `wxwClub worker`，推荐 Docker：
-```
-    1. cd wxwClub/
-    2. docker build -t 'wxwclub:worker' .
-    3. docker run -d --restart always --stop-timeout 30 -v $(pwd):/wxwClub \
-    --name wxwclub_worker wxwclub:worker php /wxwClub/cli.php worker
-```
-5. （可选）调整 `config.php` 里 `worker` 的各类队列数；worker 可以多开，队列翻倍。
+
+   ```sh
+   docker build -t wxwclub:worker .
+   docker run -d --restart always --stop-timeout 30 \
+     -v "$PWD:/wxwClub" --name wxwclub_worker \
+     wxwclub:worker php /wxwClub/cli.php worker
+   ```
+
+5. 按需调整 `config.php` 中各类 worker 的数量
 
 ### 升级步骤
 1. `git pull` 拉取新代码
 2. `docker restart wxwclub_worker`
 
-数据库结构由 worker 自动合并，期间前端返回 HTTP 503，完成后恢复。
+数据库结构由 worker 自动合并，期间前端返回 HTTP 503，完成后恢复
 
 ## 版权声明
 
@@ -67,7 +72,7 @@ ActivityPub 兼容实现参考
 [mastodon / AGPL-3.0][2]  
 [misskey / AGPL-3.0][3]  
   
-MIT © FGHRSH
+MIT © wxw.moe
 
   [1]: https://github.com/Automattic/wordpress-activitypub "ActivityPub for WordPress"
   [2]: https://github.com/mastodon/mastodon "Your self-hosted, globally interconnected microblogging community"

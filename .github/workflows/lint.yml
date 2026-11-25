@@ -8,6 +8,7 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -23,14 +24,42 @@ jobs:
         run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
       - name: unit tests
         run: php cli.php test pure
+      - name: runner exit codes
+        run: |
+          set -eu
+          for args in 'test unknown' 'test all pure' 'worker extra' 'migrate extra'; do
+            if php cli.php $args; then exit 1; fi
+          done
+          php cli.php worker --help
+          php cli.php migrate --help
+          work=$(mktemp -d "$RUNNER_TEMP/wxwclub-runner.XXXXXXXX")
+          mkdir -p "$work/app" "$work/tests/groups"
+          cp cli.php "$work/"
+          cp app/functions.php "$work/app/"
+          cp tests/suite.php tests/services.php "$work/tests/"
+          cd "$work"
+          if MYSQL_DATABASE=production php cli.php test state 2>guard.log; then exit 1; fi
+          grep -F 'Refusing to reset' guard.log
+          printf '<?php trigger_error("runner warning", E_USER_WARNING);\n' > tests/groups/pure.php
+          if php cli.php test pure >warning.log 2>&1; then exit 1; fi
+          grep -F 'runner warning' warning.log
+          printf '<?php\n' > tests/groups/pure.php
+          if php cli.php test pure >empty.log 2>&1; then exit 1; fi
+          grep -F 'No assertions in group pure' empty.log
 
   database:
     runs-on: ubuntu-latest
-    name: mysql ${{ matrix.mysql }}
+    name: php ${{ matrix.php }} / mysql ${{ matrix.mysql }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        mysql: ['5.7', '8.0']
+        include:
+          - { php: '7.3', mysql: '5.7' }
+          - { php: '8.3', mysql: '5.7' }
+          - { php: '8.3', mysql: '8.0' }
+          - { php: '8.4', mysql: '8.0' }
+          - { php: '8.4', mysql: '8.4' }
     services:
       mysql:
         image: mysql:${{ matrix.mysql }}
@@ -39,13 +68,13 @@ jobs:
           MYSQL_DATABASE: wxwclub_test
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-cmd="mysql --protocol=tcp -h127.0.0.1 -uroot -Dwxwclub_test -e 'select 1'"
           --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.3'
+          php-version: ${{ matrix.php }}
           extensions: pdo_mysql, curl, openssl
           coverage: none
       - name: integration tests
@@ -55,3 +84,11 @@ jobs:
           MYSQL_USER: root
           MYSQL_PASSWORD: ''
         run: php cli.php test
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t wxwclub-test:worker .
+      - run: docker run --rm -v "$PWD:/work:ro" -w /work wxwclub-test:worker php cli.php worker --help
+      - run: docker run --rm wxwclub-test:worker php -r 'foreach (["curl","json","pcntl","posix","openssl","pdo_mysql"] as $ext) if (!extension_loaded($ext)) exit(1);'

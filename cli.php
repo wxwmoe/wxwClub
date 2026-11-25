@@ -3,6 +3,11 @@
 
 if (!isset($argv[1])) { cli_usage(); exit(1); }
 if ($argv[1] === 'help') { cli_usage(); exit(0); }
+if (in_array($argv[1], ['worker', 'migrate'], true) && isset($argv[2])) {
+    $help = count($argv) === 3 && in_array($argv[2], ['-h', '--help'], true);
+    fwrite($help ? STDOUT : STDERR, 'Usage: php cli.php '.$argv[1]."\n");
+    exit($help ? 0 : 1);
+}
 
 if ($argv[1] === 'test') {
     array_splice($argv, 1, 1);
@@ -79,6 +84,7 @@ Usage:
   php cli.php ban add <handle|actor-url|host> [--club CLUB,CLUB] [--reason TEXT] [--yes]
   php cli.php ban remove <handle|actor-url|host> [--club CLUB,CLUB]
   php cli.php ban list [--type actor|host] [--club CLUB] [--limit 50] [--json]
+    --club selects explicit group bans. Omit it to include site-wide bans.
   php cli.php ban export > bans.csv
   php cli.php ban import <file.csv> [--yes]
   php cli.php host show <host> [--json]
@@ -88,7 +94,10 @@ Usage:
   php cli.php queue purge <host|target> [--yes]
   php cli.php endpoint show <host|target> [--json]
   php cli.php blacklist show|probe|add <host|target> [--json]
-  php cli.php worker|migrate|test [group...]
+  php cli.php worker
+  php cli.php migrate
+  php cli.php test [all | group...]
+    Groups: pure, state, schema, activitypub, controller, transport
   php cli.php status [--json]
 TEXT;
     echo "\n";
@@ -188,7 +197,7 @@ function cli_user_line($counts) {
 function cli_ban_clubs($input) {
     global $db;
     if (!isset($input)) return null;
-    $clubs = array_values(array_unique(array_filter(array_map('trim', explode(',', (string)$input)), 'strlen')));
+    $clubs = array_values(array_unique(array_filter(array_map('trim', explode(',', strtolower((string)$input))), 'strlen')));
     if (!$clubs) return false;
     $names = []; $params = [];
     foreach ($clubs as $i => $club) { $names[] = ':c'.$i; $params[':c'.$i] = $club; }
@@ -199,8 +208,8 @@ function cli_ban_clubs($input) {
 
 function cli_ban_target($input, $resolve = true) {
     $input = trim((string)$input);
-    if (strpos($input, '@') !== false) {
-        if (!$resolve) return false;
+    if (!preg_match('#^https?://#i', $input) && strpos($input, '@') !== false) {
+        if (!$resolve) return ($user = cli_user($input)) ? Club_Ban_Target($user['actor']) : false;
         $input = Club_Actor_Resolve($input) ?: '';
     }
     return Club_Ban_Target($input);
@@ -340,18 +349,16 @@ function cli_manage($resource, $action, $args) {
         if (count($args) !== 1 || $clubs === false) return cli_error('usage: php cli.php ban add <handle|actor-url|host> [--club CLUB,CLUB] [--reason TEXT] [--yes]');
         if (!($ban = cli_ban_target($args[0]))) return cli_error('could not read a target actor or host from '.$args[0]);
         list($type, $target) = $ban;
-        $pdo = $db->prepare('select `clubs` from `bans` where `target` = :target');
-        $pdo->execute([':target' => $target]);
-        $effective = ($old = $pdo->fetch(PDO::FETCH_COLUMN, 0)) === false ? $clubs
-            : Club_Ban_Scope(isset($old) ? (json_decode($old, 1) ?: []) : null, $clubs);
-        $follows = Club_Ban_Detach([$target], $type, $effective, true);
+        $effective = Club_Ban_Save($target, $type, $clubs, $reason, false);
         $scope = isset($effective) ? ' in '.implode(', ', $effective) : ' site wide';
         if (!$yes) {
-            cli_emit(['preview' => true, 'target' => $target, 'type' => $type, 'clubs' => $clubs, 'follows' => $follows],
+            $follows = Club_Ban_Detach([$target], $type, $effective, true);
+            cli_emit(['preview' => true, 'target' => $target, 'type' => $type, 'clubs' => $effective, 'follows' => $follows],
                 ['Would ban '.$type.' '.$target.$scope.'.', 'Matched '.$follows.' follow(s) to drop.', 'Run again with --yes to apply.']);
             return 0;
         }
-        $dropped = Club_Ban_Add($target, $type, $clubs, $reason);
+        $dropped = Club_Ban_Add($target, $type, $clubs, $reason, $effective);
+        $scope = isset($effective) ? ' in '.implode(', ', $effective) : ' site wide';
         cli_emit(['target' => $target, 'type' => $type, 'clubs' => $effective, 'follows_dropped' => $dropped],
             ['Banned '.$type.' '.$target.$scope.'.', 'Dropped '.$dropped.' follow(s).']);
         return 0;
@@ -376,6 +383,7 @@ function cli_manage($resource, $action, $args) {
         if ($args || $limit < 1 || $limit > 200 || (isset($type) && !in_array($type, ['actor', 'host'], true)))
             return cli_error('usage: php cli.php ban list [--type actor|host] [--club CLUB] [--limit 50]');
         $where = isset($type) ? ' where `type` = :type' : '';
+        if (isset($club) && !($club = Club_Group_Ensure($club, false))) return cli_error('club not found', 2);
         $pdo = $db->prepare('select `target`, `type`, `clubs`, `reason`, `timestamp` from `bans`'.$where.' order by `timestamp` desc, `target`'.(isset($club) ? '' : ' limit '.$limit));
         $pdo->execute(isset($type) ? [':type' => $type] : []); $rows = [];
         foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $row) {
@@ -393,9 +401,9 @@ function cli_manage($resource, $action, $args) {
         if ($args) return cli_error('usage: php cli.php ban export > bans.csv');
         $pdo = $db->query('select `target`, `type`, `clubs`, `reason` from `bans` order by `target` collate ascii_bin');
         $out = fopen('php://output', 'w');
-        fputcsv($out, ['target', 'type', 'clubs', 'reason'], ',', '"', '\\');
-        foreach ($pdo->fetchAll(PDO::FETCH_ASSOC) as $row)
-            fputcsv($out, [$row['target'], $row['type'], isset($row['clubs']) ? implode(',', json_decode($row['clubs'], 1) ?: []) : '', (string)$row['reason']], ',', '"', '\\');
+        fputcsv($out, ['target', 'type', 'clubs', 'reason'], ',', '"', "\0");
+        while ($row = $pdo->fetch(PDO::FETCH_ASSOC))
+            fputcsv($out, [$row['target'], $row['type'], isset($row['clubs']) ? implode(',', json_decode($row['clubs'], 1) ?: []) : '', (string)$row['reason']], ',', '"', "\0");
         fclose($out);
         return 0;
     }
@@ -404,51 +412,65 @@ function cli_manage($resource, $action, $args) {
         $yes = cli_flag($args, '--yes');
         if (count($args) !== 1) return cli_error('usage: php cli.php ban import <file.csv> [--yes]');
         if (!is_readable($args[0]) || !($in = fopen($args[0], 'r'))) return cli_error('cannot read '.$args[0]);
-        if (!($head = fgetcsv($in, 0, ',', '"', '\\'))) return cli_error('the file has no header row');
+        if (!($head = fgetcsv($in, 0, ',', '"', "\0"))) return cli_error('the file has no header row');
         $head = array_flip(array_map('strtolower', array_map('trim', array_map('strval', $head))));
         $column = isset($head['target']) ? $head['target'] : (isset($head['domain']) ? $head['domain'] : null);
         if (!isset($column)) return cli_error('the header needs a target or domain column');
-        $rows = []; $invalid = 0; $cap = 50000;
-        while (($line = fgetcsv($in, 0, ',', '"', '\\')) !== false) {
-            if (count($rows) >= $cap) { fclose($in); return cli_error('refusing to import more than '.$cap.' rows in one run'); }
-            if (!isset($line[$column]) || trim($line[$column]) === '') continue;
-            if (!($ban = cli_ban_target($line[$column], false))) { $invalid++; continue; }
-            $cell = isset($head['clubs']) && isset($line[$head['clubs']]) ? trim($line[$head['clubs']]) : '';
-            $scope = $cell === '' ? null : cli_ban_clubs($cell);
-            if ($scope === false) { $invalid++; continue; }
-            $reason = isset($head['reason']) && isset($line[$head['reason']]) ? trim($line[$head['reason']]) : '';
-            if ($reason === '' && isset($head['public_comment']) && isset($line[$head['public_comment']])) $reason = trim($line[$head['public_comment']]);
-            $key = $ban[1];
-            if ($reason === '') $reason = null;
-            elseif (preg_match('/^.{0,255}/us', $reason, $cut)) $reason = $cut[0];
-            else $reason = substr($reason, 0, 255);
-            if (isset($rows[$key])) { $scope = Club_Ban_Scope($rows[$key][2], $scope); $reason = isset($rows[$key][3]) ? $rows[$key][3] : $reason; }
-            $rows[$key] = [$ban[1], $ban[0], $scope, $reason];
+        $rows = []; $count = 0; $line_no = 2;
+        try {
+            while (($line = fgetcsv($in, 0, ',', '"', "\0")) !== false) {
+                $start = $line_no++; foreach ($line as $field) $line_no += substr_count((string)$field, "\n");
+                if (++$count > 50000) throw new InvalidArgumentException('CSV exceeds 50000 records');
+                if ($line === [null]) continue;
+                foreach ($line as $field) if (!preg_match('//u', (string)$field) || strpos((string)$field, "\0") !== false) throw new InvalidArgumentException('Invalid UTF-8 or NUL on line '.$start);
+                if (!($ban = cli_ban_target($line[$column] ?? '', false))) throw new InvalidArgumentException('Invalid target on line '.$start);
+                if (isset($head['type']) && ($line[$head['type']] ?? '') !== $ban[0]) throw new InvalidArgumentException('Invalid target type on line '.$start);
+                $cell = isset($head['clubs']) ? trim($line[$head['clubs']] ?? '') : '';
+                $scope = $cell === '' ? null : cli_ban_clubs($cell);
+                if ($scope === false) throw new InvalidArgumentException('Invalid club scope on line '.$start);
+                $reason = isset($head['reason']) ? ($line[$head['reason']] ?? '') : '';
+                if (!preg_match('/^.{0,255}$/usD', $reason)) throw new InvalidArgumentException('Reason exceeds 255 characters on line '.$start);
+                $target = $ban[1];
+                if (isset($rows[$target])) { $scope = Club_Ban_Scope($rows[$target][1], $scope); $reason = $rows[$target][2] ?? $reason; }
+                $rows[$target] = [$ban[0], $scope, $reason === '' ? null : $reason, $start];
+            }
+            if (!feof($in)) throw new RuntimeException('Could not finish reading CSV');
+        } finally { fclose($in); }
+        ksort($rows, SORT_STRING); $rules = []; $existing = 0; $batches = 0;
+        foreach ($rows as $target => $row) {
+            try { $rules[$row[0]][$target] = Club_Ban_Save($target, $row[0], $row[1], $row[2], false, true, $exists); }
+            catch (InvalidArgumentException $e) { return cli_error($e->getMessage().' on line '.$row[3]); }
+            $existing += (int)$exists;
         }
-        fclose($in);
-        $existing = 0; $added = 0; $groups = [];
-        $seen = $db->prepare('select `clubs` from `bans` where `target` = :target');
-        foreach ($rows as $row) {
-            $seen->execute([':target' => $row[0]]);
-            $old = $seen->fetch(PDO::FETCH_COLUMN, 0);
-            if ($old === false) $added++;
-            else { $existing++; $row[2] = Club_Ban_Scope(isset($old) ? (json_decode($old, 1) ?: []) : null, $row[2]); }
-            $groups[$row[1].'|'.(isset($row[2]) ? implode(',', $row[2]) : '*')][] = $row[0];
+        if ($yes) {
+            $existing = 0;
+            foreach (array_chunk($rows, 250, true) as $batch) {
+                try {
+                    $saved = Club_DB_Transaction('ban import', function () use ($batch) {
+                        $saved = [];
+                        foreach ($batch as $target => $row) {
+                            $scope = Club_Ban_Save($target, $row[0], $row[1], $row[2], true, true, $exists);
+                            $saved[$target] = [$row[0], $scope, $exists];
+                        }
+                        return $saved;
+                    });
+                } catch (Throwable $e) { throw new RuntimeException('Ban import stopped after '.$batches.' committed batches: '.$e->getMessage(), 0, $e); }
+                foreach ($saved as $target => $row) { $rules[$row[0]][$target] = $row[1]; $existing += (int)$row[2]; }
+                $batches++;
+            }
         }
-        $follows = 0;
-        foreach ($groups as $key => $targets) {
-            list($type, $scope) = explode('|', $key, 2);
-            $follows += Club_Ban_Detach($targets, $type, $scope === '*' ? null : explode(',', $scope), !$yes);
+        $added = count($rows) - $existing;
+        try { $follows = Club_Ban_Detach_List($rules, !$yes); }
+        catch (Throwable $e) {
+            if (!$yes) throw $e;
+            throw new RuntimeException('Follow cleanup stopped after '.$batches.' committed ban batches. Rerun the import to finish: '.$e->getMessage(), 0, $e);
         }
-        if (!$yes) {
-            cli_emit(['preview' => true, 'added' => $added, 'existing' => $existing, 'invalid' => $invalid, 'follows' => $follows],
-                ['Would add '.$added.' ban(s), '.$existing.' already present, '.$invalid.' unusable row(s).', 'Matched '.$follows.' follow(s) to drop.', 'Run again with --yes to apply.']);
-            return 0;
+        $result = ['added' => $added, 'existing' => $existing, 'invalid' => 0, 'committed_batches' => $batches];
+        if (!$yes) cli_emit(['preview' => true, 'follows' => $follows] + $result, ['Would add '.$added.' ban(s), '.$existing.' already present. Matched '.$follows.' follow(s). Run again with --yes to apply.']);
+        else {
+            Club_Log_Event('info', 'bans imported by cli', $result + ['follows_dropped' => $follows]);
+            cli_emit($result + ['follows_dropped' => $follows], ['Committed '.$batches.' batch(es), added '.$added.' ban(s), '.$existing.' already present. Dropped '.$follows.' follow(s).']);
         }
-        foreach ($rows as $row) Club_Ban_Add($row[0], $row[1], $row[2], $row[3]);
-        Club_Log_Event('info', 'bans imported by cli', ['added' => $added, 'existing' => $existing, 'invalid' => $invalid, 'follows dropped' => $follows]);
-        cli_emit(['added' => $added, 'existing' => $existing, 'invalid' => $invalid, 'follows_dropped' => $follows],
-            ['Added '.$added.' ban(s), '.$existing.' already present, '.$invalid.' unusable row(s).', 'Dropped '.$follows.' follow(s).']);
         return 0;
     }
 
@@ -456,14 +478,15 @@ function cli_manage($resource, $action, $args) {
         $yes = cli_flag($args, '--yes');
         if (count($args) !== 1) return cli_error('usage: php cli.php user delete <handle|actor-url> [--yes]');
         if (!($user = cli_user($args[0]))) return cli_error('user is not cached', 2);
-        $counts = cli_user_counts([(int)$user['uid']]);
         if (!$yes) {
+            $counts = cli_user_counts([(int)$user['uid']]);
             cli_emit(array_merge(['preview' => true, 'actor' => $user['actor']], $counts),
                 ['Would delete '.$user['actor'].'.', cli_user_line($counts), 'Run again with --yes to apply.']);
             return 0;
         }
         $counts = Club_DB_Transaction('user delete', function () use ($db, $user) {
-            $counts = cli_user_counts([(int)$user['uid']]);
+            $pdo = $db->prepare('select `uid` from `users` where `uid` = :uid for update'); $pdo->execute([':uid' => $user['uid']]);
+            $counts = cli_user_counts($pdo->fetchAll(PDO::FETCH_COLUMN));
             $pdo = $db->prepare('delete from `users` where `uid` = :uid');
             $pdo->execute([':uid' => $user['uid']]);
             $counts['users'] = $pdo->rowCount();
@@ -500,8 +523,8 @@ function cli_manage($resource, $action, $args) {
         if (count($args) !== 1) return cli_error('usage: php cli.php host delete <host> [--yes]');
         if (($host = Club_Url_Host($args[0])) === false) return cli_error('expected a host');
         $uids = cli_host_uids($host);
-        $counts = cli_user_counts($uids);
         if (!$yes) {
+            $counts = cli_user_counts($uids);
             cli_emit(array_merge(['preview' => true, 'host' => $host], $counts),
                 ['Would delete every cached user on '.$host.'.', cli_user_line($counts), 'Run again with --yes to apply.']);
             return $uids ? 0 : 2;
@@ -510,7 +533,8 @@ function cli_manage($resource, $action, $args) {
         while ($uids && ++$pass <= 10) {
             foreach (array_chunk($uids, 100) as $chunk) {
                 $batch = Club_DB_Transaction('host delete', function () use ($db, $chunk) {
-                    $counts = cli_user_counts($chunk);
+                    $locked = $db->query('select `uid` from `users` where `uid` in ('.implode(',', $chunk).') order by `uid` for update')->fetchAll(PDO::FETCH_COLUMN);
+                    $counts = cli_user_counts($locked);
                     $counts['users'] = (int)$db->exec('delete from `users` where `uid` in ('.implode(',', $chunk).')');
                     return $counts;
                 });
@@ -541,6 +565,7 @@ function cli_manage($resource, $action, $args) {
     if ($resource === 'follow' && ($action === 'add' || $action === 'remove')) {
         if (count($args) !== 2) return cli_error('usage: php cli.php follow add|remove <handle|actor-url> <club>');
         if (!($user = cli_user($args[0]))) return cli_error('user is not cached; run php cli.php user fetch first', 2);
+        if (!($args[1] = Club_Group_Ensure($args[1], false))) return cli_error('club not found', 2);
         $state = Club_Group_Follow($user['actor'], $args[1], $action === 'add');
         if ($state === 'banned') return cli_error($user['actor'].' is banned; lift the ban before adding the follow back', 2);
         if ($state === 'club-missing') return cli_error('club not found', 2);
@@ -551,11 +576,11 @@ function cli_manage($resource, $action, $args) {
     if ($resource === 'dns' && ($action === 'show' || $action === 'refresh')) {
         if (count($args) !== 1 || ($host = Club_Url_Host($args[0])) === false) return cli_error('usage: php cli.php dns '.$action.' <host>');
         if ($action === 'refresh') {
-            $ips = Club_Resolver_Get($host, 0, 0); $row = Club_Resolver_Read($host);
-            $deferred = Club_Resolver_Deferred() || ($row && (int)$row['lock_until'] > time());
-            $message = $deferred ? 'Deferred: another process owns the refresh.' : 'Refreshed '.$host.': '.($ips ? implode(', ', $ips) : '(no records)');
-            cli_emit(['host' => $host, 'ips' => $ips, 'deferred' => $deferred, 'cache' => $row], [$message]);
-            return $deferred ? 2 : 0;
+            $ips = Club_Resolver_Get($host, 0, 0, 0); $row = Club_Resolver_Read($host);
+            Club_Resolver_Deferred(null, $reason); $deferred = $ips === false && $reason === 'contention';
+            $state = $ips === false ? ($deferred ? 'deferred' : 'failed') : ($ips ? 'resolved' : 'empty');
+            cli_emit(['host' => $host, 'ips' => $ips, 'state' => $state, 'deferred' => (bool)$deferred, 'cache' => $row], [$host.' '.$state.($ips ? ': '.implode(', ', $ips) : '')]);
+            return $ips === false ? 2 : 0;
         }
         $row = Club_Resolver_Read($host);
         if (!$row) return cli_error('host is not cached', 2);

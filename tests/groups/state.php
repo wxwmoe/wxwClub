@@ -412,3 +412,110 @@ t_is((int)t_one('select count(*) from `followers`'), 1, 'the host ban leaves onl
 t_exec('delete from `users` where `actor` like :like', [':like' => 'https://bad.example/%']);
 t_is((int)t_one('select count(*) from `users`'), 1, 'deleting a host keeps the users of a similarly named one');
 t_is((int)t_one('select count(*) from `bans` where `target` = :target', [':target' => 'bad.example']), 1, 'deleting the users does not lift the ban on their host');
+
+t_group('state / concurrent fanout and blacklist');
+t_state_reset();
+$old_queue = t_state_pending($t_url, 'relay'); $old_token = t_state_lease($t_url);
+$writer = $db; $admin = t_db(); $admin->exec('set session innodb_lock_wait_timeout = 2'); $db = $writer;
+$db->beginTransaction();
+try {
+    $tid = Club_Task_Create('relay', 'test', '{}');
+    Club_Queue_Fanout($tid, 'relay', ['test'], $t_url);
+    $db = $admin; Club_Blacklist_Force($t_url); $db = $writer;
+    Club_Endpoint_Upsert($tid, 'relay'); $writer->commit();
+} finally { $db = $writer; if ($writer->inTransaction()) $writer->rollBack(); }
+t_is((int)t_one('select count(*) from `queues` where `tid` = :tid', [':tid' => $tid]), 0, 'fanout skips a target blocked before scheduling commits');
+t_is((int)t_one('select count(*) from `queues` where `id` = :id', [':id' => $old_queue]), 1, 'earlier queue belongs to its original task');
+t_is(t_one('select `next_at` from `endpoints` where `url` = :url', [':url' => $t_url]), null, 'concurrently blocked endpoint stays unscheduled');
+t_is(Club_Endpoint_Authorize($t_url, $old_token, Club_Lease_Token(), $old_queue, 'relay'), false, 'old lease cannot authorize an HTTP request');
+
+t_group('state / shared quotas');
+require_once(TEST_ROOT.'/services.php');
+
+function t_state_contend($job, $lock, $activity, $winner, $expected = 'locked') {
+    global $db, $config;
+    $dir = t_workspace($job);
+    file_put_contents($dir.'/config.php', '<?php $config = '.var_export($config, true).';');
+    file_put_contents($dir.'/activity.json', json_encode($activity));
+    $db->beginTransaction(); $db->query($lock)->fetchAll();
+    $process = t_php_process([TEST_ROOT.'/fixtures/state-process.php', $dir, $job], $dir);
+    try {
+        t_wait_ready($process, function () use ($dir) { return is_file($dir.'/ready') && filesize($dir.'/ready') > 0; });
+        t_is(file_get_contents($dir.'/ready'), $expected, $job.' respects the held row');
+        if ($winner) $winner();
+        $db->commit(); touch($dir.'/commit');
+        $until = microtime(true) + 10;
+        do { $status = proc_get_status($process); if (!$status['running']) break; usleep(10000); } while (microtime(true) < $until);
+        t_ok(!$status['running'] && $status['exitcode'] === 0, $job.' finishes after the winner commits');
+    } finally { if ($db->inTransaction()) $db->rollBack(); proc_terminate($process); proc_close($process); }
+}
+
+t_db_import(); $saved_club = $config['club']; $config['club']['create-limit'] = 1;
+t_state_contend('registration', "select `value` from `meta` where `name` = 'schema' for update", [], function () { Club_Group_Ensure('first'); });
+t_is((int)t_one('select count(*) from `clubs`'), 1, 'one public registration consumes the final slot');
+foreach (['club', 'site'] as $kind) {
+    t_state_reset(); $config['club']['limits'] = ['test' => ['type' => $kind, 'hours' => 1, 'limit' => 1]];
+    $saved_notice = $config['notice']; $config['notice']['enabled'] = false; $items = [];
+    foreach (['alice','bob'] as $user) {
+        $actor = 'https://remote.example/u/'.$user; $id = $actor.'/post';
+        t_exec("insert into `users` (`name`,`actor`,`inbox`,`shared_inbox`,`public_key`,`timestamp`) values (:name,:actor,:inbox,'https://remote.example/inbox','',1)", [':name' => $user, ':actor' => $actor, ':inbox' => $actor.'/inbox']);
+        $items[] = ['actor' => $actor, 'to' => [$public_streams, $base.'/club/test'], 'object' => ['id' => $id, 'attributedTo' => [['id' => $actor]], 'published' => '2000-01-01T00:00:00Z']];
+    }
+    $at = time(); t_state_contend($kind, "select `cid` from `clubs` where `name` = 'test' for update", $items[1], function () use ($items) { Club_Inbox_Create($items[0]); });
+    t_is((int)t_one('select count(*) from `announces`'), 1, $kind.' quota allows only one accepted submission');
+    t_ok((int)t_one('select `timestamp` from `announces`') >= $at, 'quota and pagination use local receipt time');
+    $config['notice'] = $saved_notice;
+}
+$config['notice']['enabled'] = false;
+t_exec("insert into `clubs` (`name`,`public_key`,`private_key`,`timestamp`) values ('other','','',1)");
+$config['club']['limits']['other'] = ['type' => 'club', 'hours' => 1, 'limit' => 5];
+$extra = $items[1]; $extra['object']['id'] .= '/disjoint'; $extra['to'] = [$public_streams, $base.'/club/other'];
+t_state_contend('disjoint', "select `cid` from `clubs` where `name` = 'test' for update", $extra, null, 'unlocked');
+$extra['to'][] = $base.'/club/test'; $extra['object']['id'] .= '/mixed'; Club_Inbox_Create($extra);
+t_is(t_one('select `clubs` from `activities` where `object` = :object', [':object' => $extra['object']['id']]), '["other"]', 'multi-group submission retains only groups with remaining quota');
+$config['club'] = $saved_club; $config['notice'] = $saved_notice;
+t_group('state / notice lifecycle');
+$config['notice']['limit'] = 1; $object = $items[0]['object']['id']; $recipient = $items[0]['actor'];
+t_ok(Club_Notice_Send($recipient, 'limit-user', ['club' => 'test', 'hours' => 1, 'limit' => 1], 'en', $object), 'quota notice is queued');
+t_is(Club_Notice_Delete($object, $recipient), 1, 'notice withdrawal queues a Delete');
+t_is(Club_Notice_Delete($object, $recipient), 0, 'repeated withdrawal has no work');
+t_is((int)t_one('select count(*) from `notices` where `note` is null'), 1, 'withdrawal preserves the quota record');
+t_is(Club_Notice_Send($recipient, 'limit-user', [], 'en', $object), false, 'withdrawal does not refund the daily quota');
+t_exec('update `notices` set `timestamp` = :time', [':time' => time() - 172801]); Club_Notice_Expire(0);
+t_is((int)t_one('select count(*) from `notices`'), 1, 'disabled expiry preserves history');
+Club_Notice_Expire(1, 20, 0); t_is((int)t_one('select count(*) from `notices`'), 0, 'expired quota record can be removed');
+t_ok(Club_Notice_Send($recipient, 'limit-user', ['club' => 'test', 'hours' => 1, 'limit' => 1], 'en', $object), 'a new notice can use the expired quota');
+t_exec('update `notices` set `timestamp` = :time', [':time' => time() - 172801]);
+$endpoint = $recipient.'/inbox'; Club_Blacklist_Force($endpoint, 0);
+Club_Notice_Expire(1, 20, 0);
+t_is((int)t_one('select count(*) from `notices` where `note` is not null'), 1, 'blocked notice remains available for a later withdrawal');
+Club_Blacklist_Cleanup(); $claim = Club_Blacklist_Claim(time());
+t_is(Club_Blacklist_Result($endpoint, $claim['token'], true), 'restored', 'a recovered notice target is eligible again');
+Club_Notice_Expire(1, 20, 0);
+t_is((int)t_one('select count(*) from `notices`'), 0, 'expiry completes after the target recovers');
+t_is((int)t_one('select count(*) from `queues` where `target` = :endpoint', [':endpoint' => $endpoint]), 1, 'recovery queues exactly one withdrawal');
+$config['notice'] = $saved_notice;
+
+t_group('state / edit and withdrawal history');
+$first = $items[0]; $first['object']['id'] = 'https://remote.example/'.str_repeat('字', 255 - strlen('https://remote.example/'));
+Club_Inbox_Create($first); $object = $first['object']['id'];
+$activity = t_one('select `id` from `activities` where `object` = :o', [':o' => $object]);
+t_ok((bool)$activity, 'maximum-width Unicode object is stored');
+$edit = ['actor' => $recipient, 'signature' => ['signatureValue' => 'fixture'], 'object' => ['id' => $object, 'content' => 'edited', 'updated' => gmdate('Y-m-d\TH:i:s\Z')]];
+$queues = (int)t_one('select count(*) from `queues`'); Club_Inbox_Update($edit, null);
+t_is(t_one('select `content` from `announces` where `activity` = :id', [':id' => $activity]), 'edited', 'unwrapped update can edit the local copy');
+t_is((int)t_one('select count(*) from `queues`'), $queues, 'unwrapped update has no relay bytes');
+$edit['object']['updated'] = 'tomorrow'; $edit['object']['content'] = 'later'; Club_Inbox_Update($edit, null);
+t_is(t_one('select `content` from `announces` where `activity` = :id', [':id' => $activity]), 'edited', 'relative revision cannot replace the last edit');
+$delete = ['actor' => $recipient, 'object' => ['id' => $object]];
+$revision = t_one('select `updated` from `activities` where `id` = :id', [':id' => $activity]);
+$edit['type'] = 'Update'; $edit['object']['updated'] = gmdate('Y-m-d\TH:i:s\Z', time() + 60);
+t_state_contend('late-edit', 'select `id` from `announces` where `activity` = '.(int)$activity.' for update', $edit, function () use ($delete) { Club_Inbox_Delete($delete); });
+t_is(t_one('select `updated` from `activities` where `id` = :id', [':id' => $activity]), $revision, 'a later edit cannot change a withdrawn post');
+$queued = (int)t_one('select count(*) from `tasks`');
+t_is((int)t_one('select count(*) from `announces` where `activity` = :id', [':id' => $activity]), 0, 'maximum-width object can be withdrawn');
+$marker = 'urn:wxwclub:delete:'.hash('sha256', $recipient."\0".$object);
+t_is((int)t_one('select count(*) from `activities` where `object` = :marker', [':marker' => $marker]), 1, 'withdrawal has a fixed-width local identity');
+Club_Inbox_Delete($delete); t_is((int)t_one('select count(*) from `tasks`'), $queued, 'repeat withdrawal creates no task');
+t_exec('update `activities` set `object` = :old where `object` = :marker', [':old' => 'https://remote.example/legacy-delete', ':marker' => $marker]);
+Club_Inbox_Delete($delete); t_is((int)t_one('select count(*) from `tasks`'), $queued, 'legacy withdrawal also stays complete');

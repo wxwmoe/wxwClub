@@ -83,7 +83,7 @@ function worker_probe($now) {
         return true;
     });
     worker_finish('probe completion', function () use ($target, $active, $result) {
-        if (in_array($result, ['local-dns', 'local-proxy', 'lease-lost'], true)) Club_Blacklist_Defer($target, $active, $result);
+        if (in_array($result, ['local-dns', 'local-proxy', 'local-sign', 'lease-lost'], true)) Club_Blacklist_Defer($target, $active, $result);
         else Club_Blacklist_Result($target, $active, $result == 'alive');
     });
     Club_Stat('probe_'.$result);

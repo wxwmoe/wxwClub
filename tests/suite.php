@@ -25,12 +25,23 @@ $config = [
 ];
 
 require_once(APP_ROOT.'/app/functions.php');
+require_once(TEST_ROOT.'/services.php');
 date_default_timezone_set('UTC');
 
 $ver = '0.0.7'; $base = 'https://'.$config['base'];
 $public_streams = 'https://www.w3.org/ns/activitystreams#Public';
 
 $t_pass = 0; $t_fail = 0;
+error_reporting(E_ALL);
+set_error_handler(function ($level, $message, $file, $line) {
+    if (!(error_reporting() & $level)) return false;
+    throw new ErrorException($message, 0, $level, $file, $line);
+});
+
+function t_abort($message) {
+    fwrite(STDERR, $message."\n");
+    exit(1);
+}
 
 function t_group($name) {
     echo "\n== ", $name, "\n";
@@ -68,7 +79,7 @@ function t_table($what, $call, $rows) {
 // Database tests drop every table in the selected database.
 function t_db() {
     global $config;
-    if (strpos($config['mysql']['database'], 'test') === false) exit("Refusing to run: MYSQL_DATABASE '".$config['mysql']['database']."' does not look like a test database\n");
+    t_guard_database($config['mysql']['database']);
     return Club_DB_Connect();
 }
 
@@ -100,24 +111,32 @@ function t_exec($sql, $params = []) {
     return $pdo->rowCount();
 }
 
-$groups = ['pure' => false, 'state' => true, 'schema' => true, 'activitypub' => true];
+$groups = ['pure' => false, 'state' => true, 'schema' => true, 'activitypub' => true, 'controller' => true, 'transport' => false];
 $argv[1] = isset($argv[1]) ? $argv[1] : 'all';
 
 // Each replay needs fresh request-local state.
 if ($argv[1] === 'replay') {
+    if (count($argv) !== 4 || !preg_match('/^[a-z0-9-]+$/D', $argv[2]) || !preg_match('/^[a-z0-9-]+$/D', $argv[3])) t_abort('Expected a fixture family and name');
     require(TEST_ROOT.'/groups/activitypub.php');
+    if (!is_file(t_ap_dir().'/'.$argv[2].'/'.$argv[3].'.php')) t_abort('Unknown ActivityPub fixture');
     t_db();
     t_ap_replay($argv[2], $argv[3]);
+    if (!$t_pass && !$t_fail) t_abort('Replay ran no assertions');
     echo '#counts ', $t_pass, ' ', $t_fail, "\n";
     exit($t_fail ? 1 : 0);
 }
 
-$run = $argv[1] === 'all' ? array_keys($groups) : array_slice($argv, 1);
-foreach ($run as $name) if (!isset($groups[$name])) exit('Unknown group: '.$name."\n  known: all, ".implode(', ', array_keys($groups))."\n");
+if ($argv[1] === 'all' && count($argv) > 2) t_abort('Use all by itself');
+$run = $argv[1] === 'all' ? array_keys($groups) : array_unique(array_slice($argv, 1));
+foreach ($run as $name) if (!isset($groups[$name])) t_abort('Unknown group: '.$name.' (known: all, '.implode(', ', array_keys($groups)).')');
 
 foreach ($run as $name) if ($groups[$name]) { t_db(); break; }
-foreach ($run as $name) require(TEST_ROOT.'/groups/'.$name.'.php');
-if (in_array('activitypub', $run, true)) t_ap_run();
+foreach ($run as $group_name) {
+    $group_before = $t_pass + $t_fail;
+    require(TEST_ROOT.'/groups/'.$group_name.'.php');
+    if ($group_name === 'activitypub') t_ap_run();
+    if ($t_pass + $t_fail === $group_before) t_abort('No assertions in group '.$group_name);
+}
 
 echo "\n", $t_fail ? 'FAILED' : 'ok', ': ', $t_pass, ' passed, ', $t_fail, " failed\n";
 exit($t_fail ? 1 : 0);

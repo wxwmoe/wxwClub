@@ -3,18 +3,18 @@
 function t_schema_dump() {
     global $db;
     $out = ['table' => [], 'column' => [], 'index' => [], 'foreign' => []];
-    foreach ($db->query('select `table_name`, `table_collation` from `information_schema`.`tables` where `table_schema` = database()')->fetchAll(PDO::FETCH_NUM) as $row)
-        $out['table'][$row[0]] = strtolower((string)$row[1]);
+    foreach ($db->query('select `table_name`, `table_collation`, `engine` from `information_schema`.`tables` where `table_schema` = database()')->fetchAll(PDO::FETCH_NUM) as $row)
+        $out['table'][$row[0]] = strtolower($row[1].' '.$row[2]);
     foreach ($db->query('select `table_name`, `column_name`, `column_type`, `collation_name`, `is_nullable`, `column_default`, `extra`'.
         ' from `information_schema`.`columns` where `table_schema` = database()')->fetchAll(PDO::FETCH_NUM) as $row)
         $out['column'][$row[0].'.'.$row[1]] = implode(' ', [preg_replace('/^(tinyint|smallint|mediumint|int|bigint)\([0-9]+\)/', '$1', strtolower($row[2])),
             strtolower((string)$row[3]), $row[4] === 'YES' ? 'null' : 'not-null', 'default='.($row[5] === null ? '-' : $row[5]), strtolower((string)$row[6])]);
     $columns = [];
-    foreach ($db->query('select `table_name`, `index_name`, `non_unique`, `column_name` from `information_schema`.`statistics`'.
+    foreach ($db->query('select `table_name`, `index_name`, `non_unique`, `column_name`, `sub_part`, `index_type`, `collation` from `information_schema`.`statistics`'.
         ' where `table_schema` = database() order by `seq_in_index`')->fetchAll(PDO::FETCH_NUM) as $row) {
         $key = $row[0].'.'.$row[1];
         $out['index'][$key] = $row[2] ? '' : 'unique ';
-        $columns[$key][] = $row[3];
+        $columns[$key][] = $row[3].':'.$row[4].':'.$row[5].':'.$row[6];
     }
     foreach ($columns as $key => $names) $out['index'][$key] .= '('.implode(',', $names).')';
     foreach ($db->query('select `k`.`table_name`, `k`.`column_name`, `k`.`referenced_table_name`, `k`.`referenced_column_name`, `r`.`update_rule`, `r`.`delete_rule`'.
@@ -87,6 +87,7 @@ t_is(t_schema_diff($snapshot, t_schema_dump()), [], 'a fresh install is left unt
 t_group('schema / upgrade from a legacy database');
 
 $fixtures = glob(TEST_ROOT.'/fixtures/schema/*.sql');
+foreach (['13a8931-initial', '52f1d01-final', 'e391bd1-final', 'ed9e358-final', 'fb7c2c0-final'] as $fixture) t_ok(in_array(TEST_ROOT.'/fixtures/schema/'.$fixture.'.sql', $fixtures), $fixture.' is present');
 foreach ($fixtures as $fixture) {
     $from = basename($fixture, '.sql');
     t_schema_sql($fixture);
@@ -137,7 +138,7 @@ function t_schema_scheduling($from) {
 t_group('schema / resume after an interrupted merge');
 
 for ($step = 1; $step <= DB_VERSION; $step++) {
-    t_schema_sql($fixtures[0]);
+    t_schema_sql(TEST_ROOT.'/fixtures/schema/13a8931-initial.sql');
     t_schema_upto($step);
     Club_DB_Version($step - 1);
     list($result, $error) = t_schema_merge();
@@ -146,6 +147,47 @@ for ($step = 1; $step <= DB_VERSION; $step++) {
 }
 
 t_group('schema / second run');
+
+t_schema_sql(TEST_ROOT.'/fixtures/schema/13a8931-initial.sql'); t_schema_upto(1);
+ob_start();
+Club_Migrate_2_Queues(); Club_Migrate_2_Blacklist();
+$columns = [['users','inbox'], ['users','shared_inbox'], ['queues','target'], ['blacklist','target']];
+Club_Migrate_2_URL_Map_Build($columns); Club_Migrate_2_URL_Map_Complete($columns); Club_Migrate_2_URL_Map_Identity(); Club_Migrate_State('migration.2.urls', 'mapped');
+ob_end_clean(); list($version, $error) = t_schema_merge();
+t_is($version, DB_VERSION, 'legacy URL migration resumes from its mapped checkpoint'.$error);
+t_is((int)t_one("select count(*) from `meta` where `name` like 'migration.%'"), 0, 'legacy checkpoint tables and keys are retired');
+
+t_schema_sql(TEST_ROOT.'/fixtures/schema/ed9e358-final.sql');
+for ($i = 1; $i <= 201; $i++) t_exec('insert into `endpoints` (`url`) values (:url)', [':url' => 'https://batch.example/'.sprintf('%03d', $i)]);
+list($version, $error) = t_schema_merge();
+t_is($version, DB_VERSION, 'legacy endpoint rebuild crosses its 200-row page'.$error);
+t_is((int)t_one("select count(*) from `endpoints` where `url` like 'https://batch.example/%' and `idle_since` > 0 and `next_at` is null"), 201, 'both batches receive idle schedules');
+
+$v7 = TEST_ROOT.'/fixtures/schema/fb7c2c0-final.sql';
+for ($cut = 0; $cut <= 3; $cut++) {
+    t_schema_sql($v7);
+    foreach (array_slice(Club_Migrate_8_Pending(), 0, $cut, true) as $table => $def) $db->exec('alter table `'.$table.'` modify '.$def);
+    list($version, $error) = t_schema_merge();
+    t_is($version, DB_VERSION, 'schema 8 resumes after '.$cut.' ALTERs'.$error);
+    t_is(t_schema_diff($snapshot, t_schema_dump()), [], 'schema 8 resumed definitions match fresh install');
+}
+t_schema_sql($v7);
+$db->exec('alter table `notices` drop key `object`, add key `object` (`object`(16))');
+list($version, $error) = t_schema_merge();
+t_is($version, null, 'a prefix index stops schema 8');
+t_is(Club_Schema_Column('users', 'actor')['collation'], 'ascii_general_ci', 'preflight runs before the first ALTER');
+t_is(Club_DB_Version(), 7, 'failed preflight preserves the checkpoint');
+$db->exec('alter table `notices` drop key `object`, add key `object` (`object`)');
+t_schema_merge();
+t_exec("insert into `users` (`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`) select `name`,:actor,`inbox`,'second',`shared_inbox`,`timestamp` from `users` where `uid` = 1",
+    [':actor' => 'https://remote.example/users/Alice']);
+t_is(t_one('select `public_key` from `users` where `actor` = :actor', [':actor' => 'https://remote.example/users/alice']), '', 'lowercase actor keeps its key');
+t_is(t_one('select `public_key` from `users` where `actor` = :actor', [':actor' => 'https://remote.example/users/Alice']), 'second', 'path case distinguishes the second actor key');
+t_exec("insert into `activities` (`uid`,`type`,`clubs`,`object`,`timestamp`) values (2,'Create','[]',:object,1)", [':object' => 'https://remote.example/users/Alice/statuses/1']);
+t_is((int)t_one('select `uid` from `activities` where `object` = :object', [':object' => 'https://remote.example/users/alice/statuses/1']), 1, 'object path case preserves the original author');
+t_is((int)t_one('select `uid` from `activities` where `object` = :object', [':object' => 'https://remote.example/users/Alice/statuses/1']), 2, 'case-distinct object belongs to the second author');
+t_exec("insert into `notices` (`uid`,`type`,`object`,`timestamp`) values (1,'limit',:object,1)", [':object' => 'https://remote.example/投稿']);
+t_is(t_one('select `object` from `notices`'), 'https://remote.example/投稿', 'notice object preserves a Unicode IRI');
 
 list($version, $error) = t_schema_merge();
 t_is($version, DB_VERSION, 'a second merge is a no-op'.$error);

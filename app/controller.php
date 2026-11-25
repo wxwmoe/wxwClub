@@ -3,49 +3,35 @@
 function controller() {
     global $db, $ver, $base, $config, $public_streams;
 
-    $router = [
-        '/' => ['to' => 'index', 'strict' => 1],
-        '/club' => ['to' => 'club', 'strict' => 0],
-        '/inbox' => ['to' => 'inbox', 'strict' => 1],
-        '/nodeinfo/2.0' => ['to' => 'nodeinfo2', 'strict' => 1],
-        '/.well-known/nodeinfo' => ['to' => 'nodeinfo', 'strict' => 1],
-        '/.well-known/webfinger' => ['to' => 'webfinger', 'strict' => 1]
-    ];
-
-    $to = ''; $uri = explode('?', $_SERVER['REQUEST_URI'])[0];
-    foreach ($router as $k => $v) if ($k == ($v['strict'] ? $uri : substr($uri, 0, strlen($k)))) $to = $v['to'];
+    $path = explode('?', $_SERVER['REQUEST_URI'], 2)[0];
+    $routes = ['/' => 'index', '/inbox' => 'inbox', '/nodeinfo/2.0' => 'nodeinfo2', '/.well-known/nodeinfo' => 'nodeinfo', '/.well-known/webfinger' => 'webfinger'];
+    $to = $routes[$path] ?? '';
+    $method = $_SERVER['REQUEST_METHOD']; $part = '';
+    if (preg_match('~^/club/([a-zA-Z_][a-zA-Z0-9_]{1,29})(?:/(inbox|outbox|following|followers|collections/(?:featured|tags|devices)))?$~D', $path, $match)) {
+        $to = 'club'; $name = $match[1]; $part = $match[2] ?? '';
+    }
+    if ($to === 'webfinger') header('Access-Control-Allow-Origin: *');
+    $inbox = $to === 'inbox' || ($to === 'club' && $part === 'inbox');
+    if ($to !== '' && !in_array($method, ['GET', 'HEAD'], true) && !($inbox && $method === 'POST')) {
+        header('Allow: GET, HEAD'.($inbox ? ', POST' : ''));
+        return Club_HTTP_Respond(['message' => 'Method not allowed'], 'json', 405);
+    }
+    if ($inbox && $method === 'POST') return Club_Inbox_Receive($name ?? null);
 
     switch ($to) {
 
         case 'club':
-            if ($club = Club_Group_Ensure(($uri = explode('/', $uri))[2] ?? '')) {
+            $page = Club_HTTP_Page($_GET, $part === 'outbox');
+            if (($part === '' || $part === 'outbox') && $page === false) return Club_HTTP_Respond(['message' => 'Invalid page cursor'], 'json', 400);
+            if ($club = Club_Group_Ensure($name, $part === '')) {
                 $club_url = $base.'/club/'.$club;
                 $system = Club_Group_System($club);
-                if (isset($uri[3])) switch ($uri[3]) {
-                    case 'inbox':
-                        if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Receive($club);
-                        else ActivityPub_Collection($club_url.'/inbox'); break;
-
+                if ($part !== '') switch ($part) {
+                    case 'inbox': ActivityPub_Collection($club_url.'/inbox'); break;
                     case 'outbox':
                         if (isset($_GET['page'])) {
-                            $tail = ($_GET['page'] ?? '') === 'last';
-                            $max = Club_HTTP_Cursor($_GET['max'] ?? '');
-                            $min = Club_HTTP_Cursor($_GET['min'] ?? '');
-                            $asc = $tail || $min;
-                            $where = ''; $params = [':club' => $club];
-                            if ($max) {
-                                $where = ' and a.timestamp <= :ts and (a.timestamp < :ts or a.id < :id)';
-                                $params[':ts'] = $max[0]; $params[':id'] = $max[1];
-                            } elseif ($min) {
-                                $where = ' and a.timestamp >= :ts and (a.timestamp > :ts or a.id > :id)';
-                                $params[':ts'] = $min[0]; $params[':id'] = $min[1];
-                            }
-                            $pdo = $db->prepare('select a.id, a.timestamp, a.activity, u.actor, b.object, b.timestamp as `announced`'.
-                            ' from `announces` `a` join `clubs` `c` on a.cid = c.cid left join `users` `u` on a.uid = u.uid left join `activities` `b` on a.activity = b.id'.
-                            ' where c.name = :club'.$where.' order by a.timestamp '.($asc ? 'asc' : 'desc').', a.id '.($asc ? 'asc' : 'desc').' limit 20');
-                            $pdo->execute($params);
-                            $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
-                            if ($asc) $rows = array_reverse($rows);
+                            list($rows, $newer, $older) = Club_Group_Page($club, $page);
+                            $tail = $page['tail']; $max = $page['max']; $min = $page['min'];
 
                             $self = $club_url.'/outbox?page='.($tail ? 'last' : 'true');
                             if ($max) $self .= '&max='.$max[0].'.'.$max[1];
@@ -53,8 +39,8 @@ function controller() {
                             $arr = ['@context' => 'https://www.w3.org/ns/activitystreams', 'id' => $self, 'type' => 'OrderedCollectionPage', 'partOf' => $club_url.'/outbox', 'orderedItems' => []];
                             if ($rows) {
                                 $head = $rows[0]; $foot = $rows[count($rows) - 1];
-                                if (!$tail && count($rows) == 20) $arr['next'] = $club_url.'/outbox?page=true&max='.$foot['timestamp'].'.'.$foot['id'];
-                                $arr['prev'] = $club_url.'/outbox?page=true&min='.$head['timestamp'].'.'.$head['id'];
+                                if ($older) $arr['next'] = $club_url.'/outbox?page=true&max='.$foot['timestamp'].'.'.$foot['id'];
+                                if ($newer) $arr['prev'] = $club_url.'/outbox?page=true&min='.$head['timestamp'].'.'.$head['id'];
                             }
                             foreach ($rows as $announce) {
                                 $arr['orderedItems'][] = [
@@ -81,23 +67,17 @@ function controller() {
                         $pdo->execute([':club' => $club]);
                         $count = (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
                         ActivityPub_Collection($club_url.'/followers', ['totalItems' => $count]); break;
-                    case 'collections':
-                        switch ($uri[4] ?? '') {
-                            case 'featured': ActivityPub_Collection($club_url.'/collections/featured'); break;
-                            case 'tags': ActivityPub_Collection($club_url.'/collections/tags', ['type' => 'Collection']); break;
-                            case 'devices': ActivityPub_Collection($club_url.'/collections/devices', ['type' => 'Collection']); break;
-                            default: Club_HTTP_Respond(['message' => 'Error: Route Not Found!'], 'json', 404); break;
-                        } break;
-                    default: Club_HTTP_Respond(['message' => 'Error: Route Not Found!'], 'json', 404); break;
+                    case 'collections/featured': ActivityPub_Collection($club_url.'/'.$part); break;
+                    case 'collections/tags': case 'collections/devices': ActivityPub_Collection($club_url.'/'.$part, ['type' => 'Collection']); break;
                 } else {
                     $actor = Club_Group_Actor($club, $pdo);
                     header('Vary: Accept');
                     if ($system || Club_HTTP_Accept_ActivityPub($_SERVER['HTTP_ACCEPT'] ?? '')) Club_HTTP_Respond($actor, 'activity+json');
-                    else Club_Template_Render('profile', ['club' => $club, 'nickname' => $actor['name'], 'summary' => $actor['summary'], 'row' => $pdo]);
+                    else Club_Template_Render('profile', ['club' => $club, 'nickname' => $actor['name'], 'summary' => $actor['summary'], 'row' => $pdo, 'page' => $page]);
                 }
             } else Club_HTTP_Respond(['message' => 'User not found'], 'json', 404); break;
 
-        case 'inbox': if ($_SERVER['REQUEST_METHOD'] == 'POST') Club_Inbox_Receive(); else ActivityPub_Collection($base.'/inbox'); break;
+        case 'inbox': ActivityPub_Collection($base.'/inbox'); break;
 
         case 'nodeinfo': Club_HTTP_Respond(['links' => [['rel' => 'http://nodeinfo.diaspora.software/ns/schema/2.0', 'href' => $base.'/nodeinfo/2.0']]]); break;
 
@@ -108,17 +88,17 @@ function controller() {
             $usage = $pdo->fetch(PDO::FETCH_ASSOC);
             Club_HTTP_Respond([
                 'version' => '2.0',
-                'software' => ['name' => 'wxwClub', 'version' => $ver],
+                'software' => ['name' => 'wxwclub', 'version' => $ver],
                 'protocols' => ['activitypub'],
                 'services' => ['inbound' => [], 'outbound' => []],
                 'openRegistrations' => $config['club']['open-registrations'],
                 'usage' => [
                     'users' => [
-                        'total' => $usage['clubs'] ?? null,
-                        'activeMonth' => $usage['activeMonth'] ?? null,
-                        'activeHalfyear' => $usage['activeHalfyear'] ?? null
+                        'total' => (int)$usage['clubs'],
+                        'activeMonth' => (int)$usage['activeMonth'],
+                        'activeHalfyear' => (int)$usage['activeHalfyear']
                     ],
-                    'localPosts' => $usage['announces'] ?? 0
+                    'localPosts' => (int)$usage['announces']
                 ],
                 'metadata' => [
                     'nodeName' => $config['node']['name'],
@@ -156,7 +136,7 @@ function controller() {
                             'type' => 'application/activity+json',
                             'href' => $club_url
                         ]
-                ]]);
+                ]], 'jrd+json');
             } else Club_HTTP_Respond(['message' => 'User not found'], 'json', 404); break;
 
         case 'index': Club_Template_Render('index'); break;

@@ -17,7 +17,7 @@ CREATE TABLE `clubs` (
 CREATE TABLE `users` (
   `uid` int NOT NULL AUTO_INCREMENT,
   `name` varchar(100) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
-  `actor` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `actor` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `inbox` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `public_key` text CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `shared_inbox` varchar(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -34,7 +34,7 @@ CREATE TABLE `activities` (
   `uid` int NOT NULL,
   `type` varchar(10) COLLATE utf8mb4_general_ci NOT NULL,
   `clubs` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
-  `object` varchar(255) COLLATE utf8mb4_general_ci NOT NULL,
+  `object` varchar(255) COLLATE utf8mb4_bin NOT NULL,
   `updated` int NOT NULL DEFAULT '0',
   `polled` int NOT NULL DEFAULT '0',
   `timestamp` int NOT NULL,
@@ -137,7 +137,7 @@ CREATE TABLE `notices` (
   `uid` int NOT NULL,
   `type` varchar(20) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `note` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL,
-  `object` varchar(255) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL,
+  `object` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
   `timestamp` int NOT NULL,
   PRIMARY KEY (`id`),
   KEY `uid_type_timestamp` (`uid`,`type`,`timestamp`),
@@ -174,4 +174,4 @@ CREATE TABLE `meta` (
   PRIMARY KEY (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '7');
+INSERT INTO `meta` (`name`, `value`) VALUES ('schema', '8');

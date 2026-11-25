@@ -1,6 +1,6 @@
 <?php
 
-define('DB_VERSION', 7);
+define('DB_VERSION', 8);
 
 function ActivityPub_Collection($id, $arr = []) {
     $arr = array_merge(['@context' => 'https://www.w3.org/ns/activitystreams', 'id' => $id, 'type' => 'OrderedCollection', 'totalItems' => 0], $arr);
@@ -28,7 +28,9 @@ function ActivityPub_Digest_Parse($value, &$error = null) {
 function ActivityPub_Fetch($url, $club, $hops = 3, $accept = 'application/activity+json') {
     global $curl, $fetch_retry;
     $fetch_retry = false;
+    $https_only = strpos($accept, 'application/jrd+json') !== false;
     for ($i = 0; $i <= $hops; $i++) {
+        if ($https_only && stripos($url, 'https://') !== 0) return false;
         if (($public = Club_Url_Public($url)) === false) {
             Club_Log_Event('warning', 'fetch blocked, url is not public', ['url' => $url, 'hop' => $i]);
             return false;
@@ -38,11 +40,13 @@ function ActivityPub_Fetch($url, $club, $hops = 3, $accept = 'application/activi
             $fetch_retry = true; return false;
         }
         $date = gmdate('D, d M Y H:i:s T');
-        $result = ActivityPub_Request($url, $date, ['Signature' => ActivityPub_Sign($url, $club, $date)], null, $public, $accept);
+        if (!($signature = ActivityPub_Sign($url, $club, $date))) { $fetch_retry = true; return false; }
+        $result = ActivityPub_Request($url, $date, ['Signature' => $signature], null, $public, $accept);
         $code = $curl['status'];
-        $fetch_retry = $curl['curl_error'] || in_array($code, [401, 408, 429]) || ($code >= 500 && $code != 501);
-        if ($result === false || !in_array($code, [301, 302, 303, 307, 308])) return $result;
-        if (!($location = Club_HTTP_Header($curl['headers'], 'Location'))) return $result;
+        $fetch_retry = !$curl['limit'] && ($curl['curl_error'] || in_array($code, [401, 408, 429]) || ($code >= 500 && $code != 501));
+        if ($result === false) return false;
+        if (Club_HTTP_Full_Document($code, $curl['headers'])) return $result;
+        if (!in_array($code, [301, 302, 303, 307, 308]) || ($location = Club_HTTP_Header($curl['headers'], 'Location')) === '') return false;
         $url = Club_Url_Absolute($location, $url);
     } return false;
 }
@@ -52,11 +56,18 @@ function ActivityPub_Object_Id($object) {
     return is_string($object) ? $object : '';
 }
 
+function ActivityPub_Object_URI($id, $actor = false) {
+    if (!is_string($id) || strlen($id) > ($actor ? 255 : 1020) || !preg_match('/^.{1,255}$/usD', $id)
+        || preg_match('~[\p{Z}\p{C}<>"{}|\\\\^`]|%(?![0-9a-f]{2})~iu', $id) || ($actor && preg_match('/[^\x21-\x7e]|#/', $id))) return false;
+    if (!preg_match('~^(https?://[^/?#]+)(?:[/?#]|$)~i', $id, $m)) return false;
+    return Club_Endpoint_Normalize($m[1].'/') !== false;
+}
+
 function ActivityPub_Probe($url, $club, $authorize = null) {
     global $curl, $base;
     $result = ActivityPub_Push($url, $club, Club_Json_Encode(['@context' => 'https://www.w3.org/ns/activitystreams', 'type' => 'Activity', 'actor' => $base.'/club/'.$club]), $authorize);
-    if (in_array($result, ['blocked', 'unresolved', 'local-dns', 'local-proxy', 'lease-lost'], true)) return $result;
-    if (!isset($curl) || $curl['curl_error']) return 'dead';
+    if (in_array($result, ['blocked', 'unresolved', 'local-dns', 'local-proxy', 'local-sign', 'lease-lost'], true)) return $result;
+    if (empty($curl['status'])) return 'dead';
     $code = $curl['status'];
     return ($code >= 200 && $code < 300) || ($code >= 400 && $code < 500 && !in_array($code, [404, 405, 410])) ? 'alive' : 'dead';
 }
@@ -68,8 +79,8 @@ function ActivityPub_Push($url, $club, $jsonld, $authorize = null) {
         return 'blocked';
     }
     if ($public === null) {
-        if (Club_Resolver_Deferred()) {
-            Club_Log_Event('debug', 'push deferred, dns refresh is held by another worker', ['url' => $url, 'club' => $club]);
+        if (Club_Resolver_Deferred(null, $why)) {
+            Club_Log_Event('debug', 'push deferred after DNS lookup', ['url' => $url, 'club' => $club, 'reason' => $why]);
             return 'local-dns';
         }
         if (Club_Resolver_Healthy()) {
@@ -81,7 +92,8 @@ function ActivityPub_Push($url, $club, $jsonld, $authorize = null) {
     }
     $date = gmdate('D, d M Y H:i:s T');
     $digest = base64_encode(hash('sha256', $jsonld, 1));
-    $head = ['Signature' => ActivityPub_Sign($url, $club, $date, $digest), 'Digest' => 'SHA-256='.$digest];
+    if (!($signature = ActivityPub_Sign($url, $club, $date, $digest))) return 'local-sign';
+    $head = ['Signature' => $signature, 'Digest' => 'SHA-256='.$digest];
     if (isset($authorize) && !$authorize()) return 'lease-lost';
     Club_Stat('http_requests');
     ActivityPub_Request($url, $date, $head, $jsonld, $public, 'application/activity+json', $authorize);
@@ -105,9 +117,9 @@ function ActivityPub_Request($url, $date, $head, $data, array $ips, $accept = 'a
         CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS, CURLOPT_USERAGENT => 'wxwClub '.$ver.'; '.$base];
     $headers = ['Accept' => $accept, 'Content-Type' => 'application/activity+json', 'Date' => $date] + $head;
     $curl = Club_HTTP_Request($handle, $url, $headers, $options, $data, $ips, $pinned, 'federation', $reauthorize);
-    Club_Log_Write('debug', 'curl', [isset($data) ? 'post' : 'get', strtolower($curl['headers']['Status-Line'] ?? ''),
-        preg_replace('#^https?://#i', '', $url)], ['header' => $curl['headers'], 'result' => $curl['response'], 'error' => $curl['error']] + ($curl['error'] ? ['message' => $curl['message']] : []));
-    return $curl['error'] ? false : ($curl['response'] ?: true);
+    Club_Log_Write('debug', 'curl', [isset($data) ? 'post' : 'get', $curl['status'], parse_url($url, PHP_URL_HOST)],
+        ['status' => $curl['status'], 'body_bytes' => $curl['body_bytes'], 'header_bytes' => $curl['header_bytes'], 'limit' => $curl['limit'], 'error' => $curl['message']]);
+    return $curl['error'] ? false : $curl['response'];
 }
 
 function ActivityPub_Sign($url, $club, $date, $digest = null) {
@@ -118,7 +130,7 @@ function ActivityPub_Sign($url, $club, $date, $digest = null) {
     $pdo = $db->prepare('select `private_key` from `clubs` where `name` = :name');
     $pdo->execute([':name' => $club]);
     if ($pdo = $pdo->fetch(PDO::FETCH_ASSOC)) {
-        openssl_sign($signed_string, $signature, $pdo['private_key'], OPENSSL_ALGO_SHA256);
+        if (!@openssl_sign($signed_string, $signature, $pdo['private_key'], OPENSSL_ALGO_SHA256)) { Club_Log_Event('error', 'outbound signing failed', ['club' => $club]); return false; }
         return 'keyId="'.$base.'/club/'.$club.'#main-key'.'",algorithm="rsa-sha256",headers="(request-target) host date'.($post ? ' digest' : '').'",signature="'.base64_encode($signature).'"';
     } return false;
 }
@@ -191,13 +203,11 @@ function ActivityPub_Verify($input = null, $pull = true) {
     if (!$headers || count(array_unique($headers)) !== count($headers)) return ActivityPub_Verify_Fail('malformed signed header list: '.$signature['headers']);
     if (!in_array('(request-target)', $headers)) return ActivityPub_Verify_Fail('(request-target) not signed');
     $created = in_array('(created)', $headers); $expires = in_array('(expires)', $headers);
-    if ($created && !ctype_digit($signature['created'])) return ActivityPub_Verify_Fail('malformed (created): '.($signature['created'] ?: '-'));
-    if ($expires && !ctype_digit($signature['expires'])) return ActivityPub_Verify_Fail('malformed (expires): '.($signature['expires'] ?: '-'));
+    if ($created && (!preg_match('/^\d{1,10}$/D', $signature['created']) || abs(time() - (int)$signature['created']) > 300)) return ActivityPub_Verify_Fail('invalid or stale (created)');
+    if ($expires && !preg_match('/^\d{1,10}$/D', $signature['expires'])) return ActivityPub_Verify_Fail('malformed (expires)');
     if (in_array('date', $headers)) {
         if (!ActivityPub_Verify_Date($_SERVER['HTTP_DATE'] ?? '')) return ActivityPub_Verify_Fail('date out of range: '.($_SERVER['HTTP_DATE'] ?? '-').' vs '.gmdate('D, d M Y H:i:s T'));
-    } elseif ($created) {
-        if (!ActivityPub_Verify_Date($signature['created'])) return ActivityPub_Verify_Fail('(created) out of range: '.$signature['created'].' vs '.time());
-    } else return ActivityPub_Verify_Fail('neither date nor (created) signed');
+    } elseif (!$created) return ActivityPub_Verify_Fail('neither date nor (created) signed');
     if ($expires && $created && (int)$signature['expires'] < (int)$signature['created']) return ActivityPub_Verify_Fail('(expires) precedes (created): '.$signature['expires'].' vs '.$signature['created']);
     if ($expires && (int)$signature['expires'] < time()) return ActivityPub_Verify_Fail('signature expired at '.$signature['expires'].' vs '.time());
     if ($post && !in_array('digest', $headers)) return ActivityPub_Verify_Fail('digest not signed');
@@ -218,6 +228,7 @@ function ActivityPub_Verify($input = null, $pull = true) {
 
     $actor = explode('#', $signature['keyid'])[0];
     if (substr($actor, -9) === '/main-key') $actor = substr($actor, 0, -9);
+    if (!ActivityPub_Object_URI($actor, true)) return ActivityPub_Verify_Fail('invalid actor key identifier');
     $pdo = $db->prepare('select `public_key` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     if ($public_key = $pdo->fetch(PDO::FETCH_COLUMN, 0)) {
@@ -242,10 +253,25 @@ function ActivityPub_Verify_Actor($actor) {
     return true;
 }
 
-function ActivityPub_Verify_Date($date, $skew = 300) {
-    if (empty($date)) return false;
-    $time = ctype_digit((string)$date) ? (int)$date : strtotime($date);
-    return $time && abs(time() - $time) <= $skew;
+function ActivityPub_Verify_Date($date, $skew = 300, $now = null) {
+    if (!is_string($date) || strlen($date) > 35) return false;
+    $now = $now ?? time(); $long = false;
+    if (preg_match('/^([A-Z][a-z]{2}), (\d\d) ([A-Z][a-z]{2}) (\d{4}) (\d\d:\d\d:\d\d) GMT$/D', $date, $m)) list(, $day, $d, $month, $year, $clock) = $m;
+    elseif (preg_match('/^([A-Z][a-z]{5,8}), (\d\d)-([A-Z][a-z]{2})-(\d\d) (\d\d:\d\d:\d\d) GMT$/D', $date, $m)) {
+        list(, $day, $d, $month, $yy, $clock) = $m; $long = true;
+        $future = (new DateTimeImmutable('@'.$now))->modify('+50 years');
+        $year = (int)$future->format('Y') - (int)$future->format('y') + (int)$yy;
+    } elseif (preg_match('/^([A-Z][a-z]{2}) ([A-Z][a-z]{2}) ( [1-9]|\d\d) (\d\d:\d\d:\d\d) (\d{4})$/D', $date, $m)) {
+        list(, $day, $month, $d, $clock, $year) = $m; $d = sprintf('%02d', (int)$d);
+    } else return false;
+    $leap = $clock === '23:59:60'; if ($leap) $clock = '23:59:59';
+    $text = $d.' '.$month.' '.$year.' '.$clock;
+    $value = DateTimeImmutable::createFromFormat('!d M Y H:i:s', $text, new DateTimeZone('UTC'));
+    if ($long && $value && $value > $future) {
+        $text = $d.' '.$month.' '.($year - 100).' '.$clock;
+        $value = DateTimeImmutable::createFromFormat('!d M Y H:i:s', $text, new DateTimeZone('UTC'));
+    }
+    return $value && $value->format('d M Y H:i:s') === $text && $value->format($long ? 'l' : 'D') === $day && abs($now - ($value->getTimestamp() + (int)$leap)) <= $skew;
 }
 
 function ActivityPub_Verify_Digest($input) {
@@ -260,8 +286,8 @@ function ActivityPub_Verify_Fail($reason) {
 }
 
 function ActivityPub_WebFinger_Resource($resource, $base, $host) {
-    if (preg_match('/^acct:([^@]+)@(.+)$/', $resource, $matches)) return $matches[2] === $host ? $matches[1] : null;
-    if (preg_match('~^'.preg_quote($base, '~').'/club/([^/?#]+)$~', $resource, $matches)) return $matches[1];
+    if (preg_match('/^acct:([^@]+)@(.+)$/D', $resource, $matches)) return strcasecmp($matches[2], $host) === 0 ? $matches[1] : null;
+    if (preg_match('~^(?i:'.preg_quote($base, '~').')/club/([^/?#]+)$~D', $resource, $matches)) return $matches[1];
     return false;
 }
 
@@ -312,13 +338,17 @@ function Club_Actor_Confirm($actor, $document) {
     global $db;
     if (($handle = Club_Actor_Handle($document, $actor)) === '') return Club_Log_Event('debug', 'handle not confirmed, no usable candidate', ['actor' => $actor]);
     if (!($self = Club_Actor_Resolve('@'.$handle, $subject))) return Club_Log_Event('debug', 'handle not confirmed, webfinger gave no self link', ['actor' => $actor, 'handle' => $handle]);
-    if ($self !== $actor && (($a = Club_Endpoint_Normalize($self)) === false || ($b = Club_Endpoint_Normalize($actor)) === false || $a !== $b)) {
+    if (!Club_Actor_Same($self, $actor)) {
         Club_Log_Event('warning', 'handle confirmation failed, webfinger does not loop back', ['actor' => $actor, 'handle' => $handle, 'self' => $self]);
-        $pdo = $db->prepare('update `users` set `webfinger` = 0 where `actor` = :actor and `webfinger` <> 0');
-        $pdo->execute([':actor' => $actor]);
         return false;
     }
-    if (($confirmed = Club_Actor_Handle(['webfinger' => (string)$subject], $actor)) === '') $confirmed = $handle;
+    if (($confirmed = Club_Actor_Handle(['webfinger' => $subject], $actor)) === '') return false;
+    if ($confirmed !== $handle) {
+        $self = Club_Actor_Resolve('@'.$confirmed, $canonical);
+        if (!$self || !Club_Actor_Same($self, $actor) || Club_Actor_Handle(['webfinger' => $canonical], $actor) !== $confirmed) {
+            Club_Log_Event('warning', 'canonical handle did not confirm actor', ['actor' => $actor, 'handle' => $confirmed]); return false;
+        }
+    }
     return Club_DB_Transaction('handle confirm', function () use ($db, $actor, $confirmed) {
         $pdo = $db->prepare('update `users` set `name` = :name, `webfinger` = :now where `actor` = :actor');
         $pdo->execute([':name' => $confirmed, ':now' => time(), ':actor' => $actor]);
@@ -336,12 +366,16 @@ function Club_Actor_Confirm_Decide($ask, $fresh, $claim, $name, $webfinger) {
 
 function Club_Actor_Fetch($actor, &$document = null, $confirm = null) {
     global $db, $fetch_retry;
+    $document = null; $fetch_retry = false;
+    if (!ActivityPub_Object_URI($actor, true)) return false;
+    $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor'); $pdo->execute([':actor' => $actor]); $uid = $pdo->fetchColumn();
+    if ($uid !== false) { $pdo = $db->prepare('update `users` set `refresh` = :now where `uid` = :uid'); $pdo->execute([':now' => time(), ':uid' => $uid]); }
     if (!($club = Club_Group_Signer())) {
         Club_Log_Event('warning', 'fetch actor skipped, no system club', ['actor' => $actor]);
         $fetch_retry = true; return false;
     }
-    $document = $jsonld = json_decode(ActivityPub_Fetch($actor, $club), 1);
-    if (empty($jsonld['id']) || $jsonld['id'] != $actor || empty($jsonld['inbox'])) {
+    $jsonld = json_decode((string)ActivityPub_Fetch($actor, $club), true);
+    if (($jsonld['id'] ?? null) !== $actor || !($pem = Club_Actor_Key($jsonld, $actor)) || ($claim = Club_Actor_Handle($jsonld, $actor)) === '' || empty($jsonld['inbox'])) {
         Club_Log_Event('warning', 'fetch actor failed: '.$actor);
         return false;
     }
@@ -351,13 +385,13 @@ function Club_Actor_Fetch($actor, &$document = null, $confirm = null) {
     }
     $shared = $jsonld['endpoints']['sharedInbox'] ?? null;
     if (!isset($shared) || ($shared = Club_Endpoint_Require($shared, ['actor' => $actor])) === false) $shared = $inbox;
-    $claim = Club_Actor_Handle($jsonld, $actor);
-    $data = [':name' => $claim ?: ($jsonld['preferredUsername'] ?? '').'@'.parse_url($jsonld['id'], PHP_URL_HOST), ':inbox' => $inbox,
-        ':public_key' => $jsonld['publicKey']['publicKeyPem'] ?? '', ':shared_inbox' => $shared, ':actor' => $jsonld['id'], ':timestamp' => time()];
-    $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor');
-    $pdo->execute([':actor' => $actor]);
-    if (!($fresh = !$pdo->fetch(PDO::FETCH_COLUMN, 0))) $pdo = $db->prepare('update `users` set `name` = if(`webfinger` = 0, :name, `name`), `inbox` = :inbox,'.
-        ' `public_key` = :public_key, `shared_inbox` = :shared_inbox, `refresh` = :timestamp where `actor` = :actor');
+    $document = $jsonld;
+    $data = [':name' => $claim, ':inbox' => $inbox, ':public_key' => $pem, ':shared_inbox' => $shared, ':actor' => $actor, ':timestamp' => time()];
+    if (!($fresh = $uid === false)) {
+        $data[':uid'] = $uid;
+        $pdo = $db->prepare('update `users` set `name` = if(`webfinger` = 0, :name, `name`), `inbox` = :inbox,'.
+            ' `public_key` = :public_key, `shared_inbox` = :shared_inbox, `refresh` = :timestamp where `uid` = :uid and `actor` = :actor');
+    }
     else $pdo = $db->prepare('insert into `users`(`name`,`actor`,`inbox`,`public_key`,`shared_inbox`,`timestamp`,`refresh`)'.
         ' values (:name, :actor, :inbox, :public_key, :shared_inbox, :timestamp, :timestamp)');
     try { $pdo->execute($data); }
@@ -367,6 +401,7 @@ function Club_Actor_Fetch($actor, &$document = null, $confirm = null) {
     $pdo = $db->prepare('select `uid`,`name`,`inbox`,`shared_inbox`,`webfinger` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     $row = $pdo->fetch(PDO::FETCH_ASSOC);
+    if (!$fresh && (!$row || (int)$row['uid'] !== (int)$uid)) return false;
     if ($row && Club_Actor_Confirm_Decide($confirm, $fresh, $claim, $row['name'], (int)$row['webfinger']) && is_string($name = Club_Actor_Confirm($actor, $jsonld))) $row['name'] = $name;
     if ($row) Club_Actor_Aliased($actor, $jsonld);
     return $row;
@@ -396,13 +431,21 @@ function Club_Actor_Handle($document, $actor) {
         $host = (string)parse_url(ActivityPub_Object_Id($document['id'] ?? '') ?: $actor, PHP_URL_HOST);
         $handle = $user === '' || $host === '' ? '' : $user.'@'.$host;
     }
-    return strlen($handle) <= 100 && preg_match('/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$/', $handle) ? $handle : '';
+    return strlen($handle) <= 100 && preg_match('/^([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+)$/D', $handle, $m) ? $m[1].'@'.strtolower($m[2]) : '';
 }
 
 function Club_Actor_Has($actor) {
     global $db; $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
     return (bool)$pdo->fetch(PDO::FETCH_COLUMN, 0);
+}
+
+function Club_Actor_Key($document, $actor) {
+    $key = $document['publicKey'] ?? null; $pem = $key['publicKeyPem'] ?? null; $id = $key['id'] ?? '';
+    if (!is_string($pem) || strlen($pem) > 16384 || ($key['owner'] ?? null) !== $actor || !is_string($id)
+        || !($id === $actor.'/main-key' || (strpos($id, $actor.'#') === 0 && strlen($id) > strlen($actor) + 1))) return false;
+    $parsed = @openssl_pkey_get_public($pem); $info = $parsed ? openssl_pkey_get_details($parsed) : false;
+    return $info && $info['type'] === OPENSSL_KEYTYPE_RSA && $info['bits'] >= 1024 && $info['bits'] <= 8192 ? $info['key'] : false;
 }
 
 function Club_Actor_Move($actor, $target) {
@@ -441,6 +484,10 @@ function Club_Actor_Resolve($input, &$subject = null) {
     return false;
 }
 
+function Club_Actor_Same($left, $right) {
+    return $left === $right || (($normalized = Club_Endpoint_Normalize($left)) !== false && $normalized === Club_Endpoint_Normalize($right));
+}
+
 function Club_Actor_Sync($actor, $cooldown = 3600) {
     global $db, $fetch_retry; $pdo = $db->prepare('select `refresh` from `users` where `actor` = :actor');
     $pdo->execute([':actor' => $actor]);
@@ -452,25 +499,10 @@ function Club_Actor_Sync($actor, $cooldown = 3600) {
     return Club_Actor_Fetch($actor);
 }
 
-function Club_Ban_Add($target, $type, $clubs = null, $reason = null) {
-    global $db;
-    $scope = Club_DB_Transaction('ban add', function () use ($db, $target, $type, $clubs, $reason) {
-        $pdo = $db->prepare('select `clubs`, `reason` from `bans` where `target` = :target for update');
-        $pdo->execute([':target' => $target]);
-        $row = $pdo->fetch(PDO::FETCH_ASSOC);
-        $old = $row === false ? false : $row['clubs'];
-        $reason = isset($reason) ? ($reason === '' ? null : $reason) : ($row === false ? null : $row['reason']);
-        $scope = $old === false ? (isset($clubs) ? array_values(array_unique($clubs)) : null)
-            : Club_Ban_Scope(isset($old) ? (json_decode($old, 1) ?: []) : null, $clubs);
-        $pdo = $db->prepare('insert into `bans`(`target`,`type`,`clubs`,`reason`,`timestamp`) values (:target, :type, :clubs, :reason, :now)'.
-            ' on duplicate key update `type` = :retype, `clubs` = :reclubs, `reason` = :rereason');
-        $json = isset($scope) ? Club_Json_Encode($scope) : null;
-        $pdo->execute([':target' => $target, ':type' => $type, ':clubs' => $json, ':reason' => $reason, ':now' => time(),
-            ':retype' => $type, ':reclubs' => $json, ':rereason' => $reason]);
-        return $scope;
-    });
-    $rows = Club_Ban_Detach([$target], $type, $scope);
-    Club_Log_Event('info', 'ban added by cli', ['target' => $target, 'type' => $type, 'clubs' => isset($scope) ? $scope : 'all', 'follows dropped' => $rows]);
+function Club_Ban_Add($target, $type, $clubs = null, $reason = null, &$effective = null) {
+    $effective = Club_DB_Transaction('ban add', function () use ($target, $type, $clubs, $reason) { return Club_Ban_Save($target, $type, $clubs, $reason); });
+    $rows = Club_Ban_Detach([$target], $type, $effective);
+    Club_Log_Event('info', 'ban added by cli', ['target' => $target, 'type' => $type, 'clubs' => $effective, 'follows dropped' => $rows]);
     return $rows;
 }
 
@@ -492,41 +524,34 @@ function Club_Ban_Clubs($actor, $host, $clubs) {
 }
 
 function Club_Ban_Detach($targets, $type, $clubs = null, $dry = false) {
-    global $db; $total = 0;
-    if (!($targets = array_values(array_unique((array)$targets)))) return 0;
-    $scope = '';
-    if (isset($clubs)) {
-        if (!$clubs) return 0;
-        $names = [];
-        foreach ($clubs as $club) $names[] = $db->quote($club);
-        $scope = ' and `cid` in (select `cid` from `clubs` where `name` in ('.implode(',', $names).'))';
-    }
-    if ($type !== 'host') {
-        $names = []; $params = [];
-        foreach ($targets as $i => $target) { $names[] = ':a'.$i; $params[':a'.$i] = $target; }
-        if ($dry) {
-            $pdo = $db->prepare('select count(*) from `followers` where `uid` in (select `uid` from `users` where `actor` in ('.implode(',', $names).'))'.$scope);
-            $pdo->execute($params);
-            return (int)$pdo->fetch(PDO::FETCH_COLUMN, 0);
-        }
-        $pdo = $db->prepare('select `uid` from `users` where `actor` in ('.implode(',', $names).')');
-        $pdo->execute($params);
-        return Club_Ban_Drop($pdo->fetchAll(PDO::FETCH_COLUMN, 0), $scope);
-    }
-    $hosts = array_flip($targets); $cursor = 0;
+    return Club_Ban_Detach_List([$type => array_fill_keys($targets, $clubs)], $dry);
+}
+
+function Club_Ban_Detach_List($bans, $dry) {
+    global $db; $total = 0; $cursor = 0;
+    if (empty($bans['actor']) && empty($bans['host'])) return 0;
     $pdo = $db->prepare('select `uid`, `actor` from `users` where `uid` > :cursor order by `uid` limit 500');
     do {
-        $pdo->execute([':cursor' => $cursor]);
-        $rows = $pdo->fetchAll(PDO::FETCH_ASSOC); $uids = [];
+        $pdo->execute([':cursor' => $cursor]); $rows = $pdo->fetchAll(PDO::FETCH_ASSOC); $groups = [];
         foreach ($rows as $row) {
-            $cursor = (int)$row['uid'];
-            if (isset($hosts[(string)Club_Url_Host((string)parse_url($row['actor'], PHP_URL_HOST))])) $uids[] = (int)$row['uid'];
+            $cursor = (int)$row['uid']; $scope = false;
+            foreach (Club_Ban_Where($row['actor'], (string)parse_url($row['actor'], PHP_URL_HOST)) as $param => $target) {
+                $rules = $bans[substr($param, 1)] ?? [];
+                if (array_key_exists($target, $rules)) $scope = $scope === false ? $rules[$target] : Club_Ban_Scope($scope, $rules[$target]);
+            }
+            if ($scope !== false) $groups[isset($scope) ? implode(',', $scope) : '*'][] = $cursor;
         }
-        if (!$uids) continue;
-        if ($dry) $total += (int)$db->query('select count(*) from `followers` where `uid` in ('.implode(',', $uids).')'.$scope)->fetch(PDO::FETCH_COLUMN, 0);
-        else $total += Club_Ban_Drop($uids, $scope);
+        foreach ($groups as $scope => $uids) {
+            $filter = '';
+            if ($scope !== '*') {
+                $names = []; foreach (explode(',', $scope) as $club) $names[] = $db->quote($club);
+                $filter = ' and `cid` in (select `cid` from `clubs` where `name` in ('.implode(',', $names).'))';
+            }
+            if ($dry) $total += (int)$db->query('select count(*) from `followers` where `uid` in ('.implode(',', $uids).')'.$filter)->fetchColumn();
+            else $total += Club_Ban_Drop($uids, $filter);
+        }
     } while (count($rows) === 500);
-    return (int)$total;
+    return $total;
 }
 
 function Club_Ban_Drop($uids, $scope) {
@@ -534,7 +559,7 @@ function Club_Ban_Drop($uids, $scope) {
     if (!($uids = array_map('intval', (array)$uids))) return 0;
     return (int)Club_DB_Transaction('ban detach', function () use ($db, $uids, $scope) {
         $list = implode(',', $uids);
-        $db->query('select `uid` from `users` where `uid` in ('.$list.') for update')->fetchAll(PDO::FETCH_COLUMN, 0);
+        $db->query('select `uid` from `users` where `uid` in ('.$list.') order by `uid` for update')->fetchAll(PDO::FETCH_COLUMN, 0);
         return $db->exec('delete from `followers` where `uid` in ('.$list.')'.$scope);
     });
 }
@@ -564,6 +589,28 @@ function Club_Ban_Remove($target, $clubs = null) {
     });
     Club_Log_Event($state === 'removed' || $state === 'narrowed' ? 'info' : 'debug', 'ban remove, '.$state, ['target' => $target, 'clubs' => isset($clubs) ? $clubs : 'all']);
     return $state;
+}
+
+function Club_Ban_Save($target, $type, $clubs, $reason, $apply = true, $import = false, &$exists = null) {
+    global $db;
+    if (isset($reason) && (!is_string($reason) || !preg_match('/^[^\x00]{0,255}$/usD', $reason))) throw new InvalidArgumentException('Ban reason must fit 255 Unicode characters');
+    $json = isset($clubs) ? Club_Json_Encode($clubs) : null;
+    if (isset($json) && strlen($json) > 1024) throw new InvalidArgumentException('Ban scope exceeds 1024 bytes');
+    if ($apply) {
+        $pdo = $db->prepare('insert into `bans` (`target`,`type`,`clubs`,`reason`,`timestamp`) values (:target,:type,:clubs,:reason,:now) on duplicate key update `target` = `target`');
+        $pdo->execute([':target' => $target, ':type' => $type, ':clubs' => $json, ':reason' => $reason, ':now' => time()]); $exists = $pdo->rowCount() === 0;
+    }
+    $pdo = $db->prepare('select `clubs`, `reason` from `bans` where `target` = :target'.($apply ? ' for update' : '')); $pdo->execute([':target' => $target]);
+    $row = $pdo->fetch(PDO::FETCH_ASSOC); if (!$apply) $exists = (bool)$row;
+    $scope = $row ? Club_Ban_Scope(isset($row['clubs']) ? json_decode($row['clubs'], true) : null, $clubs) : $clubs;
+    if (isset($scope)) sort($scope, SORT_STRING);
+    $json = isset($scope) ? Club_Json_Encode($scope) : null;
+    if (isset($json) && strlen($json) > 1024) throw new InvalidArgumentException('Merged ban scope exceeds 1024 bytes');
+    if ($apply) {
+        if (!isset($reason) || ($import && isset($row['reason']))) $reason = $row['reason'];
+        $pdo = $db->prepare('update `bans` set `clubs` = :clubs, `reason` = :reason where `target` = :target'); $pdo->execute([':clubs' => $json, ':reason' => $reason === '' ? null : $reason, ':target' => $target]);
+    }
+    return $scope;
 }
 
 function Club_Ban_Scope($old, $new) {
@@ -620,42 +667,48 @@ function Club_Group_Actor($club, &$row = null) {
 
 function Club_Group_Create($club, $system = false) {
     global $db, $config;
-    if (!$system) {
-        if (in_array(strtolower($club), $config['club']['suspended-names'])) {
-            Club_Log_Event('info', 'club create rejected, suspended name: '.$club);
-            return Club_Group_Fail('suspended name');
-        }
-        if ($limit = $config['club']['create-limit'] ?? 10) {
-            $pdo = $db->prepare('select count(cid) from `clubs` where `timestamp` >= :timestamp');
-            $pdo->execute([':timestamp' => time() - 3600]);
-            if ($pdo->fetch(PDO::FETCH_COLUMN, 0) >= $limit) {
-                Club_Log_Event('warning', 'club create rate limited: '.$club.', '.$limit.'/hour');
-                return Club_Group_Fail('create limited');
+    return Club_DB_Transaction('create club', function () use ($db, $config, $club, $system) {
+        if ($db->query("select `value` from `meta` where `name` = 'schema' for update")->fetchColumn() === false) throw new RuntimeException('Missing schema row');
+        $pdo = $db->prepare('select `name` from `clubs` where `name` = :club'); $pdo->execute([':club' => $club]);
+        if ($existing = $pdo->fetchColumn()) return $existing;
+        if (!$system) {
+            if (in_array(strtolower($club), $config['club']['suspended-names'])) {
+                Club_Log_Event('info', 'club create rejected, suspended name: '.$club);
+                return Club_Group_Fail('suspended name');
+            }
+            if ($limit = $config['club']['create-limit'] ?? 10) {
+                $pdo = $db->prepare('select count(cid) from `clubs` where `timestamp` >= :timestamp');
+                $pdo->execute([':timestamp' => time() - 3600]);
+                if ($pdo->fetch(PDO::FETCH_COLUMN, 0) >= $limit) {
+                    Club_Log_Event('warning', 'club create rate limited: '.$club.', '.$limit.'/hour');
+                    return Club_Group_Fail('create limited');
+                }
             }
         }
-    }
-    $key = openssl_pkey_new(['digest_alg' => 'sha512', 'private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
-    if (!$key || !openssl_pkey_export($key, $priv_key)) {
-        Club_Log_Event('error', 'club keygen failed: '.$club.', '.openssl_error_string());
-        return Club_Group_Fail('keygen failed');
-    }
-    $detail = openssl_pkey_get_details($key);
-    $pdo = $db->prepare('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values(:name, :public, :private, :timestamp)');
-    try { $pdo->execute([':name' => $club, ':public' => $detail['key'], ':private' => $priv_key, ':timestamp' => time()]); }
-    catch (PDOException $e) {
-        if ((int)($e->errorInfo[1] ?? 0) !== 1062) throw $e;
-    }
-    $pdo = $db->prepare('select `name` from `clubs` where `name` = :name');
-    $pdo->execute([':name' => $club]);
-    return $pdo->fetch(PDO::FETCH_COLUMN, 0);
+        $key = openssl_pkey_new(['digest_alg' => 'sha512', 'private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+        if (!$key || !openssl_pkey_export($key, $priv_key)) {
+            Club_Log_Event('error', 'club keygen failed: '.$club.', '.openssl_error_string());
+            return Club_Group_Fail('keygen failed');
+        }
+        $detail = openssl_pkey_get_details($key);
+        $pdo = $db->prepare('insert into `clubs`(`name`,`public_key`,`private_key`,`timestamp`) values(:name, :public, :private, :timestamp)');
+        try { $pdo->execute([':name' => $club, ':public' => $detail['key'], ':private' => $priv_key, ':timestamp' => time()]); }
+        catch (PDOException $e) {
+            if ((int)($e->errorInfo[1] ?? 0) !== 1062) throw $e;
+        }
+        $pdo = $db->prepare('select `name` from `clubs` where `name` = :name');
+        $pdo->execute([':name' => $club]);
+        return $pdo->fetch(PDO::FETCH_COLUMN, 0);
+    });
 }
 
-function Club_Group_Ensure($club) {
+function Club_Group_Ensure($club, $create = true) {
     global $db, $config, $club_reason; $club_reason = null;
-    if (strlen($club) > 30 || !preg_match('/^[a-zA-Z_][a-zA-Z0-9_]+$/u', $club)) return Club_Group_Fail('invalid name');
+    if (!is_string($club) || !preg_match('/^[a-zA-Z_][a-zA-Z0-9_]{1,29}$/D', $club)) return Club_Group_Fail('invalid name');
     $pdo = $db->prepare('select `name` from `clubs` where `name` = :name'); $pdo->execute([':name' => $club]);
     if ($pdo = $pdo->fetch(PDO::FETCH_COLUMN, 0)) return $pdo;
-    if (Club_Group_System($club)) return Club_Group_Fail('reserved name');
+    if (!$create) return Club_Group_Fail('unknown club');
+    if (Club_Group_System($club)) return Club_Group_Signer();
     return $config['club']['open-registrations'] ? Club_Group_Create($club) : Club_Group_Fail('registration closed');
 }
 
@@ -667,12 +720,14 @@ function Club_Group_Follow($actor, $club, $follow) {
     global $db;
     $pdo = $db->prepare('select `uid` from `users` where `actor` = :actor'); $pdo->execute([':actor' => $actor]);
     if (!($uid = $pdo->fetch(PDO::FETCH_COLUMN, 0))) return 'user-missing';
-    $pdo = $db->prepare('select `cid` from `clubs` where `name` = :club'); $pdo->execute([':club' => $club]);
-    if (!($cid = $pdo->fetch(PDO::FETCH_COLUMN, 0))) return 'club-missing';
+    $pdo = $db->prepare('select `cid`, `name` from `clubs` where `name` = :club'); $pdo->execute([':club' => $club]);
+    if (!($row = $pdo->fetch(PDO::FETCH_NUM))) return 'club-missing';
+    list($cid, $club) = $row;
     if ($follow) {
         $state = Club_DB_Transaction('cli follow', function () use ($db, $actor, $club, $cid, $uid) {
             $pdo = $db->prepare('select `uid` from `users` where `uid` = :uid for update');
             $pdo->execute([':uid' => $uid]);
+            if (!$pdo->fetchColumn()) return 'user-missing';
             $host = (string)parse_url($actor, PHP_URL_HOST);
             if (Club_Ban_Check($actor, $host) || Club_Ban_Clubs($actor, $host, [$club])) return 'banned';
             $pdo = $db->prepare('insert ignore into `followers`(`cid`,`uid`,`timestamp`) values (:cid, :uid, :now)');
@@ -688,9 +743,33 @@ function Club_Group_Follow($actor, $club, $follow) {
     return $state;
 }
 
-function Club_Group_From_Object($object) {
-    if (count($parts = explode('/club/', ActivityPub_Object_Id($object))) < 2) return false;
-    return explode('/', $parts[1])[0];
+function Club_Group_From_Object($object, $allow_system = false) {
+    global $base;
+    $id = ActivityPub_Object_Id($object);
+    if (!preg_match('~^(?i:'.preg_quote($base, '~').')/club/([a-zA-Z_][a-zA-Z0-9_]{1,29})$~D', $id, $m) || (!$allow_system && Club_Group_System($m[1]))) return false;
+    return $m[1];
+}
+
+function Club_Group_Page($club, $page) {
+    global $db;
+    $asc = $page['tail'] || $page['min']; $dir = $asc ? 'asc' : 'desc'; $op = $asc ? '>' : '<';
+    $params = [':club' => $club]; $where = '';
+    if ($cursor = $page['max'] ?: $page['min']) {
+        $where = ' and a.timestamp '.$op.'= :ts and (a.timestamp '.$op.' :ts or a.id '.$op.' :id)';
+        $params[':ts'] = $cursor[0]; $params[':id'] = $cursor[1];
+    }
+    $pdo = $db->prepare('select a.id, a.cid, a.timestamp, a.activity, a.summary, a.content, u.name, u.actor, b.object, b.timestamp as `announced`'.
+        ' from `announces` `a` join `clubs` `c` on a.cid = c.cid left join `users` `u` on a.uid = u.uid left join `activities` `b` on a.activity = b.id'.
+        ' where c.name = :club'.$where.' order by a.timestamp '.$dir.', a.id '.$dir.' limit 21');
+    $pdo->execute($params); $rows = $pdo->fetchAll(PDO::FETCH_ASSOC);
+    $more = count($rows) > 20; if ($more) array_pop($rows);
+    $back = false;
+    if ($cursor && $rows) {
+        $edge = $rows[0]; $op = $asc ? '<' : '>';
+        $pdo = $db->prepare('select 1 from `announces` where `cid` = :cid and `timestamp` '.$op.'= :ts and (`timestamp` '.$op.' :ts or `id` '.$op.' :id) limit 1');
+        $pdo->execute([':cid' => $edge['cid'], ':ts' => $edge['timestamp'], ':id' => $edge['id']]); $back = (bool)$pdo->fetchColumn();
+    }
+    return [$asc ? array_reverse($rows) : $rows, $asc ? $more : $back, $asc ? $back : $more];
 }
 
 function Club_Group_Publish($club) {
@@ -748,34 +827,44 @@ function Club_Group_System($club = null) {
 function Club_Inbox_Create($jsonld) {
     global $db, $base, $config, $public_streams, $club_reason;
     if (!is_array($jsonld['object'] ?? null) || !($object = ActivityPub_Object_Id($jsonld['object']['id'] ?? ''))) return Club_Inbox_Skip('create without object id', ['actor' => $jsonld['actor']]);
-    $author = ActivityPub_Object_Id($jsonld['object']['attributedTo'] ?? '');
-    if ($author ? $author !== $jsonld['actor'] : parse_url($object, PHP_URL_HOST) !== parse_url($jsonld['actor'], PHP_URL_HOST)) {
-        Club_Log_Event('warning', 'announce author mismatch', ['actor' => $jsonld['actor'], 'author' => $author, 'object' => $object]);
-        return;
-    }
+    $authors = $jsonld['object']['attributedTo'] ?? [];
+    if (!is_array($authors) || isset($authors['id'])) $authors = [$authors];
+    if (!ActivityPub_Object_URI($object) || !$authors || count($authors) > 32 || array_keys($authors) !== range(0, count($authors) - 1) || !in_array($jsonld['actor'], array_map('ActivityPub_Object_Id', $authors), true)
+        || strcasecmp(parse_url($object, PHP_URL_HOST), parse_url($jsonld['actor'], PHP_URL_HOST)) !== 0) throw new Club_Inbox_Rejected('Invalid object or attribution');
     $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
     $pdo->execute([':object' => $object]);
     if (!$pdo->fetch(PDO::FETCH_ASSOC)) {
-        $prefix = $base.'/club/';
         $lang = Club_I18n_Detect($jsonld['object']);
-        foreach ($to = array_merge((array)($jsonld['to'] ?? []), (array)($jsonld['cc'] ?? [])) as $cc)
-            if (is_string($cc) && $prefix == substr($cc, 0, strlen($prefix))) {
-                if (Club_Group_System($name = explode('/', substr($cc, strlen($prefix)))[0])) continue;
-                if ($club = Club_Group_Ensure($name)) $clubs[$club] = 1;
-                elseif ($club_reason == 'create limited') Club_Notice_Send($jsonld['actor'], 'create-limit', [], $lang);
-            }
-        if (!empty($clubs) && ($clubs = array_keys($clubs)) && in_array($public_streams, $to)) {
+        $to = array_merge((array)($jsonld['to'] ?? []), (array)($jsonld['cc'] ?? [])); $names = []; $clubs = [];
+        if (!in_array($public_streams, $to, true)) return Club_Inbox_Skip('create is not public');
+        foreach ($to as $cc) if ($name = Club_Group_From_Object($cc)) $names[strtolower($name)] = $name;
+        if (strlen(Club_Json_Encode(array_values($names))) > 255) throw new Club_Inbox_Rejected('Too many recipient groups');
+        if (!$names) return Club_Inbox_Skip('create has no local group recipient');
+        if (!($actor = Club_Actor_Get($jsonld['actor']))) return Club_Inbox_Unresolved($jsonld['actor']);
+        foreach ($names as $name) {
+            if ($club = Club_Group_Ensure($name)) $clubs[$club] = 1;
+            elseif ($club_reason === 'create limited') Club_Notice_Send($jsonld['actor'], 'create-limit', [], $lang);
+        }
+        if ($clubs) {
+            $clubs = array_keys($clubs);
             sort($clubs, SORT_STRING);
-            if ($actor = Club_Actor_Get($jsonld['actor'])) {
-                return Club_DB_Transaction('create inbox', function () use ($db, $base, $public_streams, $clubs, $actor, $jsonld, $object, $lang) {
+            return Club_DB_Transaction('create inbox', function () use ($db, $base, $public_streams, $clubs, $actor, $jsonld, $object, $lang) {
                 $pdo = $db->prepare('select `uid` from `users` where `uid` = :uid for update');
                 $pdo->execute([':uid' => $actor['uid']]);
+                if (!$pdo->fetchColumn()) return Club_Inbox_Skip('sender removed before submission');
+                if (Club_Ban_Check($jsonld['actor'], parse_url($jsonld['actor'], PHP_URL_HOST))) return Club_Inbox_Skip('sender banned before submission');
+                $shared_limits = [];
+                foreach ($clubs as $club) foreach (Club_Limit_Rules($club) as $rule) if (in_array(strtolower($rule['type']), ['club', 'site'], true)) { $shared_limits[] = $db->quote($club); break; }
+                if ($shared_limits) {
+                    $ids = $db->query('select `cid` from `clubs` where `name` in ('.implode(',', $shared_limits).') order by `cid`')->fetchAll(PDO::FETCH_COLUMN);
+                    $lock = $db->prepare('select `cid` from `clubs` where `cid` = :cid for update');
+                    foreach ($ids as $cid) { $lock->execute([':cid' => $cid]); $lock->fetchColumn(); }
+                }
                 $pdo = $db->prepare('insert ignore into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`) values(:uid, :type, :clubs, :object, :timestamp)');
                 $pdo->execute([':uid' => $actor['uid'], ':type' => 'Create', ':clubs' => Club_Json_Encode($clubs), ':object' => $object, ':timestamp' => ($time = time())]);
                 if ($pdo->rowCount() && ($activity_id = $db->lastInsertId())) {
                     $content = strip_tags(is_string($c = $jsonld['object']['content'] ?? '') ? $c : '');
                     $summary = is_string($s = $jsonld['object']['summary'] ?? null) ? $s : null;
-                    $published = strtotime(is_string($p = $jsonld['object']['published'] ?? '') ? $p : '') ?: $time;
                     $announced = [];
                     $banned = Club_Ban_Clubs($jsonld['actor'], parse_url($jsonld['actor'], PHP_URL_HOST), $clubs);
                     foreach ($clubs as $club) {
@@ -799,7 +888,7 @@ function Club_Inbox_Create($jsonld) {
                         $announced[] = $club;
                         $pdo = $db->prepare('insert ignore into `announces`(`cid`,`uid`,`activity`,`summary`,`content`,`timestamp`) select `cid`, :uid as `uid`,'.
                             ' :activity as `activity`, :summary as `summary`, :content as `content`, :timestamp as `timestamp` from `clubs` where `name` = :club');
-                        $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':activity' => $activity_id, ':summary' => $summary, ':content' => $content, ':timestamp' => $published]);
+                        $pdo->execute([':club' => $club, ':uid' => $actor['uid'], ':activity' => $activity_id, ':summary' => $summary, ':content' => $content, ':timestamp' => $time]);
                     }
                     if ($announced != $clubs) {
                         $pdo = $db->prepare('update `activities` set `clubs` = :clubs where `id` = :id');
@@ -808,8 +897,7 @@ function Club_Inbox_Create($jsonld) {
                     Club_Log_Event($announced ? 'info' : 'warning', 'announce '.($announced ? 'queued' : 'produced nothing'),
                         ['object' => $object, 'clubs' => $announced, 'skipped' => array_values(array_diff($clubs, $announced))]);
                 } else Club_Inbox_Skip('create already claimed by a concurrent delivery', ['object' => $object]);
-                });
-            } else Club_Inbox_Unresolved($jsonld['actor']);
+            });
         } else Club_Inbox_Skip('create not addressed to a club, or not public', ['object' => $object, 'clubs' => $clubs ?? [], 'to' => $to]);
     } else Club_Inbox_Skip('create already processed', ['object' => $object]);
 }
@@ -817,9 +905,8 @@ function Club_Inbox_Create($jsonld) {
 function Club_Inbox_Delete($jsonld, $input = null) {
     global $db, $base, $public_streams;
     if (!is_array($jsonld['object'] ?? null) || !($object = ActivityPub_Object_Id($jsonld['object']['id'] ?? ''))) return Club_Inbox_Skip('delete without object id', ['actor' => $jsonld['actor']]);
-    // Some servers omit the Delete ID or reuse the object ID.
-    $id = ActivityPub_Object_Id($jsonld['id'] ?? '');
-    if ($id === '' || $id === $object) $id = $object.'#delete';
+    if (!ActivityPub_Object_URI($object)) throw new Club_Inbox_Rejected('Invalid object identifier');
+    $id = 'urn:wxwclub:delete:'.hash('sha256', $jsonld['actor']."\0".$object);
     Club_Notice_Delete($object, $jsonld['actor']);
     $pdo = $db->prepare('select `id` from `activities` where `object` = :object');
     $pdo->execute([':object' => $id]);
@@ -829,6 +916,7 @@ function Club_Inbox_Delete($jsonld, $input = null) {
         $pdo->execute([':object' => $object, ':actor' => $jsonld['actor']]);
         if ($activity = $pdo->fetch(PDO::FETCH_ASSOC)) {
             return Club_DB_Transaction('delete inbox', function () use ($db, $base, $public_streams, $jsonld, $input, $object, $id, $activity) {
+            if (!Club_Inbox_Lock_Announces($activity['id'])) return Club_Inbox_Skip('announcement already withdrawn', ['object' => $object]);
             $pdo = $db->prepare('insert ignore into `activities`(`uid`,`type`,`clubs`,`object`,`timestamp`) values(:uid, :type, :clubs, :object, :timestamp)');
             $pdo->execute([':uid' => $activity['uid'], ':type' => 'Delete', ':clubs' => $activity['clubs'], ':object' => $id, ':timestamp' => time()]);
             if (!$pdo->rowCount()) return Club_Inbox_Skip('delete claimed by a concurrent delivery', ['object' => $object]);
@@ -874,15 +962,15 @@ function Club_Inbox_Dispatch($input, $club = null) {
     $payload = $wrapped ? null : $input;
     $type = is_string($t = $jsonld['type'] ?? '') && preg_match('/^[A-Za-z]+$/', $t) ? $t : '';
     $actor = ActivityPub_Object_Id($jsonld['actor'] ?? '');
-    $host = $actor === '' ? '' : (string)parse_url($actor, PHP_URL_HOST);
+    $host = ActivityPub_Object_URI($actor, true) ? (string)parse_url($actor, PHP_URL_HOST) : '';
 
     $parts = [$club ?? 'shared_inbox', $type ?: 'unknown'];
     if ($type === 'Delete' && $actor !== '' && $actor === ActivityPub_Object_Id($jsonld['object'] ?? '')) $parts[] = 'actor';
     Club_Log_Ref($name = Club_Log_Name('inbox', $parts));
     if ($wrapped) Club_Log_Event('debug', 'inbox unwrapped json-ld array, relay disabled', ['club' => $club ?? 'shared', 'type' => $type ?: 'unknown']);
 
-    if ($type === '' || $host === '' || strcasecmp($host, $config['base']) === 0) {
-        $reason = $type === '' ? 'invalid type: '.substr((string)($jsonld['type'] ?? ''), 0, 100)
+    if ($type === '' || $host === '' || strcasecmp($host, parse_url('https://'.$config['base'], PHP_URL_HOST)) === 0) {
+        $reason = $type === '' ? 'invalid activity type'
             : ($host === '' ? 'actor is not a url: '.substr($actor, 0, 200) : 'actor claims local host: '.substr($actor, 0, 200));
         Club_Log_Write('warning', 'inbox', $name.'_input', $input);
         Club_Log_Write('warning', 'inbox', $name.'_rejected', $reason, 'txt');
@@ -943,11 +1031,21 @@ function Club_Inbox_Dispatch($input, $club = null) {
         return Club_Inbox_Reply(202, 'Accepted');
     }
     if ($verify) Club_Blacklist_Sooner($actor);
+    if ($type === 'Update' && $actor === ActivityPub_Object_Id($jsonld['object'] ?? '')) {
+        if (!$verify) return Club_Inbox_Reply(403, 'Signature verification failed');
+        if (!Club_Actor_Sync($actor, 60)) return Club_Inbox_Unresolved($actor);
+        return Club_Inbox_Skip('actor profile refreshed', ['actor' => $actor]);
+    }
     if (isset($club) && Club_Group_System($club)) {
         Club_Inbox_Skip('system club accepts nothing', ['club' => $club, 'type' => $type]);
         return Club_Inbox_Reply(403, 'This actor does not accept this activity');
     }
 
+    if ($type === 'Follow' || ($type === 'Undo' && ($jsonld['object']['type'] ?? '') === 'Follow')) {
+        $target = Club_Group_From_Object($type === 'Follow' ? ($jsonld['object'] ?? '') : ($jsonld['object']['object'] ?? ''), true);
+        if ($target && Club_Group_System($target)) return Club_Inbox_Reply(403, 'This actor does not accept this activity');
+        if ($target === false || (isset($club) && strcasecmp($target, $club) !== 0)) return Club_Inbox_Skip('follow target differs from inbox', ['club' => $club]);
+    }
     switch ($type) {
         case 'Create': Club_Inbox_Create($jsonld); break;
         case 'Follow': Club_Inbox_Follow($jsonld); break;
@@ -1012,6 +1110,13 @@ function Club_Inbox_Follow($jsonld) {
     });
 }
 
+function Club_Inbox_Lock_Announces($activity) {
+    global $db;
+    $pdo = $db->prepare('select `id` from `announces` where `activity` = :activity order by `id` for update');
+    $pdo->execute([':activity' => $activity]);
+    return $pdo->fetchColumn() !== false;
+}
+
 function Club_Inbox_Log($name, $input, $verify) {
     global $verify_reason, $verify_signed;
     Club_Log_Write($verify ? 'info' : 'warning', 'inbox', $name.'_input', $input);
@@ -1032,7 +1137,7 @@ function Club_Inbox_Poll($jsonld, $object) {
     if (!in_array('Question', (array)($object['type'] ?? []), true)) return 0;
     if (!is_array($object['oneOf'] ?? null) && !is_array($object['anyOf'] ?? null)) return 0;
     if (!preg_match('#\#updates/([0-9]{1,10})$#', ActivityPub_Object_Id($jsonld['id'] ?? ''), $matches)) return 0;
-    return ($revision = (int)$matches[1]) > time() + 86400 ? 0 : $revision;
+    return ($revision = (int)$matches[1]) > min(2147483647, time() + 86400) ? 0 : $revision;
 }
 
 class Club_Inbox_Deferred extends RuntimeException {}
@@ -1059,8 +1164,8 @@ function Club_Inbox_Receive($club = null, $input = null) {
         Club_Inbox_Reply(503, 'Temporarily unable to enqueue the required response', 300);
     }
     catch (Club_Inbox_Rejected $e) {
-        Club_Log_Event('warning', 'inbox rejected, required outbound response cannot be enqueued', ['error' => $e->getMessage()]);
-        Club_Inbox_Reply(400, 'Required response target is invalid');
+        Club_Log_Event('warning', 'inbox activity rejected', ['error' => $e->getMessage()]);
+        Club_Inbox_Reply(400, 'Invalid activity');
     }
     catch (PDOException $e) {
         Club_Log_Event('error', 'inbox aborted, database error', ['error' => $e->getMessage()]);
@@ -1071,7 +1176,7 @@ function Club_Inbox_Receive($club = null, $input = null) {
 
 function Club_Inbox_Relayable($jsonld, $input, $object, $type) {
     global $config; $type = strtolower($type);
-    if (empty($jsonld['signature']['signatureValue'])) {
+    if (!is_string($input) || $input === '' || empty($jsonld['signature']['signatureValue'])) {
         Club_Log_Event('info', $type.' not relayed, no ld signature', ['object' => $object]);
         return false;
     }
@@ -1116,7 +1221,11 @@ function Club_Inbox_Unresolved($actor) {
 function Club_Inbox_Update($jsonld, $input) {
     global $db;
     if (!is_array($object = $jsonld['object'] ?? null) || !($id = ActivityPub_Object_Id($object['id'] ?? ''))) return Club_Inbox_Skip('update without object id', ['actor' => $jsonld['actor']]);
-    $edited = strtotime(is_string($u = $object['updated'] ?? '') ? $u : '') ?: 0;
+    if (!ActivityPub_Object_URI($id)) throw new Club_Inbox_Rejected('Invalid object identifier');
+    $updated = $object['updated'] ?? ''; $edited = 0;
+    if (is_string($updated) && preg_match('/^\d{4}-(\d\d)-(\d\d)T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/D', $updated, $m)
+        && checkdate((int)$m[1], (int)$m[2], (int)substr($updated, 0, 4))) $edited = strtotime($updated) ?: 0;
+    if ($edited > min(2147483647, time() + 86400) || $edited < 0) $edited = 0;
     $pdo = $db->prepare('select a.id, a.updated, a.clubs, u.shared_inbox from `activities` `a` join `users` `u` on a.uid = u.uid where a.object = :object and a.type = :type and u.actor = :actor');
     $pdo->execute([':object' => $id, ':type' => 'Create', ':actor' => $jsonld['actor']]);
     if (!($activity = $pdo->fetch(PDO::FETCH_ASSOC))) return Club_Inbox_Skip('update for a post we never announced, or not from its author', ['actor' => $jsonld['actor'], 'object' => $id]);
@@ -1133,6 +1242,7 @@ function Club_Inbox_Update($jsonld, $input) {
     $column = $poll ? 'polled' : 'updated';
     $vars = ['object' => $id, 'clubs' => $clubs, 'revision' => gmdate('Y-m-d\TH:i:s\Z', $revision)];
     return Club_DB_Transaction($what.' inbox', function () use ($db, $activity, $revision, $content, $summary, $clubs, $vars, $jsonld, $input, $id, $poll, $edit, $edited, $what, $column) {
+        if (!Club_Inbox_Lock_Announces($activity['id'])) return Club_Inbox_Skip('update after withdrawal', ['object' => $id]);
         $pdo = $db->prepare('update `activities` set `'.$column.'` = :revision where `id` = :id and `'.$column.'` < :revision');
         $pdo->execute([':id' => $activity['id'], ':revision' => $revision]);
         if (!$pdo->rowCount()) return Club_Inbox_Skip($what.' is a duplicate or older than what we relayed', ['object' => $id, 'revision' => gmdate('Y-m-d\TH:i:s\Z', $revision)]);
@@ -1237,16 +1347,20 @@ function Club_Notice_Expire($days = 30, $limit = 20, $interval = 600) {
 function Club_Notice_Revoke($notices) {
     global $db, $base;
     if (!$notices) return 0;
-    $ready = []; $failed = [];
+    $ready = []; $failed = []; $blocked = 0;
+    $blacklist = $db->prepare('select 1 from `blacklist` where `target` = :target');
     foreach ($notices as $notice) {
         $actor = (string)($notice['actor'] ?? '');
         if (($endpoint = Club_Notice_Endpoint($notice)) === false) {
             $failed[] = ['id' => (int)($notice['id'] ?? 0), 'actor' => $actor];
             continue;
         }
+        $blacklist->execute([':target' => $endpoint]);
+        if ($blacklist->fetchColumn()) { $blocked++; continue; }
         $notice['inbox'] = $endpoint; $ready[] = $notice;
     }
     if ($failed) Club_Log_Event('warning', 'notice revoke deferred, recipient endpoint unavailable', ['count' => count($failed), 'notices' => array_slice($failed, 0, 5)]);
+    if ($blocked) Club_Log_Event('info', 'notice revocations deferred for blacklisted inboxes', ['count' => $blocked]);
     if (!$ready || !($club = Club_Group_Signer())) return 0;
     usort($ready, function ($a, $b) { return (int)$a['id'] <=> (int)$b['id']; });
     $club_url = $base.'/club/'.$club;
@@ -1272,7 +1386,7 @@ function Club_Notice_Revoke($notices) {
                 Club_Log_Event('warning', 'notice revoke retained because delete was not queued', ['notice' => (int)$notice['id'], 'actor' => $notice['actor']]);
                 continue;
             }
-            $pdo = $db->prepare('delete from `notices` where `id` = :id');
+            $pdo = $db->prepare('update `notices` set `note` = null where `id` = :id');
             $pdo->execute([':id' => $notice['id']]);
             $deleted += $pdo->rowCount();
         }
@@ -1283,6 +1397,7 @@ function Club_Notice_Revoke($notices) {
 function Club_Notice_Send($actor, $type, $vars = [], $lang = null, $reply = null, $cooldown = 3600) {
     global $db, $base, $config;
     if (!($config['notice']['enabled'] ?? true) || empty($actor)) return false;
+    if (isset($reply) && !ActivityPub_Object_URI($reply)) return Club_Inbox_Skip('notice reply identifier is unusable', ['actor' => $actor]);
     if (!($club = Club_Group_Signer()) || !($user = Club_Actor_Get($actor))) return false;
 
     $locale = Club_I18n_Locale($lang);
@@ -1290,6 +1405,7 @@ function Club_Notice_Send($actor, $type, $vars = [], $lang = null, $reply = null
     return Club_DB_Transaction('notice enqueue', function () use ($db, $base, $config, $club, $user, $actor, $type, $reply, $cooldown, $locale, $content) {
         $pdo = $db->prepare('select `uid` from `users` where `uid` = :uid for update');
         $pdo->execute([':uid' => $user['uid']]);
+        if (!$pdo->fetchColumn()) return Club_Inbox_Skip('notice recipient removed', ['actor' => $actor]);
         $pdo = $db->prepare('select count(`id`) from `notices` where `uid` = :uid and `timestamp` >= :timestamp');
         $pdo->execute([':uid' => $user['uid'], ':timestamp' => time() - 86400]);
         if (($sent = $pdo->fetch(PDO::FETCH_COLUMN, 0)) >= ($limit = $config['notice']['limit'] ?? 20)) {
@@ -1580,7 +1696,7 @@ function Club_Endpoint_Decide($result, $fails, $since, $retry_at, $retries, $now
                 $plan['age'] = $since ? $now - $since : 0; $plan['endpoint'] = true; $plan['state'] = 'recovered';
             } return $plan;
         case 'dropped': $plan['queue'] = 'delete'; return $plan;
-        case 'local-dns': case 'local-proxy': $plan['queue'] = 'defer'; $plan['due_at'] = $now + 300; $plan['state'] = 'deferred';
+        case 'local-dns': case 'local-proxy': case 'local-sign': $plan['queue'] = 'defer'; $plan['due_at'] = $now + 300; $plan['state'] = 'deferred';
             if ($retry_at < $now + 300) { $plan['retry_at'] = $now + 300; $plan['endpoint'] = true; }
             return $plan;
     }
@@ -1749,7 +1865,7 @@ function Club_Endpoint_Repair($url, $now) {
 
 function Club_Endpoint_Require($url, $context = []) {
     if (($canonical = Club_Endpoint_Normalize($url)) !== false) return $canonical;
-    Club_Log_Event('warning', 'endpoint rejected, url cannot be normalized', array_merge(['url' => (string)$url], $context));
+    Club_Log_Event('warning', 'endpoint rejected, url cannot be normalized', array_merge(['url' => is_string($url) ? substr($url, 0, 255) : null], $context));
     return false;
 }
 
@@ -1865,7 +1981,7 @@ function Club_Endpoint_Sweep($limit = 200) {
     return $seen;
 }
 
-function Club_Endpoint_Upsert($task, $category) {
+function Club_Endpoint_Upsert($task, $category, &$empty = null) {
     global $db;
     if (!in_array($category, Club_Task_Category_List(), true)) throw new InvalidArgumentException('Unknown delivery category: '.$category);
     $pdo = $db->prepare('insert into `endpoints` (`url`, `next_at`, `'.$category.'_at`) select `incoming`.`url`, `incoming`.`next_at`, `incoming`.`next_at` from ('.
@@ -1873,7 +1989,20 @@ function Club_Endpoint_Upsert($task, $category) {
         ') as `incoming` order by `incoming`.`url` collate ascii_bin on duplicate key update `next_at` = greatest(`endpoints`.`retry_at`,'.
         ' if(`endpoints`.`next_at` is null, `incoming`.`next_at`, least(`endpoints`.`next_at`, `incoming`.`next_at`))), `'.$category.'_at` ='.
         ' if(`endpoints`.`'.$category.'_at` is null, `incoming`.`next_at`, least(`endpoints`.`'.$category.'_at`, `incoming`.`next_at`)), `idle_since` = 0');
-    return $pdo->execute([':tid' => $task]);
+    if (!$pdo->execute([':tid' => $task])) return false;
+    $pdo = $db->prepare('select `b`.`target` from `queues` `q` join `blacklist` `b` on `b`.`target` = `q`.`target` where `q`.`tid` = :tid order by `b`.`target` for update');
+    $pdo->execute([':tid' => $task]); $blocked = $pdo->fetchAll(PDO::FETCH_COLUMN); $empty = false;
+    foreach (array_chunk($blocked, 250) as $chunk) {
+        $targets = []; foreach ($chunk as $i => $target) $targets[':url'.$i] = $target;
+        $in = implode(',', array_keys($targets));
+        $pdo = $db->prepare('update `endpoints` set `next_at` = null, `follow_at` = null, `notice_at` = null, `announce_at` = null, `relay_at` = null,'.
+            ' `idle_since` = if(`idle_since` > 0, `idle_since`, :now), `lease_until` = 0, `lease_token` = null where `url` in ('.$in.')');
+        $pdo->execute([':now' => time()] + $targets);
+        $pdo = $db->prepare('delete from `queues` where `tid` = :tid and `target` in ('.$in.')'); $pdo->execute([':tid' => $task] + $targets);
+    }
+    $pdo = $db->prepare('delete from `tasks` where `tid` = :tid and not exists (select 1 from `queues` where `tid` = :check)'); $pdo->execute([':tid' => $task, ':check' => $task]);
+    $empty = (bool)$pdo->rowCount();
+    return true;
 }
 
 function Club_Delivery_Enqueue($signer, $clubs, $activity, $category, $direct, $inbox, $origin, &$error, &$reason) {
@@ -1890,7 +2019,8 @@ function Club_Delivery_Enqueue($signer, $clubs, $activity, $category, $direct, $
         return false;
     }
     if ($queued === false) throw new PDOException('queue insert returned false');
-    if (!Club_Endpoint_Upsert($task, $category)) throw new PDOException('endpoint upsert returned false');
+    if (!Club_Endpoint_Upsert($task, $category, $empty)) throw new PDOException('endpoint upsert returned false');
+    if ($direct && $empty) { $reason = 'blacklisted'; $error = 'target became blacklisted'; return false; }
     return true;
 }
 
@@ -2176,7 +2306,7 @@ function Club_DB_Retry($what, $run, $attempts = 3) {
 function Club_DB_Transaction($what, $run) {
     global $db;
     if ($db->inTransaction()) return $run();
-    return Club_DB_Retry($what, function () use ($db, $run) {
+    return Club_DB_Retry($what, function () use ($db, $run, $what) {
         $db->exec('set transaction isolation level read committed');
         $db->beginTransaction();
         try {
@@ -2227,7 +2357,7 @@ function Club_HTTP_Accept_ActivityPub($accept) {
 }
 
 function Club_HTTP_Cursor($cursor) {
-    return is_scalar($cursor) && preg_match('/^(\d+)\.(\d+)$/', (string)$cursor, $m) ? [(int)$m[1], (int)$m[2]] : false;
+    return is_string($cursor) && preg_match('/^(\d{1,10})\.(\d{1,10})$/D', $cursor, $m) && $m[1] <= 2147483647 && $m[2] <= 4294967295 ? [(int)$m[1], (int)$m[2]] : false;
 }
 
 // A lost response can follow a successful POST.
@@ -2238,9 +2368,23 @@ function Club_HTTP_Fallback($post, $status, $network_error, $unsent) {
     return $network_error;
 }
 
+function Club_HTTP_Full_Document($code, $headers) {
+    return $code >= 200 && $code < 300 && $code !== 206 && Club_HTTP_Header($headers, 'Content-Range') === '';
+}
+
 function Club_HTTP_Header($headers, $name) {
     foreach ((array)$headers as $k => $v) if (strcasecmp($k, $name) === 0) return $v;
     return '';
+}
+
+function Club_HTTP_Page($query, $outbox) {
+    $page = $query['page'] ?? null;
+    if (isset($page) && !in_array($page, ['last', 'true'], true)) return false;
+    $parsed = ['tail' => $page === 'last', 'min' => false, 'max' => false];
+    foreach (['min', 'max'] as $key) if (array_key_exists($key, $query)) {
+        if (($outbox && $page !== 'true') || $parsed['tail'] || !($parsed[$key] = Club_HTTP_Cursor($query[$key]))) return false;
+    }
+    return $parsed['min'] && $parsed['max'] ? false : $parsed;
 }
 
 function Club_HTTP_Proxy_Result($errno, $message, $connect, $connected, $sent) {
@@ -2255,12 +2399,13 @@ function Club_HTTP_Proxy_Result($errno, $message, $connect, $connected, $sent) {
 
 function Club_HTTP_Request($handle, $url, $headers, $options, $data = null, $ips = [], &$pinned = null, $traffic = 'federation', $reauthorize = null) {
     $routes = Club_Config_Proxy_Routes($traffic);
-    $first = Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, $pinned, $routes[0]);
+    $budget = $traffic === 'doh' || isset($data) ? 65536 : 1048576;
+    $first = Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, $pinned, $routes[0], $budget);
     if (!isset($routes[1]) || !$first['fallback']) return $first;
     Club_Log_Event('debug', 'outbound request switching route', ['traffic' => $traffic, 'url' => $url, 'next' => $routes[1] === '' ? 'direct' : 'proxy', 'http' => $first['status'], 'error' => $first['message']]);
     if (isset($reauthorize) && !$reauthorize()) return $first + ['lease_lost' => true];
     if (isset($data) && $traffic === 'federation') Club_Stat('http_requests');
-    $second = Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, $pinned, $routes[1]);
+    $second = Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, $pinned, $routes[1], $budget);
     if ($second['status'] === 403 && $first['status'] !== 403) {
         Club_Log_Event('debug', 'alternate route returned 403, keeping retryable failure', ['traffic' => $traffic, 'url' => $url]);
         return $first;
@@ -2299,18 +2444,32 @@ function Club_HTTP_Route($url, $ips, $proxy, &$pinned) {
     return $options;
 }
 
-function Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, &$pinned, $proxy) {
+function Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, &$pinned, $proxy, $budget = 1048576) {
     curl_reset($handle);
     $options[CURLOPT_URL] = $url;
-    $options[CURLOPT_RETURNTRANSFER] = true;
+    $options[CURLOPT_PATH_AS_IS] = true;
+    if (defined('CURLOPT_REQUEST_TARGET') && ($fields = ActivityPub_Sign_Fields($url))) $options[CURLOPT_REQUEST_TARGET] = $fields['target'];
     $options[CURLOPT_HTTPHEADER] = array_map(function ($key, $value) { return $key.': '.$value; }, array_keys($headers), array_values($headers));
-    $options[CURLOPT_HEADERFUNCTION] = function ($ch, $line) use (&$response_headers) {
-        $length = strlen($line);
-        $line = trim($line);
-        if (stripos($line, 'HTTP/') === 0) $response_headers = ['Status-Line' => $line];
-        elseif (strpos($line, ':') !== false) {
+    $options[CURLOPT_WRITEFUNCTION] = function ($ch, $chunk) use (&$body, &$received, &$limit, $budget, $data) {
+        $length = strlen($chunk); $received += $length;
+        if ($received > $budget) { $limit = 'body'; return 0; }
+        if (!isset($data)) $body .= $chunk;
+        return $length;
+    };
+    $options[CURLOPT_HEADERFUNCTION] = function ($ch, $line) use (&$response_headers, &$raw_headers, &$fields_count, &$status, &$block, &$skip_connect, &$limit) {
+        $length = strlen($line); $raw_headers += $length;
+        if ($raw_headers > 65536) { $limit = 'headers'; return 0; }
+        $line = rtrim($line, "\r\n");
+        if (preg_match('~^HTTP/\S+ ([0-9]{3})(?: |$)~i', $line, $m)) { $block = (int)$m[1]; $status = 0; $response_headers = ['Status-Line' => $line]; }
+        elseif ($line === '' && $block) {
+            if ($skip_connect && $block >= 200) $skip_connect = false;
+            elseif ($block >= 200) $status = $block;
+            $block = 0;
+        } elseif (strpos($line, ':') !== false) {
+            if (++$fields_count > 128) { $limit = 'fields'; return 0; }
+            if (!$block) return $length;
             list($key, $value) = array_map('trim', explode(':', $line, 2));
-            $response_headers[$key] = isset($response_headers[$key]) ? $response_headers[$key].','.$value : $value;
+            $key = strtolower($key); $response_headers[$key] = isset($response_headers[$key]) ? $response_headers[$key].','.$value : $value;
         }
         return $length;
     };
@@ -2326,10 +2485,12 @@ function Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, &$pi
             if ($left < 1) break;
             $options[CURLOPT_TIMEOUT_MS] = $left;
         }
-        $response_headers = [];
+        $response_headers = []; $status = $block = $raw_headers = $fields_count = $received = 0; $body = ''; $limit = null;
+        $skip_connect = stripos($proxy, 'http://') === 0 && !defined('CURLOPT_SUPPRESS_CONNECT_HEADERS');
         if (!curl_setopt_array($handle, Club_HTTP_Route($url, isset($ip) ? [$ip] : $ips, $proxy, $pinned) + $options))
-            return ['status' => 0, 'headers' => [], 'response' => false, 'curl_error' => true, 'error' => true, 'proxy_error' => $proxy !== '', 'fallback' => false, 'message' => 'could not configure outbound request'];
-        $response = curl_exec($handle); $curl_error = curl_errno($handle); $status = (int)curl_getinfo($handle, CURLINFO_HTTP_CODE);
+            return ['status' => 0, 'headers' => [], 'limit' => null, 'body_bytes' => 0, 'header_bytes' => 0, 'response' => false, 'curl_error' => true,
+                'error' => true, 'proxy_error' => $proxy !== '', 'fallback' => false, 'message' => 'could not configure outbound request'];
+        curl_exec($handle); $curl_error = curl_errno($handle);
         $message = $curl_error ? curl_error($handle) : '';
         $unsent = false;
         if (!$curl_error) break;
@@ -2350,7 +2511,8 @@ function Club_HTTP_Transfer($handle, $url, $headers, $options, $data, $ips, &$pi
     if (!$curl_error && $http_error) $message = $response_headers['Status-Line'] ?? '';
     $network_error = $proxy_error || in_array($curl_error, [CURLE_COULDNT_RESOLVE_PROXY, CURLE_COULDNT_RESOLVE_HOST, CURLE_COULDNT_CONNECT, CURLE_WEIRD_SERVER_REPLY, CURLE_PARTIAL_FILE,
         CURLE_OPERATION_TIMEOUTED, CURLE_SSL_CONNECT_ERROR, CURLE_GOT_NOTHING, CURLE_SEND_ERROR, CURLE_RECV_ERROR, CURLE_SSL_CACERT, 16, 92, 97], true);
-    return ['status' => $status, 'headers' => $response_headers, 'response' => $response, 'curl_error' => (bool)$curl_error, 'error' => $error, 'proxy_error' => $proxy_error,
+    return ['status' => $status, 'headers' => $response_headers, 'body_bytes' => $received, 'header_bytes' => $raw_headers, 'limit' => $limit,
+        'response' => $curl_error ? false : $body, 'curl_error' => (bool)$curl_error, 'error' => $error, 'proxy_error' => $proxy_error,
         'fallback' => Club_HTTP_Fallback(isset($data), $status, $network_error, $unsent), 'message' => $message];
 }
 
@@ -2361,16 +2523,17 @@ function Club_Resolver_Answer($json, $type) {
     if ($json['Status'] !== 0 && $json['Status'] !== 3) return false;
     if (!empty($json['TC'])) return false;
     if (isset($json['Answer']) && !is_array($json['Answer'])) return false;
-    if ($json['Status'] === 3) return [];
     $want = $type === 'AAAA' ? 28 : 1; $ips = []; $seen = 0; $junk = false;
     foreach ($json['Answer'] ?? [] as $rr) {
         if (!is_array($rr)) { $junk = true; continue; }
         if ((int)($rr['type'] ?? 0) !== $want) continue;
         $seen++;
-        if (filter_var($rr['data'] ?? '', FILTER_VALIDATE_IP)) $ips[] = $rr['data'];
+        if (is_string($ip = $rr['data'] ?? null) && filter_var($ip, FILTER_VALIDATE_IP, $want === 28 ? FILTER_FLAG_IPV6 : FILTER_FLAG_IPV4)) {
+            $ip = inet_ntop(inet_pton($ip)); if (count($ips) < 8) $ips[$ip] = $ip;
+        }
     }
-    if ($junk || ($seen && !$ips)) return false;
-    return $ips;
+    if ($junk || ($seen && (!$ips || $json['Status'] === 3))) return false;
+    return array_values($ips);
 }
 
 function Club_Resolver_Budget() {
@@ -2425,10 +2588,11 @@ function Club_Resolver_Cleanup($ttl = 86400, $limit = 200) {
     return $rows;
 }
 
-function Club_Resolver_Deferred($set = null) {
+function Club_Resolver_Deferred($set = null, &$reason = null) {
     static $deferred = false;
-    if (isset($set)) $deferred = (bool)$set;
-    return $deferred;
+    if (isset($set)) $deferred = $set === true ? 'contention' : $set;
+    $reason = $deferred;
+    return (bool)$deferred;
 }
 
 function Club_Resolver_DoH($resolver, $host, $type) {
@@ -2439,7 +2603,7 @@ function Club_Resolver_DoH($resolver, $host, $type) {
         CURLOPT_TIMEOUT => max(1, (int)($config['dns']['timeout'] ?? 5)), CURLOPT_CONNECTTIMEOUT => max(1, (int)($config['dns']['connect-timeout'] ?? 3))];
     $curl = Club_HTTP_Request($handle, $resolver['url'].'?name='.urlencode($host).'&type='.$type, ['Accept' => 'application/dns-json'], $options, null, $resolver['ip'] ?? [], $pinned, 'doh');
     $json = json_decode((string)$curl['response'], 1);
-    $answer = $curl['error'] ? false : Club_Resolver_Answer($json, $type);
+    $answer = !$curl['error'] && Club_HTTP_Full_Document($curl['status'], $curl['headers']) ? Club_Resolver_Answer($json, $type) : false;
     if ($answer === null) Club_Log_Event('info', 'doh reports the domain fails to resolve', ['resolver' => $resolver['url'], 'host' => $host, 'type' => $type]);
     elseif ($answer === false)
         Club_Log_Event('warning', 'doh query failed', ['resolver' => $resolver['url'], 'host' => $host, 'type' => $type,
@@ -2449,6 +2613,8 @@ function Club_Resolver_DoH($resolver, $host, $type) {
 
 function Club_Resolver_Get($host, $ttl = 300, $miss = 60, $stale = 3600) {
     $now = time(); Club_Resolver_Deferred(false);
+    if (!is_string($host) || ($host = Club_Url_Host($host)) === false) return false;
+    if (filter_var($host, FILTER_VALIDATE_IP)) return [$host];
     $row = Club_Resolver_Read($host);
     if ($row && $row['checked_at'] > $now - ($row['ips'] === '' ? $miss : $ttl)) return Club_Resolver_Cached($host, $row, $now, $miss);
     $stock = $row && $row['ips'] !== '' && $row['checked_at'] > $now - $stale ? $row['ips'] : null;
@@ -2473,7 +2639,7 @@ function Club_Resolver_Get($host, $ttl = 300, $miss = 60, $stale = 3600) {
             Club_Log_Event('debug', 'dns lookup failed, reusing cached address', ['host' => $host, 'age' => $now - $row['checked_at'], 'ip' => $stock]);
             return explode(',', $stock);
         }
-        Club_Stat('dns_unreachable'); Club_Resolver_Deferred(true);
+        Club_Stat('dns_unreachable'); Club_Resolver_Deferred('unreachable');
         Club_Log_Event('warning', 'dns lookup failed, no resolver answered', ['host' => $host]);
         return false;
     }
@@ -2491,39 +2657,39 @@ function Club_Resolver_Get($host, $ttl = 300, $miss = 60, $stale = 3600) {
 }
 
 function Club_Resolver_Healthy($mark = false, $window = 600) {
-    global $db, $config; static $last = 0;
+    global $db, $config; static $last = 0, $checked = 0;
     if ($mark !== false) { $last = max($last, $mark === true ? time() : (int)$mark); return true; }
     if ($last > time() - $window) return true;
+    if ($checked > time() - 10) return false;
+    $checked = time();
     $pdo = $db->prepare('select `checked_at` from `dns` where length(`ips`) > 0 and `checked_at` > :window limit 1');
     $pdo->execute([':window' => time() - $window]);
     if ($resolved = $pdo->fetch(PDO::FETCH_COLUMN, 0)) { $last = max($last, (int)$resolved); return true; }
-    Club_Resolver_Get($config['base']);
+    Club_Resolver_Get(parse_url('https://'.$config['base'], PHP_URL_HOST));
     return $last > time() - $window;
 }
 
 function Club_Resolver_List() {
     global $config;
-    return $config['dns']['resolver'] ?? [['url' => 'https://one.one.one.one/dns-query', 'ip' => ['1.1.1.1', '1.0.0.1', '2606:4700:4700::1111', '2606:4700:4700::1001']],
+    return !empty($config['dns']['resolver']) ? $config['dns']['resolver'] : [['url' => 'https://one.one.one.one/dns-query', 'ip' => ['1.1.1.1', '1.0.0.1', '2606:4700:4700::1111', '2606:4700:4700::1001']],
         ['url' => 'https://dns.google/resolve', 'ip' => ['8.8.8.8', '8.8.4.4', '2001:4860:4860::8888', '2001:4860:4860::8844']]];
 }
 
 function Club_Resolver_Query($host) {
     static $seq = 0;
-    $ref = getmypid().'-'.++$seq; $start = microtime(true); $ips = false; $used = ''; $servfail = 0; $silent = 0;
+    $ref = getmypid().'-'.++$seq; $start = microtime(true); $ips = false; $used = ''; $servfail = 0;
     Club_Log_Event('debug', 'resolver_query_started', ['sapi' => PHP_SAPI, 'slot' => Club_Worker_Slot(), 'pid' => getmypid(), 'host' => $host, 'query_ref' => $ref]);
     foreach (Club_Resolver_List() as $resolver) {
         $a = Club_Resolver_DoH($resolver, $host, 'A');
         if ($a === null) { $servfail++; $a = false; }
-        elseif ($a === false) $silent++;
         $aaaa = Club_Resolver_DoH($resolver, $host, 'AAAA');
         if ($aaaa === null) { $servfail++; $aaaa = false; }
-        elseif ($aaaa === false) $silent++;
         $found = array_values(array_unique(array_merge(is_array($a) ? $a : [], is_array($aaaa) ? $aaaa : [])));
         if (!$found && ($a === false || $aaaa === false)) continue;
         $ips = $found; $used = $resolver['url'];
         break;
     }
-    if ($ips === false && $servfail && !$silent) { $ips = []; Club_Stat('dns_servfail'); }
+    if ($ips === false && $servfail) Club_Stat('dns_servfail');
     $ms = (microtime(true) - $start) * 1000;
     Club_Stat('dns_queries'); Club_Stat_Sample('resolver_query_ms', $ms);
     Club_Log_Event('debug', 'resolver_query_finished', ['query_ref' => $ref, 'ms' => round($ms), 'resolver' => $used, 'found' => $ips === false ? -1 : count($ips)]);
@@ -2534,7 +2700,15 @@ function Club_Resolver_Read($host) {
     global $db;
     $pdo = $db->prepare('select `ips`, `checked_at`, `lock_until` from `dns` where `host` = :host');
     $pdo->execute([':host' => $host]); Club_Stat('scheduler_db_ops');
-    return $pdo->fetch(PDO::FETCH_ASSOC) ?: null;
+    $row = $pdo->fetch(PDO::FETCH_ASSOC);
+    if (!$row || $row['ips'] === '') return $row ?: null;
+    $addresses = [4 => [], 16 => []];
+    foreach (explode(',', $row['ips']) as $ip) if (($bin = @inet_pton($ip)) !== false && count($addresses[$n = strlen($bin)]) < 8) {
+        $ip = inet_ntop($bin); $addresses[$n][$ip] = $ip;
+    }
+    $row['ips'] = implode(',', array_merge(array_values($addresses[4]), array_values($addresses[16])));
+    if ($row['ips'] === '') $row['checked_at'] = 0;
+    return $row;
 }
 
 function Club_Resolver_Release($host, $token) {
@@ -2586,14 +2760,24 @@ function Club_Config_Proxy_Routes($traffic) {
 function Club_Config_Validate() {
     global $config; $fatal = []; $warn = [];
     if (!is_array($config)) return [['config.php did not define $config as an array'], []];
-    if (!is_string($config['base'] ?? null) || $config['base'] === '') $fatal[] = 'config.base must be a non-empty host name';
+    foreach (['mysql', 'node', 'club', 'dns', 'default', 'worker', 'notice'] as $section)
+        if (array_key_exists($section, $config) && !is_array($config[$section])) $fatal[] = 'config.'.$section.' must be an array';
+    if ($fatal) return [$fatal, []];
+    $authority = $config['base'] ?? null;
+    if (!is_string($authority) || !preg_match('/^(\[[a-f0-9:.]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?$/iD', $authority, $m)
+        || !($m[1][0] === '[' ? filter_var(substr($m[1], 1, -1), FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) : filter_var($m[1], FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME))
+        || (isset($m[2]) && ((int)$m[2] < 1 || (int)$m[2] > 65535))) $fatal[] = 'config.base must contain an HTTPS host and optional port';
+    else $config['base'] = strtolower($m[1]).(isset($m[2]) ? ':'.(int)$m[2] : '');
     foreach (['host', 'database', 'username', 'password'] as $key) if (!is_string($config['mysql'][$key] ?? null)) $fatal[] = 'config.mysql.'.$key.' must be a string';
     if (!is_string($tz = $config['node']['timezone'] ?? null) || !in_array($tz, timezone_identifiers_list(DateTimeZone::ALL_WITH_BC), true))
         $fatal[] = 'config.node.timezone must be a valid timezone identifier';
-    if (!is_array($config['club']['suspended-names'] ?? null)) $fatal[] = 'config.club.suspended-names must be an array, Club_Group_Create passes it to in_array unguarded';
+    if (!is_array($names = $config['club']['suspended-names'] ?? null) || count(array_filter($names, 'is_string')) !== count($names)) $fatal[] = 'config.club.suspended-names must be a list of names';
+    else $config['club']['suspended-names'] = array_map('strtolower', $names);
     foreach (['pdo_mysql', 'curl', 'openssl', 'json'] as $ext) if (!extension_loaded($ext)) $fatal[] = 'ext-'.$ext.' is required but not loaded';
 
     $node = (array)($config['node'] ?? []);
+    foreach (['node' => 'inbox-verify', 'club' => 'open-registrations', 'notice' => 'enabled'] as $section => $key)
+        if (array_key_exists($key, $config[$section] ?? []) && !is_bool($config[$section][$key])) $fatal[] = 'config.'.$section.'.'.$key.' must be boolean';
     if (!array_key_exists('proxy', $node)) $warn[] = 'config.node.proxy is missing, outbound requests use a direct connection';
     elseif (($proxy = $node['proxy']) !== '') {
         $userinfo = '(?:[a-z0-9._~!$&\'()*+,;=:-]|%[0-9a-f]{2})+';
@@ -2609,39 +2793,65 @@ function Club_Config_Validate() {
         if (!in_array($node['proxy-mode'], ['direct-first', 'proxy-first', 'proxy-only'], true)) $fatal[] = 'config.node.proxy-mode must be direct-first, proxy-first or proxy-only';
     } elseif (!empty($node['proxy'])) $warn[] = 'config.node.proxy-mode is missing, traffic selected for the proxy uses the proxy only';
 
-    if (!is_string($level = $config['node']['log-level'] ?? 'info') || !in_array(strtolower($level), ['silent', 'error', 'warning', 'info', 'debug'], true))
+    if (($node['log-level'] ?? null) === false) $config['node']['log-level'] = 'silent';
+    elseif (!is_string($level = $node['log-level'] ?? 'info') || !in_array(strtolower($level), ['silent', 'error', 'warning', 'info', 'debug'], true)) {
         $warn[] = 'config.node.log-level is not one of silent/error/warning/info/debug, falling back to info';
-    if (!Club_I18n_Match($config['node']['language'] ?? 'en')) $warn[] = 'config.node.language is not a locale under app/template/i18n/, falling back to en';
-    foreach (['node' => ['name', 'description'], 'default' => ['avatar', 'banner', 'summary', 'nickname', 'infoname']] as $section => $keys)
-        foreach ($keys as $key) if (!isset($config[$section][$key])) $warn[] = 'config.'.$section.'.'.$key.' is missing, pages and the actor document read it unguarded';
-    foreach (['name', 'email'] as $key) if (!isset($config['node']['maintainer'][$key])) $warn[] = 'config.node.maintainer.'.$key.' is missing, the home page reads it unguarded';
-    if (!isset($config['club']['open-registrations'])) $warn[] = 'config.club.open-registrations is missing, no new club can be created';
-    if (Club_Config_Number($config['node']['log-retention'] ?? 30, 0) === false) $warn[] = 'config.node.log-retention must be a non-negative integer, 0 disables cleanup';
+        $config['node']['log-level'] = 'info';
+    }
+    if (!is_string($lang = $node['language'] ?? 'en') || !Club_I18n_Match($lang)) {
+        $warn[] = 'config.node.language is unknown, falling back to en'; $config['node']['language'] = 'en';
+    }
+    foreach (['node' => ['name', 'description'], 'default' => ['avatar', 'banner', 'summary', 'nickname']] as $section => $keys)
+        foreach ($keys as $key) if (!is_string($config[$section][$key] ?? null)) { $warn[] = 'config.'.$section.'.'.$key.' must be a string, using empty text'; $config[$section][$key] = ''; }
+    $map = $config['default']['infoname'] ?? [];
+    if (!is_array($map) || count(array_filter($map, 'is_string')) !== count($map) || count(array_filter(array_keys($map), 'is_string')) !== count($map))
+        $fatal[] = 'config.default.infoname must map tags to strings';
+    else $config['default']['infoname'] = $map;
+    if (!is_array($config['node']['maintainer'] ?? null)) $config['node']['maintainer'] = [];
+    foreach (['name', 'email'] as $key) if (!is_string($config['node']['maintainer'][$key] ?? null)) {
+        $warn[] = 'config.node.maintainer.'.$key.' must be a string, using empty text'; $config['node']['maintainer'][$key] = '';
+    }
+    if (!isset($config['club']['open-registrations'])) { $warn[] = 'config.club.open-registrations is missing, registrations closed'; $config['club']['open-registrations'] = false; }
     if (!is_array($delivery = $config['worker']['delivery'] ?? null)) $warn[] = 'config.worker.delivery should define follow/notice/announce/relay worker counts, falling back to the legacy split';
     else foreach (Club_Task_Category_List() as $category) if (Club_Config_Number($delivery[$category] ?? null, 1) === false)
         $warn[] = 'config.worker.delivery.'.$category.' must be at least 1, falling back to the default';
-    if (Club_Config_Number($config['worker']['probe'] ?? 1, 0) === false) $warn[] = 'config.worker.probe must be a non-negative integer, 0 means blacklisted endpoints are never restored';
-    if (!is_array($resolvers = $config['dns']['resolver'] ?? []) || !$resolvers) $warn[] = 'config.dns.resolver is empty or not a list, falling back to the built-in defaults';
+    $resolvers = $config['dns']['resolver'] ?? []; $config['dns']['resolver'] = [];
+    if (!is_array($resolvers) || !$resolvers) $warn[] = 'config.dns.resolver is empty or not a list, using built-in resolvers';
     else foreach (array_values($resolvers) as $i => $resolver) {
-        if (!is_array($resolver) || !is_string($url = $resolver['url'] ?? null) || !preg_match('#^https://#i', $url)) $warn[] = 'config.dns.resolver['.$i.'].url must be an https URL';
-        foreach (is_array($resolver['ip'] ?? []) ? $resolver['ip'] : [$resolver['ip'] ?? null] as $ip) if (isset($ip) && !filter_var($ip, FILTER_VALIDATE_IP))
-            $warn[] = 'config.dns.resolver['.$i.'].ip contains something that is not an IP address: '.substr((string)$ip, 0, 60);
-    }
-    foreach (['timeout', 'connect-timeout'] as $key) if (Club_Config_Number($config['dns'][$key] ?? 5, 1) === false)
-        $warn[] = 'config.dns.'.$key.' must be at least 1 second, it is clamped to 1 at query time';
-    if (Club_Config_Number($config['club']['relay-limit'] ?? 512, 1) === false) $warn[] = 'config.club.relay-limit must be at least 1 KB, edits and deletes would never be relayed';
-    if (Club_Config_Number($config['club']['create-limit'] ?? 10, 0) === false) $warn[] = 'config.club.create-limit must be a non-negative integer, 0 disables the hourly cap';
-    if (Club_Config_Number($config['notice']['limit'] ?? 20, 0) === false) $warn[] = 'config.notice.limit must be a non-negative integer';
-    if (Club_Config_Number($config['notice']['retention'] ?? 30, 0) === false) $warn[] = 'config.notice.retention must be a non-negative integer, 0 disables cleanup';
-    if (!is_string($system = Club_Group_System()) || strlen($system) > 30 || !preg_match('/^[a-zA-Z_][a-zA-Z0-9_]+$/u', $system))
-        $warn[] = 'config.club.system-name is not a valid club name, notices and actor fetches would have no signer';
-    foreach (array_keys(is_array($limits = $config['club']['limits'] ?? []) ? $limits : []) as $club)
-        foreach (Club_Limit_Rules($club) as $i => $rule) {
-            if (!in_array(strtolower(is_string($t = $rule['type'] ?? null) ? $t : ''), ['user', 'club', 'site', 'dupl'], true))
-                $warn[] = 'config.club.limits.'.$club.'['.$i.'].type is not one of user/club/site/dupl, it counts per user';
-            if (Club_Config_Number($rule['hours'] ?? 0, 1) === false || Club_Config_Number($rule['limit'] ?? 0, 1) === false)
-                $warn[] = 'config.club.limits.'.$club.'['.$i.'] needs hours and limit to be at least 1, the rule is skipped';
+        $url = is_array($resolver) ? Club_Endpoint_Normalize($resolver['url'] ?? null) : false;
+        if (!$url || strpos($url, 'https://') !== 0) { $warn[] = 'config.dns.resolver['.$i.'].url must be an HTTPS URL, skipping resolver'; continue; }
+        $ips = $resolver['ip'] ?? []; if (is_string($ips)) $ips = [$ips];
+        if (!is_array($ips) || count(array_filter($ips, function ($ip) { return is_string($ip) && filter_var($ip, FILTER_VALIDATE_IP); })) !== count($ips)) {
+            $warn[] = 'config.dns.resolver['.$i.'].ip must contain valid IP addresses, skipping resolver'; continue;
         }
+        $config['dns']['resolver'][] = ['url' => $url, 'ip' => array_values(array_unique($ips))];
+    }
+    $config['dns']['resolver'] = Club_Resolver_List();
+    foreach (['node' => ['log-retention' => [0,30]], 'worker' => ['probe' => [0,1]], 'dns' => ['timeout' => [1,5], 'connect-timeout' => [1,3]],
+        'club' => ['relay-limit' => [0,512], 'create-limit' => [0,10]], 'notice' => ['limit' => [0,20], 'retention' => [0,30]]] as $section => $fields)
+        foreach ($fields as $key => $range) {
+            list($min, $default) = $range; $value = Club_Config_Number($config[$section][$key] ?? $default, $min);
+            if ($value === false) $warn[] = 'config.'.$section.'.'.$key.' must be an integer >= '.$min.', using '.$default;
+            $config[$section][$key] = $value === false ? $default : $value;
+        }
+    if ($config['club']['relay-limit'] === 0) $warn[] = 'config.club.relay-limit is 0, raw relay is disabled';
+    if (!is_string($system = Club_Group_System()) || !preg_match('/^[a-zA-Z_][a-zA-Z0-9_]{1,29}$/D', $system)) {
+        $warn[] = 'config.club.system-name is invalid, using system'; $config['club']['system-name'] = 'system';
+    }
+    if (!is_array($limits = $config['club']['limits'] ?? [])) $fatal[] = 'config.club.limits must be an array';
+    foreach (array_keys(is_array($limits) ? $limits : []) as $club) {
+        if (!is_array($limits[$club])) { $fatal[] = 'config.club.limits.'.$club.' must contain rules'; continue; }
+        $rules = Club_Limit_Rules($club); $config['club']['limits'][$club] = [];
+        foreach ($rules as $i => $rule) {
+            if (!is_array($rule) || !is_string($rule['type'] ?? null)) { $fatal[] = 'config.club.limits.'.$club.'['.$i.'].type must be a string'; continue; }
+            $rule['type'] = strtolower($rule['type']);
+            if (!in_array($rule['type'], ['user', 'club', 'site', 'dupl'], true)) { $warn[] = 'config.club.limits.'.$club.'['.$i.'].type is unknown, using user'; $rule['type'] = 'user'; }
+            if (Club_Config_Number($rule['hours'] ?? 0, 1) === false || Club_Config_Number($rule['limit'] ?? 0, 1) === false) {
+                $warn[] = 'config.club.limits.'.$club.'['.$i.'] needs positive hours and limit, skipping rule'; continue;
+            }
+            $config['club']['limits'][$club][] = $rule;
+        }
+    }
     return [$fatal, $warn];
 }
 
@@ -2660,7 +2870,8 @@ function Club_Log_Dir($dir = '') {
     if ($dir !== '' && !Club_Log_Dir()) return false;
     $path = APP_ROOT.'/logs'.($dir === '' ? '' : '/'.$dir);
     if (!is_dir($path)) {
-        if (!@mkdir($path, 0777, true) && !is_dir($path)) return false;
+        $mask = umask(0);
+        try { if (!@mkdir($path, 0777, true) && !is_dir($path)) return false; } finally { umask($mask); }
         @chmod($path, 0777);
     } elseif ((fileperms($path) & 0777) !== 0777) @chmod($path, 0777);
     return $path;
@@ -2684,17 +2895,18 @@ function Club_Log_Level($level) {
 }
 
 function Club_Log_Name($dir, $parts) {
-    if (!Club_Log_Level('error') || !($path = Club_Log_Dir($dir))) return '';
+    if (!Club_Log_Level('error') || !Club_Log_Dir($dir)) return '';
     $name = date('Y-m-d_H-i-s');
     foreach ((array)$parts as $part) if (($part = Club_Log_Slug($part)) !== '') $name .= '_'.$part;
-    $name = $base = substr($name, 0, 180);
-    for ($i = 1; $i < 100 && glob($path.'/'.$name.'*'); $i++) $name = $base.'-'.$i;
-    return $name;
+    $name = substr($name, 0, 160);
+    while (!preg_match('//u', $name)) $name = substr($name, 0, -1);
+    return $name.'-'.bin2hex(random_bytes(8));
 }
 
 function Club_Log_Put($file, $data, $flags = 0) {
     $new = !is_file($file);
-    if (@file_put_contents($file, $data, $flags) === false) return false;
+    $mask = umask(0);
+    try { if (@file_put_contents($file, $data, $flags | LOCK_EX) === false) return false; } finally { umask($mask); }
     if ($new || (fileperms($file) & 0777) !== 0666) @chmod($file, 0666);
     return true;
 }
@@ -2716,7 +2928,7 @@ function Club_Log_Shift($dirs = ['event', 'stat']) {
         if (!($path = Club_Log_Dir($dir))) { Club_Log_Console('warning', 'log shift skipped, cannot create directory', ['dir' => $dir]); continue; }
         $file = $path.'/'.date('Y-m-d').'.log';
         if (!is_file($file) || !filesize($file)) { Club_Log_Event('debug', 'log shift skipped, nothing to move', ['file' => $file]); continue; }
-        for ($i = 1; $i < 100 && is_file($file.sprintf('.%03d', $i)); $i++);
+        for ($i = 1; is_file($file.sprintf('.%03d', $i)); $i++);
         error_clear_last();
         if (@rename($file, $target = $file.sprintf('.%03d', $i))) continue;
         Club_Log_Console('warning', 'log shift failed, still appending to the previous file', ['file' => $file, 'target' => $target, 'error' => error_get_last()['message'] ?? '']);
@@ -2957,23 +3169,35 @@ function Club_IP_Public($ip) {
 }
 
 function Club_Url_Absolute($url, $base) {
-    if (preg_match('#^https?://#i', $url)) return $url;
-    if (empty($parts = parse_url($base)) || empty($parts['host'])) return '';
-    if (substr($url, 0, 2) === '//') return $parts['scheme'].':'.$url;
-    $root = $parts['scheme'].'://'.$parts['host'].(isset($parts['port']) ? ':'.$parts['port'] : '');
-    if (substr($url, 0, 1) === '/') return $root.$url;
-    $path = $parts['path'] ?? '/';
-    return $root.substr($path, 0, strrpos($path, '/') + 1).$url;
+    if (!preg_match('~^(https?://[^/?#]+)([^?#]*)(\?[^#]*)?~i', $base, $b) || !is_string($url)) return '';
+    if (substr($url, 0, 2) === '//') $url = substr($b[1], 0, strpos($b[1], ':') + 1).$url;
+    if (preg_match('~^[a-z][a-z0-9+.-]*:~i', $url)) {
+        if (!preg_match('~^(https?://[^/?#]+)([^?#]*)([?#].*)?$~iD', $url, $m)) return '';
+        $root = $m[1]; $path = $m[2]; $suffix = $m[3] ?? '';
+    } else {
+        $root = $b[1]; $path = substr($url, 0, strcspn($url, '?#')); $suffix = substr($url, strlen($path));
+        if ($path === '') return $root.$b[2].(substr($suffix, 0, 1) === '?' ? '' : ($b[3] ?? '')).$suffix;
+        if ($path[0] !== '/') $path = preg_replace('~[^/]*$~D', '', $b[2] ?: '/').$path;
+    }
+    if ($path === '') return $root.$suffix;
+    $out = [];
+    foreach (explode('/', substr($path, 1)) as $part) {
+        if ($part === '..') array_pop($out);
+        elseif ($part !== '.') $out[] = $part;
+    }
+    if (preg_match('~/\.\.?$~D', $path)) $out[] = '';
+    return $root.'/'.implode('/', $out).$suffix;
 }
 
 function Club_Url_Host($input) {
     $host = strtolower(rtrim(trim((string)$input, " \t\n\r\0\x0B[]"), '.'));
     if (filter_var($host, FILTER_VALIDATE_IP)) return inet_ntop(inet_pton($host));
-    if (!preg_match('/^[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)*$/', $host)) return false;
+    if (strlen($host) > 253 || !preg_match('/^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?)*$/D', $host)) return false;
     return $host;
 }
 
 function Club_Url_Public($url) {
+    if (!is_string($url) || preg_match('~[\x00-\x20\x7f\\\\]~', $url) || !preg_match('~^(https?://[^/?#]+)~i', $url, $m) || !Club_Endpoint_Normalize($m[1].'/')) return false;
     $parts = parse_url((string)$url);
     if (empty($parts['host']) || !in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'])) return false;
     $host = trim($parts['host'], '[]');
